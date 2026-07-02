@@ -1,16 +1,14 @@
-from ..catalog import ZMQRun
 import asyncio
 import logging
-from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from itertools import count
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
 import numpy as np
 from bluesky_queueserver_api import BPlan
 from bluesky_queueserver_api.zmq import REManagerAPI
-from bluesky.callbacks.zmq import RemoteDispatcher
 from IPython.terminal.embed import InteractiveShellEmbed
+
+from ..catalog import ZMQRun
 
 LOGGER = logging.getLogger(__name__)
 

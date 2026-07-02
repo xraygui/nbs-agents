@@ -276,7 +276,6 @@ class ZMQCatalog:
         doc : dict
             Bluesky document.
         """
-        print(f"Received document: {name}")
         if name == "start":
             self._process_start(doc)
         elif name == "descriptor":
