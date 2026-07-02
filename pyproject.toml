@@ -28,7 +28,10 @@ dependencies = ["bluesky",
     'tomli ; python_version < "3.11"']
 
 [project.urls]
-homepage = "https://github.com/xraygui/nbs-bl"
+homepage = "https://github.com/xraygui/nbs-agents"
+
+[project.scripts]
+nbs-agents-runner = "nbs_agents.runner:main"
 
 [tool.hatch.version]
 source = "vcs"
@@ -36,3 +39,9 @@ source = "vcs"
 [tool.pixi.workspace]
 channels = ["conda-forge"]
 platforms = ["linux-64"]
+
+[tool.pixi.pypi-dependencies]
+nbs-agents = {path = ".", editable = true}
+
+[tool.pixi.tasks]
+agent-runner = "nbs-agents-runner"
