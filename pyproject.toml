@@ -25,6 +25,11 @@ dependencies = ["bluesky",
     "numpy",
     "ipython",
     "numpydoc",
+    "scikit-learn",
+    "matplotlib",
+    "numpyro",
+    "jax",
+    "tinygp",
     'tomli ; python_version < "3.11"']
 
 [project.urls]
@@ -32,6 +37,12 @@ homepage = "https://github.com/xraygui/nbs-agents"
 
 [project.scripts]
 nbs-agents-runner = "nbs_agents.runner:main"
+
+[project.optional-dependencies]
+gui = ["nbs-gui", "qtpy"]
+
+[project.entry-points."nbs_gui.plans"]
+nbs-agents-block = "nbs_agents.qt.plans.agent_block:AgentBlockWidget"
 
 [tool.hatch.version]
 source = "vcs"
