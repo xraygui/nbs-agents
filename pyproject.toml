@@ -18,7 +18,8 @@ classifiers = [
     "Operating System :: OS Independent",
     "Intended Audience :: Science/Research"
 ]
-dependencies = ["bluesky",
+dependencies = [
+    "bluesky",
     "bluesky-queueserver",
     "bluesky-queueserver-api",
     "tiled",
@@ -30,7 +31,22 @@ dependencies = ["bluesky",
     "numpyro",
     "jax",
     "tinygp",
-    'tomli ; python_version < "3.11"']
+    'tomli ; python_version < "3.11"'
+]
+
+[tool.pixi.dependencies]
+bluesky = "*"
+bluesky-queueserver = "*"
+bluesky-queueserver-api = "*"
+tiled = "*"
+numpy = "*"
+ipython = "*"
+numpydoc = "*"
+scikit-learn = "*"
+matplotlib = "*"
+numpyro = "*"
+jax = "*"
+tinygp = "*"
 
 [project.urls]
 homepage = "https://github.com/xraygui/nbs-agents"
