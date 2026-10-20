@@ -51,6 +51,7 @@ jax = "*"
 tinygp = "*"
 redis-py = "*"
 pyzmq = "*"
+qt6-wayland = "*"
 
 [project.urls]
 homepage = "https://github.com/xraygui/nbs-agents"

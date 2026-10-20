@@ -23,6 +23,8 @@ venv/
 htmlcov/
 .tox/
 .hypothesis/
+examples/
+diag_testing/
 
 # Editor
 .idea/
