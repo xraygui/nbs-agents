@@ -1,6 +1,7 @@
 import logging
 from typing import Any, Callable, Optional, Type
 
+from ..agentlog import AgentLog
 from ..catalog import ZMQCatalog, ZMQRun
 from ..constants import AGENT_NAME_KEY, AGENT_UID_KEY, OPEN_AGENT_PLAN
 from ..queue import (
@@ -33,6 +34,8 @@ class BaseAgent:
         Finished ``open_agent`` run that activated this agent.
     on_finished : callable, optional
         Callback invoked when the agent shuts down.
+    agent_log : AgentLog, optional
+        Shared agent-log store. Without one, ``log`` only writes to Python logging.
     """
 
     def __init__(
@@ -44,6 +47,7 @@ class BaseAgent:
         catalog: ZMQCatalog,
         open_run: ZMQRun,
         on_finished: Optional[Callable[["BaseAgent"], None]] = None,
+        agent_log: Optional[AgentLog] = None,
     ) -> None:
         self.agent_uid = agent_uid
         self.agent_name = agent_name
@@ -52,6 +56,7 @@ class BaseAgent:
         self.catalog = catalog
         self.open_run = open_run
         self.on_finished = on_finished
+        self.agent_log = agent_log
         self._sequence = 0
         self._active = True
 
@@ -95,8 +100,71 @@ class BaseAgent:
             return
         self._active = False
         LOGGER.info("Stopping agent %s (%s): %s", self.agent_name, self.agent_uid, reason)
+        self.log("close", reason)
+        self.set_status("closed", close_reason=reason)
         if self.on_finished is not None:
             self.on_finished(self)
+
+    def log(self, kind: str, text: str, **refs: Any) -> None:
+        """
+        Append an entry to this agent's shared log.
+
+        Parameters
+        ----------
+        kind : str
+            Entry kind, for example ``"note"``, ``"add"`` or ``"run"``.
+        text : str
+            Human-readable text.
+        **refs
+            Optional references such as ``item_uid`` or ``run_uid``.
+        """
+        LOGGER.info("[%s %s] %s: %s", self.agent_name, self.agent_uid[:8], kind, text)
+        if self.agent_log is None:
+            return
+        try:
+            self.agent_log.append(self.agent_uid, kind, text, source=self.agent_name, **refs)
+        except Exception:
+            LOGGER.exception("Failed to write agent log for %s", self.agent_uid)
+
+    def set_status(self, status: str, **fields: Any) -> None:
+        """
+        Set this agent's status in the shared log.
+
+        Parameters
+        ----------
+        status : str
+            New status, for example ``"active"`` or ``"closed"``.
+        **fields
+            Additional top-level record fields.
+        """
+        if self.agent_log is None:
+            return
+        try:
+            self.agent_log.set_status(self.agent_uid, status, **fields)
+        except Exception:
+            LOGGER.exception("Failed to set agent status for %s", self.agent_uid)
+
+    def open_log(self) -> None:
+        """
+        Create this agent's shared-log record from its ``open_agent`` parameters.
+        """
+        if self.agent_log is None:
+            return
+        params = self.parameters or {}
+        try:
+            self.agent_log.open(
+                self.agent_uid,
+                self.agent_name,
+                goal=params.get("goal"),
+                budget=params.get("budget"),
+                status="active",
+                parameters=params,
+                open_run_uid=self.open_run.uid if self.open_run is not None else None,
+            )
+        except Exception:
+            LOGGER.exception("Failed to open agent log for %s", self.agent_uid)
+            return
+        self.log("open", params.get("goal") or f"{self.agent_name} session opened")
 
     def ensure_sentinel_pair(self):
         """
@@ -128,7 +196,13 @@ class BaseAgent:
             self.agent_name,
             self._sequence,
         )
-        insert_before_queue_stop(self.manager, tagged, self.agent_uid)
+        response = insert_before_queue_stop(self.manager, tagged, self.agent_uid)
+        self.log(
+            "add",
+            f"{getattr(item, 'name', 'item')} (sequence {self._sequence})",
+            item_uid=(response.get("item") or {}).get("item_uid"),
+            plan=getattr(item, "name", None),
+        )
 
     def finalize(self) -> None:
         """
@@ -208,6 +282,7 @@ class AgentRegistry:
         catalog: ZMQCatalog,
         open_run: ZMQRun,
         on_finished: Optional[Callable[[BaseAgent], None]] = None,
+        agent_log: Optional[AgentLog] = None,
     ) -> BaseAgent:
         """
         Instantiate a registered agent.
@@ -228,6 +303,8 @@ class AgentRegistry:
             Activating ``open_agent`` run.
         on_finished : callable, optional
             Shutdown callback.
+        agent_log : AgentLog, optional
+            Shared agent-log store.
 
         Returns
         -------
@@ -243,6 +320,7 @@ class AgentRegistry:
             catalog=catalog,
             open_run=open_run,
             on_finished=on_finished,
+            agent_log=agent_log,
         )
 
 

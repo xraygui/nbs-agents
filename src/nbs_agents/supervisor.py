@@ -4,11 +4,14 @@ from typing import Any, Optional
 
 from bluesky_queueserver_api.zmq import REManagerAPI
 
+from .agentlog import AgentLog
 from .agents.base import AgentRegistry, agent_name_from_run
+from .agents.external import ExternalAgent
 from .agents.repeat import RepeatAgent
 from .catalog import ZMQCatalog, ZMQRun
 from .constants import (
     AGENT_PARAMETERS_KEY,
+    AGENT_SEQUENCE_KEY,
     AGENT_UID_KEY,
     CLOSE_AGENT_PLAN,
     OPEN_AGENT_PLAN,
@@ -30,6 +33,8 @@ class AgentSupervisor:
         Bluesky document catalog.
     registry : AgentRegistry, optional
         Agent registry. If omitted, a default registry with built-in agents is used.
+    agent_log : AgentLog, optional
+        Shared agent-log store that agents write their records to.
     """
 
     def __init__(
@@ -37,10 +42,12 @@ class AgentSupervisor:
         manager: REManagerAPI,
         catalog: ZMQCatalog,
         registry: Optional[AgentRegistry] = None,
+        agent_log: Optional[AgentLog] = None,
     ) -> None:
         self.manager = manager
         self.catalog = catalog
         self.registry = registry or default_registry()
+        self.agent_log = agent_log
         self.active_agents: dict[str, Any] = {}
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="agent-qs")
         self.catalog.subscribe_stop(self._on_run_stop)
@@ -78,6 +85,8 @@ class AgentSupervisor:
                 self._deactivate_agent_from_close(run)
 
             for agent in list(self.active_agents.values()):
+                if agent.run_belongs_to_agent(run):
+                    self._log_run(agent, run)
                 agent.on_run_stop(run)
         except Exception:
             LOGGER.exception("Failed to handle run stop for run %s", run.uid)
@@ -128,6 +137,7 @@ class AgentSupervisor:
                 catalog=self.catalog,
                 open_run=run,
                 on_finished=self._remove_agent,
+                agent_log=self.agent_log,
             )
         except KeyError:
             LOGGER.exception("Unknown agent name %s", agent_name)
@@ -135,7 +145,35 @@ class AgentSupervisor:
 
         self.active_agents[agent_uid] = agent
         LOGGER.info("Activated agent %s (%s)", agent_name, agent_uid)
+        agent.open_log()
         agent.start()
+
+    @staticmethod
+    def _log_run(agent: Any, run: ZMQRun) -> None:
+        """
+        Record a finished run in its agent's shared log.
+
+        Parameters
+        ----------
+        agent : BaseAgent
+            Agent that emitted the run.
+        run : ZMQRun
+            Finished run.
+        """
+        status = (run.stop or {}).get("exit_status", "unknown")
+        text = f"scan {run.scan_id} {run.plan_name} {status}"
+        sample = run.start.get("sample_name") or run.start.get("sample_id")
+        if sample:
+            text += f" on {sample}"
+        agent.log(
+            "run",
+            text,
+            run_uid=run.uid,
+            scan_id=run.scan_id,
+            plan=run.plan_name,
+            exit_status=status,
+            agent_sequence=run.start.get(AGENT_SEQUENCE_KEY),
+        )
 
     def _deactivate_agent_from_close(self, run: ZMQRun) -> None:
         """
@@ -173,4 +211,6 @@ def default_registry() -> AgentRegistry:
     """
     registry = AgentRegistry()
     registry.register("repeat", RepeatAgent)
+    registry.register("external", ExternalAgent)
+    registry.register("claude", ExternalAgent)
     return registry

@@ -31,6 +31,8 @@ dependencies = [
     "numpyro",
     "jax",
     "tinygp",
+    "redis",
+    "pyzmq",
     'tomli ; python_version < "3.11"'
 ]
 
@@ -47,12 +49,15 @@ matplotlib = "*"
 numpyro = "*"
 jax = "*"
 tinygp = "*"
+redis-py = "*"
+pyzmq = "*"
 
 [project.urls]
 homepage = "https://github.com/xraygui/nbs-agents"
 
 [project.scripts]
 nbs-agents-runner = "nbs_agents.runner:main"
+nbs-cli = "nbs_agents.cli.main:main"
 
 [project.optional-dependencies]
 gui = ["nbs-gui", "qtpy"]
