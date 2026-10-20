@@ -85,7 +85,8 @@ prints one JSON document; errors print `{"error": ...}` and exit 1.
 | `nbs-cli add <plan> [v ...] [k=v ...] --reason "..." [--dry-run]` | Insert a plan before the session's `queue_stop`, tagged with `agent_uid`, `agent_sequence`, `agent_reason`; checks the allowlist and budget; starts the queue if it is idle at this session |
 | `nbs-cli devices [--movable]` | Devices the QueueServer user group may pass to plans (motors, detectors) |
 | `nbs-cli remove <item_uid> --reason "..."` | Remove a pending item, only from the session's own block |
-| `nbs-cli note "..."` | Append to the agent log |
+| `nbs-cli note "..."` | Append a note to the agent log |
+| `nbs-cli ask "..."` | Ask the operator a question; the session shows as waiting for input until they reply |
 | `nbs-cli finalize --summary "..." [--drop-pending]` | Log a summary, remove the session's `queue_stop` and let the queue run to `close_agent` |
 | `nbs-cli log [--all]` | Agent-log records |
 | `nbs-cli tell "..."` | Operator: leave a message for the running session |
@@ -96,6 +97,13 @@ Agents Log tab or with `tell`/`stop`. `state`, `wait` and `add` return any
 unseen operator messages under `operator`, `wait` returns early with reason
 `operator_message` when one arrives, and once a stop is requested `add` is
 refused and the session should `finalize`.
+
+The Agents Log tab picks a session from a drop-down and shows its notes,
+questions, operator messages and final summary as a conversation, above a table
+of the rest of the log (plans added and removed, runs, status). After `ask`,
+the record's `awaiting_input` field is set until the next operator message,
+stop, `finalize` or `close`; meanwhile the tab shows an amber "waiting for your
+input" banner and counts waiting agents in its title.
 
 ### A steerable Claude Code agent
 
@@ -143,8 +151,8 @@ Every agent writes one JSON record per session to Redis under
 `QtRedisJSONDict.from_settings(settings, topic="AGENT")`): `goal`, `status`,
 `budget`, `opened`, and an append-only `log` of `{t, kind, text, ...refs}`.
 `BaseAgent.log()` and `BaseAgent.set_status()` write it, the supervisor records
-each agent's open, runs and close, and nbs-cli writes `add`, `remove`, `note`
-and `finalize` entries.
+each agent's open, runs and close, and nbs-cli writes `add`, `remove`, `note`,
+`question` and `finalize` entries.
 
 ## Manual Validation
 

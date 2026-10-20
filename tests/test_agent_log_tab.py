@@ -16,8 +16,11 @@ from nbs_agents.qt.tabs.agent_log import (  # noqa: E402
     ALL_AGENTS,
     AgentLogTab,
     collect_entries,
+    conversation_html,
     entry_details,
+    is_awaiting_input,
     sorted_sessions,
+    split_entries,
 )
 
 RECORDS = {
@@ -83,28 +86,101 @@ def test_entry_details_shows_refs_only():
     assert entry_details({"t": 1, "kind": "run", "text": "x", "source": "s", "run_uid": "r1"}) == "run_uid=r1"
 
 
+def test_split_entries_separates_conversation():
+    conversation, activity = split_entries(collect_entries(RECORDS))
+    assert [e["kind"] for _, e in conversation] == ["note"]
+    assert [e["kind"] for _, e in activity] == ["open", "run"]
+
+
+def test_awaiting_input_only_while_running():
+    record = {"status": "active", "awaiting_input": {"t": 1.0, "text": "go?"}}
+    assert is_awaiting_input(record)
+    assert not is_awaiting_input(dict(record, status="closed"))
+    assert not is_awaiting_input({"status": "active"})
+
+
+def test_conversation_html_marks_open_question_and_escapes():
+    records = {
+        "u1": {
+            "agent_name": "claude",
+            "status": "active",
+            "awaiting_input": {"t": 2.0, "text": "x <or> y?"},
+            "log": [
+                {"t": 1.0, "kind": "question", "text": "old one"},
+                {"t": 2.0, "kind": "question", "text": "x <or> y?"},
+            ],
+        }
+    }
+    conversation, _ = split_entries(collect_entries(records, "u1"))
+    text = conversation_html(records, conversation)
+    assert text.count("Waiting for your answer") == 1
+    assert "x &lt;or&gt; y?" in text
+
+
 def test_tab_follows_redis_changes():
     app = QApplication.instance() or QApplication([])
     data = {k: dict(v, log=list(v["log"])) for k, v in RECORDS.items()}
     model = FakeModel(data)
     tab = AgentLogTab(model)
-    assert tab.sessions.rowCount() == 3
-    assert tab.entries.rowCount() == 3
+    assert tab._selected == "aaaaaaaa-1"  # newest running session
+    tab.select_agent(ALL_AGENTS)
+    assert tab.agent_combo.count() == 3
+    assert tab.entries.rowCount() == 2
+    assert "hi" in tab.conversation.toPlainText()
 
-    tab.sessions.selectRow(2)
+    tab.select_agent("bbbbbbbb-2")
     assert tab._selected == "bbbbbbbb-2"
-    assert tab.entries.rowCount() == 1
+    assert tab.entries.rowCount() == 0
 
     data["bbbbbbbb-2"]["log"].append({"t": 400.0, "kind": "close", "text": "done"})
     model.user_status.redis_dict.changed.emit()
-    assert tab.entries.rowCount() == 2
-    assert tab.entries.item(1, 3).text() == "done"
+    assert tab.entries.rowCount() == 1
+    assert tab.entries.item(0, 3).text() == "done"
 
     del data["bbbbbbbb-2"]
     model.user_status.redis_dict.changed.emit()
     assert tab._selected == ALL_AGENTS
+    assert tab.agent_combo.count() == 2
     assert tab.entries.rowCount() == 2
     app.processEvents()
+
+
+def test_tab_shows_waiting_banner_and_title():
+    QApplication.instance() or QApplication([])
+    from qtpy.QtWidgets import QTabWidget
+
+    from nbs_agents.agentlog import AgentLog
+
+    redis = FakeRedis()
+    log = AgentLog(redis, "bl-")
+    log.open("u1", "claude", goal="g")
+    data = {"u1": log.get("u1")}
+    model = FakeModel(data)
+    model.user_status.redis_dict._redis = redis
+    tabs = QTabWidget()
+    tab = AgentLogTab(model)
+    tabs.addTab(tab, tab.name)
+    tab.select_agent(ALL_AGENTS)
+    assert tab.banner.isHidden()
+
+    log.ask("u1", "which motors?")
+    data["u1"] = log.get("u1")
+    tab.refresh()
+    assert not tab.banner.isHidden()
+    assert "which motors?" in tab.banner.text()
+    assert "Reply" in tab.banner.text()
+    assert "waiting for input" in tab.agent_combo.itemText(0)
+    assert tabs.tabText(0) == "Agents Log (1 waiting)"
+
+    tab.banner.linkActivated.emit("u1")
+    assert tab._selected == "u1"
+    tab.message_edit.setText("x and y")
+    tab.send_message()
+    data["u1"] = log.get("u1")
+    tab.refresh()
+    assert tab.banner.isHidden()
+    assert tabs.tabText(0) == "Agents Log"
+    assert "x and y" in tab.conversation.toPlainText()
 
 
 def test_tab_without_redis():
@@ -131,9 +207,10 @@ def test_tab_sends_messages_and_stop():
     model = FakeModel({"u1": log.get("u1")})
     model.user_status.redis_dict._redis = redis
     tab = AgentLogTab(model)
+    tab.select_agent(ALL_AGENTS)
     assert not tab.send_button.isEnabled()
 
-    tab.sessions.selectRow(1)
+    tab.select_agent("u1")
     assert tab.send_button.isEnabled() and tab.stop_button.isEnabled()
     tab.message_edit.setText("skip s3")
     tab.send_message()

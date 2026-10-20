@@ -1,19 +1,25 @@
 """nbs-gui tab that shows the shared agent log written by every nbs-agents agent."""
 
+import html
 from datetime import datetime
 
-from qtpy.QtCore import Qt
+from qtpy.QtCore import Qt, QTimer
+from qtpy.QtGui import QColor
 from qtpy.QtWidgets import (
     QAbstractItemView,
+    QComboBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
+    QTextBrowser,
     QVBoxLayout,
     QWidget,
 )
@@ -21,10 +27,21 @@ from qtpy.QtWidgets import (
 from ...agentlog import AGENT_LOG_TOPIC, AgentLog
 
 ALL_AGENTS = "__all__"
-SESSION_COLUMNS = ["Agent", "Status", "Opened", "Updated", "Entries", "Goal"]
 ENTRY_COLUMNS = ["Time", "Agent", "Kind", "Text", "Details"]
 ENTRY_FIELDS = {"t", "kind", "text", "source"}
 STEERABLE_STATUSES = ("opening", "active", "finalizing")
+CONVERSATION_KINDS = ("note", "question", "operator", "stop", "finalize")
+WAITING_COLOR = "#f0ad4e"
+WAITING_BACKGROUND = "#fff1cc"
+
+# kind -> (side, background, label); "right" is the operator's side.
+BUBBLE_STYLES = {
+    "note": ("left", "#eceff3", ""),
+    "question": ("left", "#fff1cc", "Question"),
+    "finalize": ("left", "#e3f2e6", "Summary"),
+    "operator": ("right", "#dbe8fb", ""),
+    "stop": ("right", "#f9dcdb", "Stop requested"),
+}
 
 
 def format_time(t, with_date=False):
@@ -105,6 +122,40 @@ def entry_details(entry):
     return ", ".join(f"{k}={v}" for k, v in entry.items() if k not in ENTRY_FIELDS)
 
 
+def is_awaiting_input(record):
+    """
+    Whether a session has an unanswered question for the operator.
+
+    Parameters
+    ----------
+    record : dict
+        Agent-log record.
+
+    Returns
+    -------
+    bool
+        True if ``awaiting_input`` is set and the session is still running.
+    """
+    return bool(record.get("awaiting_input")) and record.get("status") in STEERABLE_STATUSES
+
+
+def session_status(record):
+    """
+    Status to show for a session, with waiting for input taking precedence.
+
+    Parameters
+    ----------
+    record : dict
+        Agent-log record.
+
+    Returns
+    -------
+    str
+        ``"waiting for input"`` or the record's status.
+    """
+    return "waiting for input" if is_awaiting_input(record) else str(record.get("status", ""))
+
+
 def sorted_sessions(records):
     """
     Order agent sessions newest first.
@@ -155,14 +206,117 @@ def collect_entries(records, uid=ALL_AGENTS):
     return out
 
 
+def split_entries(pairs):
+    """
+    Separate conversation entries from activity entries.
+
+    Parameters
+    ----------
+    pairs : list of tuple
+        ``(label, entry)`` pairs from ``collect_entries``.
+
+    Returns
+    -------
+    tuple of list
+        ``(conversation, activity)``; conversation holds notes, questions,
+        operator messages, stop requests and finalize summaries.
+    """
+    conversation, activity = [], []
+    for pair in pairs:
+        (conversation if pair[1].get("kind") in CONVERSATION_KINDS else activity).append(pair)
+    return conversation, activity
+
+
+def bubble_html(label, entry, open_question=False, show_agent=True):
+    """
+    Render one conversation entry as a chat bubble.
+
+    Parameters
+    ----------
+    label : str
+        Agent label for the entry's session.
+    entry : dict
+        Agent-log entry.
+    open_question : bool, optional
+        Highlight the entry as the question the agent is waiting on.
+    show_agent : bool, optional
+        Name the agent session on operator messages too.
+
+    Returns
+    -------
+    str
+        Qt rich-text HTML: a full-width table with the bubble on the agent's
+        (left) or operator's (right) side.
+    """
+    kind = entry.get("kind")
+    side, background, tag = BUBBLE_STYLES.get(kind, BUBBLE_STYLES["note"])
+    if side == "right":
+        source = entry.get("source")
+        who = "Operator" if source in (None, "gui", "operator") else f"Operator ({source})"
+        if show_agent:
+            who += f" to {label}"
+    else:
+        who = label
+    if open_question:
+        tag, background = "Waiting for your answer", WAITING_BACKGROUND
+    header = f"<b>{html.escape(who)}</b> &middot; {format_time(entry.get('t'))}"
+    if tag:
+        color = "#a05f00" if open_question else "#555555"
+        header += f" &middot; <b style='color:{color}'>{html.escape(tag)}</b>"
+    body = html.escape(str(entry.get("text", ""))).replace("\n", "<br>")
+    bubble = (
+        f"<td width='80%' bgcolor='{background}' style='color:#1a1a1a'>"
+        f"<span style='font-size:small; color:#555555'>{header}</span><br>{body}</td>"
+    )
+    spacer = "<td width='20%'></td>"
+    cells = bubble + spacer if side == "left" else spacer + bubble
+    return f"<table width='100%' cellspacing='0' cellpadding='8'><tr>{cells}</tr></table>"
+
+
+def conversation_html(records, pairs, show_agent=True):
+    """
+    Render a conversation as chat bubbles.
+
+    Parameters
+    ----------
+    records : dict
+        Agent-log records keyed by UID.
+    pairs : list of tuple
+        Conversation ``(label, entry)`` pairs in time order.
+    show_agent : bool, optional
+        Name the agent session on operator messages.
+
+    Returns
+    -------
+    str
+        Qt rich-text HTML.
+    """
+    open_times = {
+        (agent_label(uid, record), record["awaiting_input"].get("t"))
+        for uid, record in records.items()
+        if is_awaiting_input(record)
+    }
+    if not pairs:
+        return "<p style='color:#777777'>No messages yet.</p>"
+    parts = []
+    for label, entry in pairs:
+        is_open = entry.get("kind") == "question" and (label, entry.get("t")) in open_times
+        parts.append(bubble_html(label, entry, open_question=is_open, show_agent=show_agent))
+    return "<div style='margin-top:4px'></div>".join(parts)
+
+
 class AgentLogTab(QWidget):
     """
-    Show every agent session in the shared Redis agent log and its entries.
+    Show agent sessions from the shared Redis agent log as a conversation.
 
-    The left table lists sessions (newest first, with an "All agents" row that
-    merges every log); the right table shows the selected session's entries
-    and follows new ones as they arrive. Below it, an operator can send the
-    selected running session a message or ask it to stop.
+    A drop-down picks one session, or "All agents" to merge every log. The
+    upper pane shows the conversation (agent notes and questions, operator
+    messages and stop requests, the final summary) as chat bubbles, with a
+    box to message the selected running session or ask it to stop. The lower
+    table shows the rest of the log: opens, queued and removed plans, runs and
+    status changes. When an agent asks a question with ``nbs-cli ask`` an
+    amber banner says it is waiting for input until someone replies, and the
+    tab title counts waiting agents.
 
     Parameters
     ----------
@@ -180,23 +334,60 @@ class AgentLogTab(QWidget):
         self._selected = ALL_AGENTS
         self._records = None
         self._error = None
+        self._conversation_html = None
         try:
             self._records = model.user_status.get_redis_dict(AGENT_LOG_TOPIC)
         except Exception as e:  # Redis unreachable should not break the GUI
             self._error = str(e)
 
+        self.agent_combo = QComboBox(self)
+        self.agent_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self.agent_combo.currentIndexChanged.connect(self._on_agent_selected)
+        picker = QHBoxLayout()
+        picker.addWidget(QLabel("Agent:", self))
+        picker.addWidget(self.agent_combo)
+        picker.addStretch(1)
+
         self.summary = QLabel(self)
         self.summary.setWordWrap(True)
         self.summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
 
-        self.sessions = QTableWidget(0, len(SESSION_COLUMNS), self)
-        self.sessions.setHorizontalHeaderLabels(SESSION_COLUMNS)
-        self.sessions.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.sessions.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.sessions.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.sessions.verticalHeader().setVisible(False)
-        self.sessions.horizontalHeader().setStretchLastSection(True)
-        self.sessions.itemSelectionChanged.connect(self._on_session_selected)
+        self.banner = QLabel(self)
+        self.banner.setWordWrap(True)
+        self.banner.setTextFormat(Qt.RichText)
+        self.banner.setStyleSheet(
+            f"QLabel {{ background: {WAITING_BACKGROUND}; color: #1a1a1a;"
+            f" border: 2px solid {WAITING_COLOR}; border-radius: 4px; padding: 6px; }}"
+        )
+        self.banner.linkActivated.connect(self.select_agent)
+        self.banner.hide()
+
+        self.conversation = QTextBrowser(self)
+        self.conversation.setOpenLinks(False)
+        self._follow_conversation = True
+        bar = self.conversation.verticalScrollBar()
+        # Only the operator scrolling (wheel, drag, arrows) stops following new messages.
+        bar.actionTriggered.connect(lambda action: QTimer.singleShot(0, self._on_conversation_scrolled))
+        bar.sliderReleased.connect(self._on_conversation_scrolled)
+        bar.rangeChanged.connect(self._on_conversation_range)
+
+        self.message_edit = QLineEdit(self)
+        self.message_edit.returnPressed.connect(self.send_message)
+        self.send_button = QPushButton("Send", self)
+        self.send_button.clicked.connect(self.send_message)
+        self.stop_button = QPushButton("Request stop", self)
+        self.stop_button.setToolTip("Ask the agent to stop adding scans and finalize")
+        self.stop_button.clicked.connect(self.request_stop)
+        steer = QHBoxLayout()
+        steer.addWidget(self.message_edit)
+        steer.addWidget(self.send_button)
+        steer.addWidget(self.stop_button)
+
+        chat = QWidget(self)
+        chat_layout = QVBoxLayout(chat)
+        chat_layout.setContentsMargins(0, 0, 0, 0)
+        chat_layout.addWidget(self.conversation)
+        chat_layout.addLayout(steer)
 
         self.entries = QTableWidget(0, len(ENTRY_COLUMNS), self)
         self.entries.setHorizontalHeaderLabels(ENTRY_COLUMNS)
@@ -211,37 +402,31 @@ class AgentLogTab(QWidget):
         header.setSectionResizeMode(details, QHeaderView.Interactive)
         self.entries.setColumnWidth(details, 260)
 
-        self.message_edit = QLineEdit(self)
-        self.message_edit.setPlaceholderText("Message to the selected agent")
-        self.message_edit.returnPressed.connect(self.send_message)
-        self.send_button = QPushButton("Send", self)
-        self.send_button.clicked.connect(self.send_message)
-        self.stop_button = QPushButton("Request stop", self)
-        self.stop_button.setToolTip("Ask the agent to stop adding scans and finalize")
-        self.stop_button.clicked.connect(self.request_stop)
-        steer = QHBoxLayout()
-        steer.addWidget(self.message_edit)
-        steer.addWidget(self.send_button)
-        steer.addWidget(self.stop_button)
+        activity = QWidget(self)
+        activity_layout = QVBoxLayout(activity)
+        activity_layout.setContentsMargins(0, 0, 0, 0)
+        activity_label = QLabel("<b>Activity</b> (sessions, queued plans, runs)", self)
+        activity_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        activity_layout.addWidget(activity_label)
+        activity_layout.addWidget(self.entries)
 
-        right = QWidget(self)
-        right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.addWidget(self.summary)
-        right_layout.addWidget(self.entries)
-        right_layout.addLayout(steer)
-
-        splitter = QSplitter(Qt.Horizontal, self)
-        splitter.addWidget(self.sessions)
-        splitter.addWidget(right)
-        splitter.setStretchFactor(0, 2)
-        splitter.setStretchFactor(1, 3)
+        splitter = QSplitter(Qt.Vertical, self)
+        splitter.addWidget(chat)
+        splitter.addWidget(activity)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(splitter)
+        layout.addLayout(picker)
+        layout.addWidget(self.summary)
+        layout.addWidget(self.banner)
+        layout.addWidget(splitter, 1)
 
         if self._records is not None:
             self._records.changed.connect(self.refresh)
+            running = [uid for uid, r in sorted_sessions(self._snapshot()) if r.get("status") in STEERABLE_STATUSES]
+            if running:
+                self._selected = running[0]
         self.refresh()
 
     def _writer(self):
@@ -259,6 +444,27 @@ class AgentLogTab(QWidget):
         self.message_edit.setEnabled(steerable)
         self.send_button.setEnabled(steerable)
         self.stop_button.setEnabled(steerable and not record.get("stop_requested"))
+        if steerable and is_awaiting_input(record):
+            self.message_edit.setPlaceholderText("Reply to the agent's question")
+        elif steerable:
+            self.message_edit.setPlaceholderText("Message to the selected agent")
+        elif record is None:
+            self.message_edit.setPlaceholderText("Choose a running agent to send it a message")
+        else:
+            self.message_edit.setPlaceholderText(f"This session is {record.get('status')}")
+
+    def select_agent(self, uid):
+        """
+        Show one agent session.
+
+        Parameters
+        ----------
+        uid : str
+            Session UID, or ``ALL_AGENTS``.
+        """
+        index = self.agent_combo.findData(uid)
+        if index >= 0:
+            self.agent_combo.setCurrentIndex(index)
 
     def send_message(self):
         """Send the typed message to the selected agent session."""
@@ -299,70 +505,93 @@ class AgentLogTab(QWidget):
         return {k: v for k, v in self._records.items() if isinstance(v, dict)}
 
     def refresh(self):
-        """Redraw both tables from the current Redis cache."""
+        """Redraw everything from the current Redis cache."""
         records = self._snapshot()
         if self._selected != ALL_AGENTS and self._selected not in records:
             self._selected = ALL_AGENTS
-        self._fill_sessions(records)
+        self._fill_agents(records)
+        self._fill_banner(records)
         self._fill_entries(records)
         self._update_controls()
+        self._update_tab_title(records)
 
-    def _fill_sessions(self, records):
-        rows = [(ALL_AGENTS, None)] + sorted_sessions(records)
-        self.sessions.blockSignals(True)
-        self.sessions.setRowCount(len(rows))
-        for row, (uid, record) in enumerate(rows):
-            if record is None:
-                total = sum(len(r.get("log") or []) for r in records.values())
-                values = ["All agents", "", "", "", str(total), ""]
+    def _fill_agents(self, records):
+        combo = self.agent_combo
+        combo.blockSignals(True)
+        combo.clear()
+        waiting = sum(1 for r in records.values() if is_awaiting_input(r))
+        all_label = f"All agents ({len(records)})"
+        if waiting:
+            all_label += f" • {waiting} waiting for input"
+        combo.addItem(all_label, ALL_AGENTS)
+        for uid, record in sorted_sessions(records):
+            text = f"{agent_label(uid, record)} • {session_status(record)}"
+            if record.get("goal"):
+                text += f" • {record['goal']}"
+            if len(text) > 90:
+                text = text[:89] + "…"
+            combo.addItem(text, uid)
+            index = combo.count() - 1
+            combo.setItemData(index, str(record.get("goal") or ""), Qt.ToolTipRole)
+            if is_awaiting_input(record):
+                combo.setItemData(index, QColor(WAITING_BACKGROUND), Qt.BackgroundRole)
+        combo.setCurrentIndex(max(combo.findData(self._selected), 0))
+        combo.blockSignals(False)
+
+    def _fill_banner(self, records):
+        if self._selected == ALL_AGENTS:
+            shown = records
+        else:
+            shown = {self._selected: records[self._selected]}
+        waiting = [(uid, r) for uid, r in sorted_sessions(shown) if is_awaiting_input(r)]
+        if not waiting:
+            self.banner.hide()
+            return
+        lines = []
+        for uid, record in waiting:
+            question = html.escape(str(record["awaiting_input"].get("text", ""))).replace("\n", "<br>")
+            line = f"<b>{html.escape(agent_label(uid, record))} is waiting for your input</b>"
+            line += f" (asked {format_time(record['awaiting_input'].get('t'))})"
+            if self._selected == ALL_AGENTS:
+                line += f" &nbsp;<a href='{html.escape(uid)}'>Reply</a><br>{question}"
             else:
-                values = [
-                    agent_label(uid, record),
-                    str(record.get("status", "")),
-                    format_time(record.get("opened"), with_date=True),
-                    format_time(record.get("updated")),
-                    str(len(record.get("log") or [])),
-                    str(record.get("goal") or ""),
-                ]
-            for col, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                item.setData(Qt.UserRole, uid)
-                item.setToolTip(value)
-                self.sessions.setItem(row, col, item)
-            if uid == self._selected:
-                self.sessions.selectRow(row)
-        self.sessions.resizeColumnsToContents()
-        self.sessions.blockSignals(False)
+                line += ". Reply in the box below."
+            lines.append(line)
+        self.banner.setText("<br><br>".join(lines))
+        self.banner.show()
 
     def _fill_entries(self, records):
         if self._records is None:
             self.summary.setText(f"Agent log unavailable: {self._error or 'no Redis settings in beamline.toml'}")
             self.entries.setRowCount(0)
+            self._set_conversation("")
             return
 
         if self._selected == ALL_AGENTS:
             self.summary.setText(f"{len(records)} agent session(s) in {AGENT_LOG_TOPIC} log")
         else:
             record = records[self._selected]
-            parts = [
-                f"<b>{record.get('agent_name') or '?'}</b> {self._selected}",
-                f"status: {record.get('status', '')}",
-            ]
-            if record.get("goal"):
-                parts.append(f"goal: {record['goal']}")
+            parts = [f"<b>{html.escape(record.get('agent_name') or '?')}</b> {self._selected}"]
+            parts.append(f"status: {html.escape(session_status(record))}")
             if record.get("budget"):
-                parts.append(f"budget: {record['budget']}")
+                parts.append(f"budget: {html.escape(str(record['budget']))}")
+            line = " &middot; ".join(parts)
+            if record.get("goal"):
+                line += f"<br>goal: {html.escape(str(record['goal']))}"
             if record.get("stop_requested"):
-                parts.append(f"<b>stop requested</b>: {record['stop_requested'].get('text', '')}")
+                stop = html.escape(str(record["stop_requested"].get("text", "")))
+                line += f"<br><b>stop requested</b>: {stop}"
             if record.get("close_reason"):
-                parts.append(f"closed: {record['close_reason']}")
-            self.summary.setText("<br>".join(parts))
+                line += f"<br>closed: {html.escape(str(record['close_reason']))}"
+            self.summary.setText(line)
+
+        conversation, activity = split_entries(collect_entries(records, self._selected))
+        self._set_conversation(conversation_html(records, conversation, show_agent=self._selected == ALL_AGENTS))
 
         bar = self.entries.verticalScrollBar()
         at_bottom = bar.value() >= bar.maximum() - 2
-        pairs = collect_entries(records, self._selected)
-        self.entries.setRowCount(len(pairs))
-        for row, (label, entry) in enumerate(pairs):
+        self.entries.setRowCount(len(activity))
+        for row, (label, entry) in enumerate(activity):
             values = [
                 format_time(entry.get("t")),
                 label,
@@ -379,11 +608,51 @@ class AgentLogTab(QWidget):
         if at_bottom:
             self.entries.scrollToBottom()
 
-    def _on_session_selected(self):
-        items = self.sessions.selectedItems()
-        if not items:
+    def _set_conversation(self, text):
+        if text == self._conversation_html:
             return
-        self._selected = items[0].data(Qt.UserRole)
-        self._fill_entries(self._snapshot())
+        bar = self.conversation.verticalScrollBar()
+        position = bar.value()
+        self._conversation_html = text
+        self.conversation.setHtml(text)
+        bar.setValue(bar.maximum() if self._follow_conversation else position)
+
+    def _on_conversation_scrolled(self):
+        bar = self.conversation.verticalScrollBar()
+        self._follow_conversation = bar.value() >= bar.maximum() - 2
+
+    def _on_conversation_range(self, minimum, maximum):
+        # Layout finishes after setHtml, so keep following the newest message.
+        if self._follow_conversation:
+            self.conversation.verticalScrollBar().setValue(maximum)
+
+    def _update_tab_title(self, records):
+        """Count waiting agents in the tab title so they show from other tabs."""
+        widget, tabs = self, None
+        while widget is not None:
+            parent = widget.parentWidget()
+            if isinstance(parent, QTabWidget):
+                tabs = parent
+                break
+            widget = parent
+        if tabs is None:
+            return
+        index = tabs.indexOf(self)
+        if index < 0:
+            return
+        waiting = sum(1 for r in records.values() if is_awaiting_input(r))
+        tabs.setTabText(index, f"{self.name} ({waiting} waiting)" if waiting else self.name)
+        tabs.tabBar().setTabTextColor(index, QColor("#b36b00") if waiting else QColor())
+
+    def _on_agent_selected(self, index):
+        uid = self.agent_combo.itemData(index)
+        if uid is None:
+            return
+        self._selected = uid
+        self._conversation_html = None
+        self._follow_conversation = True
+        records = self._snapshot()
+        self._fill_banner(records)
+        self._fill_entries(records)
         self._update_controls()
         self.entries.scrollToBottom()

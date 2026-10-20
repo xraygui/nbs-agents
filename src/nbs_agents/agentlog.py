@@ -19,14 +19,20 @@ Record schema::
         "log": [ {"t": float, "kind": str, "text": str, ...refs}, ... ],
     }
 
-``kind`` is free-form but the shared vocabulary is ``open``, ``note``, ``add``,
-``remove``, ``run``, ``status``, ``finalize``, ``close`` and ``error``. Optional
+``kind`` is free-form but the shared vocabulary is ``open``, ``note``,
+``question``, ``add``, ``remove``, ``run``, ``status``, ``finalize``, ``close``
+and ``error``. Optional
 refs include ``item_uid``, ``run_uid``, ``plan`` and ``source`` (who wrote it).
 
 Operators steer a running agent through the same record: ``operator`` entries
 are messages to the agent, and a ``stop`` entry plus a top-level
 ``stop_requested`` field ask it to wrap up. ``operator_read`` holds the time of
 the newest operator entry the agent has seen.
+
+An agent that needs an answer writes a ``question`` entry with ``ask``, which
+also sets a top-level ``awaiting_input`` field (``{"t", "text", "source"}``).
+The next operator, ``finalize`` or ``close`` entry clears it, so a GUI can show
+that the agent is waiting until someone replies.
 """
 
 import json
@@ -38,6 +44,7 @@ LOGGER = logging.getLogger(__name__)
 
 AGENT_LOG_TOPIC = "AGENT"
 OPERATOR_KINDS = ("operator", "stop")
+ANSWER_KINDS = OPERATOR_KINDS + ("finalize", "close")
 
 
 class AgentLog:
@@ -256,6 +263,40 @@ class AgentLog:
             if record is None:
                 record = {"agent_uid": agent_uid, "status": "unknown", "log": []}
             record.setdefault("log", []).append(entry)
+            if kind in ANSWER_KINDS:
+                record.pop("awaiting_input", None)
+            return record
+
+        self._modify(agent_uid, update)
+        return entry
+
+    def ask(self, agent_uid: str, text: str, source: Optional[str] = None) -> dict[str, Any]:
+        """
+        Ask the operator a question and mark the agent as awaiting input.
+
+        Parameters
+        ----------
+        agent_uid : str
+            Agent session UID.
+        text : str
+            The question.
+        source : str, optional
+            Who asked.
+
+        Returns
+        -------
+        dict
+            The appended entry.
+        """
+        entry = {"t": time.time(), "kind": "question", "text": text}
+        if source is not None:
+            entry["source"] = source
+
+        def update(record):
+            if record is None:
+                record = {"agent_uid": agent_uid, "status": "unknown", "log": []}
+            record.setdefault("log", []).append(entry)
+            record["awaiting_input"] = dict(entry)
             return record
 
         self._modify(agent_uid, update)
@@ -334,6 +375,7 @@ class AgentLog:
             if record is None:
                 record = {"agent_uid": agent_uid, "status": "unknown", "log": []}
             record.setdefault("log", []).append(entry)
+            record.pop("awaiting_input", None)
             record["stop_requested"] = {"t": entry["t"], "text": text, "source": source}
             return record
 
