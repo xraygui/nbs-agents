@@ -87,6 +87,14 @@ prints one JSON document; errors print `{"error": ...}` and exit 1.
 | `nbs-cli note "..."` | Append to the agent log |
 | `nbs-cli finalize --summary "..." [--drop-pending]` | Log a summary, remove the session's `queue_stop` and let the queue run to `close_agent` |
 | `nbs-cli log [--all]` | Agent-log records |
+| `nbs-cli tell "..."` | Operator: leave a message for the running session |
+| `nbs-cli stop [--reason "..."]` | Operator: ask the running session to wrap up |
+
+Operators steer a running session through its agent log, from the nbs-gui
+Agents Log tab or with `tell`/`stop`. `state`, `wait` and `add` return any
+unseen operator messages under `operator`, `wait` returns early with reason
+`operator_message` when one arrives, and once a stop is requested `add` is
+refused and the session should `finalize`.
 
 `open` needs `nbs-agents-runner` running: its `ExternalAgent` (registered as
 `external` and `claude`) holds the block open and records the session.

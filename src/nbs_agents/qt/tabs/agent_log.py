@@ -5,8 +5,12 @@ from datetime import datetime
 from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
     QAbstractItemView,
+    QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -14,12 +18,13 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from ...agentlog import AGENT_LOG_TOPIC
+from ...agentlog import AGENT_LOG_TOPIC, AgentLog
 
 ALL_AGENTS = "__all__"
 SESSION_COLUMNS = ["Agent", "Status", "Opened", "Updated", "Entries", "Goal"]
 ENTRY_COLUMNS = ["Time", "Agent", "Kind", "Text", "Details"]
 ENTRY_FIELDS = {"t", "kind", "text", "source"}
+STEERABLE_STATUSES = ("opening", "active", "finalizing")
 
 
 def format_time(t, with_date=False):
@@ -156,7 +161,8 @@ class AgentLogTab(QWidget):
 
     The left table lists sessions (newest first, with an "All agents" row that
     merges every log); the right table shows the selected session's entries
-    and follows new ones as they arrive.
+    and follows new ones as they arrive. Below it, an operator can send the
+    selected running session a message or ask it to stop.
 
     Parameters
     ----------
@@ -205,11 +211,25 @@ class AgentLogTab(QWidget):
         header.setSectionResizeMode(details, QHeaderView.Interactive)
         self.entries.setColumnWidth(details, 260)
 
+        self.message_edit = QLineEdit(self)
+        self.message_edit.setPlaceholderText("Message to the selected agent")
+        self.message_edit.returnPressed.connect(self.send_message)
+        self.send_button = QPushButton("Send", self)
+        self.send_button.clicked.connect(self.send_message)
+        self.stop_button = QPushButton("Request stop", self)
+        self.stop_button.setToolTip("Ask the agent to stop adding scans and finalize")
+        self.stop_button.clicked.connect(self.request_stop)
+        steer = QHBoxLayout()
+        steer.addWidget(self.message_edit)
+        steer.addWidget(self.send_button)
+        steer.addWidget(self.stop_button)
+
         right = QWidget(self)
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.addWidget(self.summary)
         right_layout.addWidget(self.entries)
+        right_layout.addLayout(steer)
 
         splitter = QSplitter(Qt.Horizontal, self)
         splitter.addWidget(self.sessions)
@@ -224,6 +244,55 @@ class AgentLogTab(QWidget):
             self._records.changed.connect(self.refresh)
         self.refresh()
 
+    def _writer(self):
+        records = self._records
+        return AgentLog(records._redis, records._prefix, AGENT_LOG_TOPIC)
+
+    def _selected_record(self):
+        if self._records is None or self._selected == ALL_AGENTS:
+            return None
+        return self._snapshot().get(self._selected)
+
+    def _update_controls(self):
+        record = self._selected_record()
+        steerable = record is not None and record.get("status") in STEERABLE_STATUSES
+        self.message_edit.setEnabled(steerable)
+        self.send_button.setEnabled(steerable)
+        self.stop_button.setEnabled(steerable and not record.get("stop_requested"))
+
+    def send_message(self):
+        """Send the typed message to the selected agent session."""
+        text = self.message_edit.text().strip()
+        if not text or self._selected_record() is None:
+            return
+        try:
+            self._writer().message(self._selected, text, source="gui")
+        except Exception as e:
+            QMessageBox.warning(self, "Agents Log", f"Could not send message: {e}")
+            return
+        self.message_edit.clear()
+
+    def request_stop(self, confirm=True):
+        """Ask the selected agent session to stop adding work and finalize."""
+        record = self._selected_record()
+        if record is None:
+            return
+        if confirm:
+            answer = QMessageBox.question(
+                self,
+                "Request stop",
+                f"Ask {agent_label(self._selected, record)} to stop adding scans and finalize?",
+            )
+            if answer != QMessageBox.Yes:
+                return
+        text = self.message_edit.text().strip()
+        try:
+            self._writer().request_stop(self._selected, text, source="gui")
+        except Exception as e:
+            QMessageBox.warning(self, "Agents Log", f"Could not request stop: {e}")
+            return
+        self.message_edit.clear()
+
     def _snapshot(self):
         if self._records is None:
             return {}
@@ -236,6 +305,7 @@ class AgentLogTab(QWidget):
             self._selected = ALL_AGENTS
         self._fill_sessions(records)
         self._fill_entries(records)
+        self._update_controls()
 
     def _fill_sessions(self, records):
         rows = [(ALL_AGENTS, None)] + sorted_sessions(records)
@@ -282,6 +352,8 @@ class AgentLogTab(QWidget):
                 parts.append(f"goal: {record['goal']}")
             if record.get("budget"):
                 parts.append(f"budget: {record['budget']}")
+            if record.get("stop_requested"):
+                parts.append(f"<b>stop requested</b>: {record['stop_requested'].get('text', '')}")
             if record.get("close_reason"):
                 parts.append(f"closed: {record['close_reason']}")
             self.summary.setText("<br>".join(parts))
@@ -313,4 +385,5 @@ class AgentLogTab(QWidget):
             return
         self._selected = items[0].data(Qt.UserRole)
         self._fill_entries(self._snapshot())
+        self._update_controls()
         self.entries.scrollToBottom()

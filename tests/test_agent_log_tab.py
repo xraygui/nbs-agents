@@ -10,6 +10,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from qtpy.QtCore import QObject, Signal  # noqa: E402
 from qtpy.QtWidgets import QApplication  # noqa: E402
 
+from fakes import FakeRedis  # noqa: E402
+
 from nbs_agents.qt.tabs.agent_log import (  # noqa: E402
     ALL_AGENTS,
     AgentLogTab,
@@ -46,6 +48,8 @@ class FakeRedisDict(QObject):
     def __init__(self, data):
         super().__init__()
         self.data = data
+        self._redis = None
+        self._prefix = "bl-"
 
     def items(self):
         return self.data.items()
@@ -115,3 +119,34 @@ def test_tab_without_redis():
     tab = AgentLogTab(model)
     assert tab.entries.rowCount() == 0
     assert "unavailable" in tab.summary.text()
+
+
+def test_tab_sends_messages_and_stop():
+    QApplication.instance() or QApplication([])
+    from nbs_agents.agentlog import AgentLog
+
+    redis = FakeRedis()
+    log = AgentLog(redis, "bl-")
+    log.open("u1", "claude", goal="g")
+    model = FakeModel({"u1": log.get("u1")})
+    model.user_status.redis_dict._redis = redis
+    tab = AgentLogTab(model)
+    assert not tab.send_button.isEnabled()
+
+    tab.sessions.selectRow(1)
+    assert tab.send_button.isEnabled() and tab.stop_button.isEnabled()
+    tab.message_edit.setText("skip s3")
+    tab.send_message()
+    assert tab.message_edit.text() == ""
+    tab.message_edit.setText("beam dump")
+    tab.request_stop(confirm=False)
+
+    record = log.get("u1")
+    assert [(e["kind"], e["text"], e["source"]) for e in record["log"][-2:]] == [
+        ("operator", "skip s3", "gui"),
+        ("stop", "beam dump", "gui"),
+    ]
+    model.user_status.redis_dict.data["u1"] = record
+    tab.refresh()
+    assert not tab.stop_button.isEnabled()
+    assert "stop requested" in tab.summary.text()

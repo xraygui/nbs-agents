@@ -22,6 +22,11 @@ Record schema::
 ``kind`` is free-form but the shared vocabulary is ``open``, ``note``, ``add``,
 ``remove``, ``run``, ``status``, ``finalize``, ``close`` and ``error``. Optional
 refs include ``item_uid``, ``run_uid``, ``plan`` and ``source`` (who wrote it).
+
+Operators steer a running agent through the same record: ``operator`` entries
+are messages to the agent, and a ``stop`` entry plus a top-level
+``stop_requested`` field ask it to wrap up. ``operator_read`` holds the time of
+the newest operator entry the agent has seen.
 """
 
 import json
@@ -32,6 +37,7 @@ from typing import Any, Optional
 LOGGER = logging.getLogger(__name__)
 
 AGENT_LOG_TOPIC = "AGENT"
+OPERATOR_KINDS = ("operator", "stop")
 
 
 class AgentLog:
@@ -282,3 +288,101 @@ class AgentLog:
             return record
 
         return self._modify(agent_uid, update)
+
+    def message(self, agent_uid: str, text: str, source: str = "operator") -> dict[str, Any]:
+        """
+        Leave an operator message for a running agent.
+
+        Parameters
+        ----------
+        agent_uid : str
+            Agent session UID.
+        text : str
+            Message text.
+        source : str, optional
+            Who sent it.
+
+        Returns
+        -------
+        dict
+            The appended entry.
+        """
+        return self.append(agent_uid, "operator", text, source=source)
+
+    def request_stop(self, agent_uid: str, text: str = "", source: str = "operator") -> dict[str, Any]:
+        """
+        Ask a running agent to stop adding work and wrap up.
+
+        Parameters
+        ----------
+        agent_uid : str
+            Agent session UID.
+        text : str, optional
+            Reason for the stop.
+        source : str, optional
+            Who asked.
+
+        Returns
+        -------
+        dict
+            The appended entry.
+        """
+        text = text or "Stop requested"
+        entry = {"t": time.time(), "kind": "stop", "text": text, "source": source}
+
+        def update(record):
+            if record is None:
+                record = {"agent_uid": agent_uid, "status": "unknown", "log": []}
+            record.setdefault("log", []).append(entry)
+            record["stop_requested"] = {"t": entry["t"], "text": text, "source": source}
+            return record
+
+        self._modify(agent_uid, update)
+        return entry
+
+    def take_operator_messages(self, agent_uid: str) -> list[dict[str, Any]]:
+        """
+        Return operator entries the agent has not seen yet, and mark them seen.
+
+        Parameters
+        ----------
+        agent_uid : str
+            Agent session UID.
+
+        Returns
+        -------
+        list of dict
+            Unseen ``operator`` and ``stop`` entries, oldest first.
+        """
+        unread: list[dict[str, Any]] = []
+
+        def update(record):
+            unread.clear()
+            if record is None:
+                return {"agent_uid": agent_uid, "status": "unknown", "log": []}
+            unread.extend(unread_operator_entries(record))
+            if unread:
+                record["operator_read"] = unread[-1]["t"]
+            return record
+
+        if unread_operator_entries(self.get(agent_uid) or {}):
+            self._modify(agent_uid, update)
+        return unread
+
+
+def unread_operator_entries(record: dict[str, Any]) -> list[dict[str, Any]]:
+    """
+    Operator entries newer than the record's ``operator_read`` mark.
+
+    Parameters
+    ----------
+    record : dict
+        Agent-log record.
+
+    Returns
+    -------
+    list of dict
+        Unseen ``operator`` and ``stop`` entries, oldest first.
+    """
+    seen = record.get("operator_read") or 0
+    return [e for e in record.get("log") or [] if e.get("kind") in OPERATOR_KINDS and (e.get("t") or 0) > seen]
