@@ -66,6 +66,9 @@ gui = ["nbs-gui", "qtpy"]
 [project.entry-points."nbs_gui.plans"]
 nbs-agents-block = "nbs_agents.qt.plans.agent_block:AgentBlockWidget"
 
+[project.entry-points."nbs_gui.tabs"]
+nbs-agents-log = "nbs_agents.qt.tabs.agent_log:AgentLogTab"
+
 [tool.hatch.version]
 source = "vcs"
 
