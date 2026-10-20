@@ -96,6 +96,22 @@ unseen operator messages under `operator`, `wait` returns early with reason
 `operator_message` when one arrives, and once a stop is requested `add` is
 refused and the session should `finalize`.
 
+### A steerable Claude Code agent
+
+`skills/beamline-steering/SKILL.md` is a Claude Code skill that teaches the
+driving loop with no beamline-specific task: open a session, wait for the
+operator, plan measurements with them through the log, queue plans with
+reasons, and finalize when told to stop. Link it into your skills once:
+
+```bash
+ln -sfn "$PWD/skills/beamline-steering" ~/.claude/skills/beamline-steering
+```
+
+Then start an agent from any folder with `scripts/claude-beamline`
+(interactive) or `scripts/claude-beamline --headless` (`claude -p`,
+stream-json). It puts this repo's pixi `nbs-cli` on PATH and allows only
+`nbs-cli` commands. Steer it from the Agents Log tab or with `nbs-cli tell`.
+
 `open` needs `nbs-agents-runner` running: its `ExternalAgent` (registered as
 `external` and `claude`) holds the block open and records the session.
 
