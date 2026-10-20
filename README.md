@@ -83,6 +83,7 @@ prints one JSON document; errors print `{"error": ...}` and exit 1.
 | `nbs-cli wait [--until run\|idle\|change] [--timeout 600]` | Block on the document stream; returns finished-run summaries |
 | `nbs-cli open --goal "..." [--budget 2h]` | Queue `open_agent("claude")`, `queue_stop`, `close_agent` and start the queue if it is at the head |
 | `nbs-cli add <plan> [v ...] [k=v ...] --reason "..." [--dry-run]` | Insert a plan before the session's `queue_stop`, tagged with `agent_uid`, `agent_sequence`, `agent_reason`; checks the allowlist and budget; starts the queue if it is idle at this session |
+| `nbs-cli devices [--movable]` | Devices the QueueServer user group may pass to plans (motors, detectors) |
 | `nbs-cli remove <item_uid> --reason "..."` | Remove a pending item, only from the session's own block |
 | `nbs-cli note "..."` | Append to the agent log |
 | `nbs-cli finalize --summary "..." [--drop-pending]` | Log a summary, remove the session's `queue_stop` and let the queue run to `close_agent` |
