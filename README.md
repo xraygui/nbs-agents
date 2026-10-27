@@ -76,7 +76,8 @@ prints one JSON document; errors print `{"error": ...}` and exit 1.
 
 | Command | What it does |
 |---|---|
-| `nbs-cli state [--full]` | Manager state, running item, the session's block and budget, other queue counts, samples, plans, recent run summaries |
+| `nbs-cli state [--full]` | Manager state, beam at the endstation, running item, the session's block and budget, other queue counts, samples, plans, recent run summaries |
+| `nbs-cli beam [--map]` | Whether beam is expected at the endstation and why not, from nbs-bl's `BEAM_MAP`; `--map` adds every node's upstream, children and status |
 | `nbs-cli plans [name]` | Allowed plans and XAS edges, or one plan's parameters, docstring and time-estimate rule |
 | `nbs-cli run [ref] [--data] [--plot f.png]` | One run (uid, uid prefix, scan id, or `-1`) with a reducer summary |
 | `nbs-cli runs [-n 10] [--mine]` | Recent run summaries |
