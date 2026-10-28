@@ -29,7 +29,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from ...agentlog import AGENT_LOG_TOPIC, AgentLog
+from ...agentlog import AGENT_LOG_TOPIC, AgentLog, is_assistant_record
 from ...launcher import claude_launch_parameters
 from ...queue import submit_agent_block
 
@@ -708,7 +708,10 @@ class AgentLogTab(QWidget):
     def _snapshot(self):
         if self._records is None:
             return {}
-        return {k: v for k, v in self._records.items() if isinstance(v, dict)}
+        # The assistant has its own tab, and its record is not a steerable session
+        return {
+            k: v for k, v in self._records.items() if isinstance(v, dict) and not is_assistant_record(v, k)
+        }
 
     def refresh(self):
         """Redraw everything from the current Redis cache."""
