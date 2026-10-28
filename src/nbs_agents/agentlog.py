@@ -33,6 +33,12 @@ An agent that needs an answer writes a ``question`` entry with ``ask``, which
 also sets a top-level ``awaiting_input`` field (``{"t", "text", "source"}``).
 The next operator, ``finalize`` or ``close`` entry clears it, so a GUI can show
 that the agent is waiting until someone replies.
+
+The read-only beamline assistant keeps one record per day under
+``assistant-YYYYMMDD`` with a top-level ``kind`` of ``"assistant"``. Its
+entries are deterministic ``run`` lines and Claude's ``summary``, ``advice``,
+``alert`` and ``answer`` posts; ``operator`` entries are questions to it.
+Driver agents never see these records.
 """
 
 import json
@@ -45,6 +51,48 @@ LOGGER = logging.getLogger(__name__)
 AGENT_LOG_TOPIC = "AGENT"
 OPERATOR_KINDS = ("operator", "stop")
 ANSWER_KINDS = OPERATOR_KINDS + ("finalize", "close")
+ASSISTANT_NAME = "assistant"
+ASSISTANT_KIND = "assistant"
+ASSISTANT_POST_KINDS = ("summary", "advice", "alert", "answer")
+
+
+def assistant_uid(t: Optional[float] = None) -> str:
+    """
+    UID of the assistant's record for the local day containing ``t``.
+
+    Parameters
+    ----------
+    t : float, optional
+        Epoch seconds; now if omitted.
+
+    Returns
+    -------
+    str
+        ``"assistant-YYYYMMDD"``.
+    """
+    return f"{ASSISTANT_NAME}-{time.strftime('%Y%m%d', time.localtime(t))}"
+
+
+def is_assistant_record(record: Optional[dict[str, Any]], agent_uid: str = "") -> bool:
+    """
+    Whether a record belongs to the beamline assistant.
+
+    Parameters
+    ----------
+    record : dict or None
+        Agent-log record.
+    agent_uid : str, optional
+        The record's UID, checked too in case the record is incomplete.
+
+    Returns
+    -------
+    bool
+        True for assistant records.
+    """
+    if str(agent_uid).startswith(f"{ASSISTANT_NAME}-"):
+        return True
+    record = record or {}
+    return record.get("kind") == ASSISTANT_KIND or record.get("agent_name") == ASSISTANT_NAME
 
 
 class AgentLog:
@@ -435,6 +483,35 @@ class AgentLog:
 
         self._modify(agent_uid, update)
         return entry
+
+    def ensure_assistant_record(self, t: Optional[float] = None, **fields: Any) -> str:
+        """
+        Create the assistant's record for the day containing ``t`` if missing.
+
+        Parameters
+        ----------
+        t : float, optional
+            Epoch seconds; now if omitted.
+        **fields
+            Top-level fields for a new record.
+
+        Returns
+        -------
+        str
+            The record's UID.
+        """
+        uid = assistant_uid(t)
+        if self.get(uid) is None:
+            fields.setdefault("status", "idle")
+            self.open(
+                uid,
+                ASSISTANT_NAME,
+                goal="Read-only beamline assistant",
+                kind=ASSISTANT_KIND,
+                calls=0,
+                **fields,
+            )
+        return uid
 
     def take_operator_messages(self, agent_uid: str) -> list[dict[str, Any]]:
         """
