@@ -8,6 +8,7 @@ from bluesky_queueserver_api.zmq import REManagerAPI
 from .agentlog import AgentLog
 from .catalog import ZMQCatalog
 from .cli.config import CliConfig
+from .launcher import ClaudeLauncher
 from .supervisor import AgentSupervisor
 
 LOGGER = logging.getLogger(__name__)
@@ -50,7 +51,12 @@ def main() -> None:
     except Exception:
         LOGGER.exception("Agent log disabled: could not reach Redis at %s:%s", config.redis_host, config.redis_port)
         agent_log = None
-    AgentSupervisor(manager, catalog, agent_log=agent_log)
+    launcher = ClaudeLauncher.from_config(config)
+    if launcher is None:
+        LOGGER.info("Claude launching off (claude_command is empty)")
+    else:
+        LOGGER.info("Launching Claude for GUI-opened sessions with %r", launcher.command)
+    AgentSupervisor(manager, catalog, agent_log=agent_log, launcher=launcher)
     if agent_log is not None:
         _start_heartbeat(agent_log)
     LOGGER.info("Agent runner listening for Bluesky documents at %s", config.zmq_addr)

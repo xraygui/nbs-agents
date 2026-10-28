@@ -20,8 +20,8 @@ Record schema::
     }
 
 ``kind`` is free-form but the shared vocabulary is ``open``, ``note``,
-``question``, ``add``, ``remove``, ``run``, ``status``, ``finalize``, ``close``
-and ``error``. Optional
+``question``, ``add``, ``remove``, ``run``, ``status``, ``finalize``, ``close``,
+``launch`` (the runner started or reaped a Claude) and ``error``. Optional
 refs include ``item_uid``, ``run_uid``, ``plan`` and ``source`` (who wrote it).
 
 Operators steer a running agent through the same record: ``operator`` entries
@@ -354,6 +354,31 @@ class AgentLog:
             if record is None:
                 record = {"agent_uid": agent_uid, "log": []}
             record["status"] = status
+            record.update(fields)
+            return record
+
+        return self._modify(agent_uid, update)
+
+    def update(self, agent_uid: str, **fields: Any) -> dict[str, Any]:
+        """
+        Set top-level fields without touching the status.
+
+        Parameters
+        ----------
+        agent_uid : str
+            Agent session UID.
+        **fields
+            Top-level fields to set.
+
+        Returns
+        -------
+        dict
+            The record as written.
+        """
+
+        def update(record):
+            if record is None:
+                record = {"agent_uid": agent_uid, "status": "unknown", "log": []}
             record.update(fields)
             return record
 

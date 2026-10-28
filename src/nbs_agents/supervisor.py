@@ -16,9 +16,12 @@ from .constants import (
     CLOSE_AGENT_PLAN,
     OPEN_AGENT_PLAN,
 )
+from .launcher import ClaudeLauncher, LaunchedAgent
 from .queue import ensure_queue_stop_before_close, update_close_agent_uid
 
 LOGGER = logging.getLogger(__name__)
+
+CLAUDE_AGENT = "claude"
 
 
 class AgentSupervisor:
@@ -35,6 +38,10 @@ class AgentSupervisor:
         Agent registry. If omitted, a default registry with built-in agents is used.
     agent_log : AgentLog, optional
         Shared agent-log store that agents write their records to.
+    launcher : ClaudeLauncher, optional
+        Starts a Claude child when a ``"claude"`` session opens with
+        ``launch: true`` and stops it when the session closes. Without one,
+        such sessions log an error and wait for a Claude started by hand.
     """
 
     def __init__(
@@ -43,11 +50,15 @@ class AgentSupervisor:
         catalog: ZMQCatalog,
         registry: Optional[AgentRegistry] = None,
         agent_log: Optional[AgentLog] = None,
+        launcher: Optional[ClaudeLauncher] = None,
     ) -> None:
         self.manager = manager
         self.catalog = catalog
         self.registry = registry or default_registry()
         self.agent_log = agent_log
+        self.launcher = launcher
+        if launcher is not None:
+            launcher.on_exit = self._on_launched_exit
         self.active_agents: dict[str, Any] = {}
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="agent-qs")
         self.catalog.subscribe_stop(self._on_run_stop)
@@ -147,6 +158,71 @@ class AgentSupervisor:
         LOGGER.info("Activated agent %s (%s)", agent_name, agent_uid)
         agent.open_log()
         agent.start()
+        if agent_name == CLAUDE_AGENT and (parameters or {}).get("launch") and agent.active:
+            self._launch_claude(agent)
+
+    def _launch_claude(self, agent: Any) -> None:
+        """
+        Start a Claude child to drive a newly opened session.
+
+        Failures are written to the session log, never raised, so the runner
+        keeps going.
+
+        Parameters
+        ----------
+        agent : BaseAgent
+            The active ``"claude"`` agent.
+        """
+        if self.launcher is None:
+            agent.log("error", "launch requested, but this runner has no claude_command configured")
+            return
+        driver = f"runner-launch-{agent.agent_uid[:8]}"
+        try:
+            # Record the driver first, so the child marks operator messages read from its first call
+            if self.agent_log is not None:
+                self.agent_log.update(agent.agent_uid, driver=driver)
+            launched = self.launcher.launch(agent.agent_uid, (agent.parameters or {}).get("goal"), driver)
+        except Exception as exc:
+            LOGGER.exception("Could not launch Claude for %s", agent.agent_uid)
+            agent.log("error", f"could not launch Claude: {exc}")
+            return
+        launch = {
+            "pid": launched.pid,
+            "command": launched.command,
+            "workdir": launched.workdir,
+            "log_path": launched.log_path,
+        }
+        if self.agent_log is not None:
+            try:
+                self.agent_log.update(agent.agent_uid, launch=launch)
+            except Exception:
+                LOGGER.exception("Failed to record launch for %s", agent.agent_uid)
+        agent.log("launch", f"started Claude (pid {launched.pid})", pid=launched.pid, log_path=launched.log_path)
+
+    def _on_launched_exit(self, launched: LaunchedAgent, returncode: int) -> None:
+        """
+        Log a launched Claude's exit in its session.
+
+        Parameters
+        ----------
+        launched : LaunchedAgent
+            The child that exited.
+        returncode : int
+            Its exit status; negative for a signal.
+        """
+        text = f"Claude (pid {launched.pid}) exited with status {returncode}"
+        agent = self.active_agents.get(launched.agent_uid)
+        kind = "error" if agent is not None and agent.active and returncode != 0 else "launch"
+        if agent is not None:
+            agent.log(kind, text, pid=launched.pid, exit_status=returncode, log_path=launched.log_path)
+        elif self.agent_log is not None:
+            try:
+                self.agent_log.append(
+                    launched.agent_uid, kind, text, source=CLAUDE_AGENT,
+                    pid=launched.pid, exit_status=returncode, log_path=launched.log_path,
+                )
+            except Exception:
+                LOGGER.exception("Failed to log Claude exit for %s", launched.agent_uid)
 
     @staticmethod
     def _log_run(agent: Any, run: ZMQRun) -> None:
@@ -198,6 +274,11 @@ class AgentSupervisor:
             Agent that has shut down.
         """
         self.active_agents.pop(agent.agent_uid, None)
+        if self.launcher is not None:
+            try:
+                self.launcher.terminate(agent.agent_uid)
+            except Exception:
+                LOGGER.exception("Failed to stop Claude for %s", agent.agent_uid)
 
 
 def default_registry() -> AgentRegistry:
@@ -212,5 +293,5 @@ def default_registry() -> AgentRegistry:
     registry = AgentRegistry()
     registry.register("repeat", RepeatAgent)
     registry.register("external", ExternalAgent)
-    registry.register("claude", ExternalAgent)
+    registry.register(CLAUDE_AGENT, ExternalAgent)
     return registry
