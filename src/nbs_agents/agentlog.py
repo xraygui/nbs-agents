@@ -104,6 +104,35 @@ class AgentLog:
         """
         return f"{self.prefix}{self.topic}"
 
+    # Kept outside key_prefix so records() never sees it
+    HEARTBEAT_KEY = "NBS_AGENTS_RUNNER_HEARTBEAT"
+    HEARTBEAT_STALE_S = 20.0
+
+    @property
+    def heartbeat_key(self) -> str:
+        return f"{self.prefix}{self.HEARTBEAT_KEY}"
+
+    def heartbeat(self) -> None:
+        """Record that an agent runner (supervisor) is alive now."""
+        self.redis.set(self.heartbeat_key, str(time.time()))
+
+    def runner_alive(self) -> bool:
+        """
+        Whether an agent runner wrote a heartbeat recently.
+
+        Returns
+        -------
+        bool
+            True if the last heartbeat is newer than ``HEARTBEAT_STALE_S``.
+        """
+        raw = self.redis.get(self.heartbeat_key)
+        if raw is None:
+            return False
+        try:
+            return time.time() - float(raw) < self.HEARTBEAT_STALE_S
+        except ValueError:
+            return False
+
     def _key(self, agent_uid: str) -> str:
         return f"{self.key_prefix}{agent_uid}"
 
