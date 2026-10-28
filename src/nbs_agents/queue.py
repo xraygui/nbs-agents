@@ -100,6 +100,61 @@ def make_open_agent_block(
     ]
 
 
+def submit_agent_block(
+    manager: REManagerAPI,
+    agent_name: str,
+    agent_parameters: Optional[dict[str, Any]] = None,
+    *,
+    start: bool = True,
+    **add_kwargs: Any,
+) -> dict[str, Any]:
+    """
+    Append an agent control block to the queue and start it if it is next.
+
+    Used by both ``nbs-cli open`` and the GUI's "New agent" button.
+
+    Parameters
+    ----------
+    manager : REManagerAPI
+        QueueServer API client.
+    agent_name : str
+        Registered agent name.
+    agent_parameters : dict, optional
+        Agent-specific parameters.
+    start : bool, optional
+        Start the queue if it is idle and the block is at its head.
+    **add_kwargs
+        Passed to ``item_add_batch``, for example ``user`` and ``user_group``.
+
+    Returns
+    -------
+    dict
+        ``items`` (the added items as the server returned them), ``started``,
+        and ``position`` (index of ``open_agent`` in the queue, or ``None``).
+
+    Raises
+    ------
+    RuntimeError
+        If the server refuses the block or the queue start.
+    """
+    block = make_open_agent_block(agent_name, agent_parameters)
+    response = manager.item_add_batch(block, **add_kwargs)
+    if not response.get("success", False):
+        raise RuntimeError(f"item_add_batch failed: {response.get('msg', response)}")
+    added = list(response.get("items", []))
+    open_item_uid = added[0]["item_uid"]
+
+    items = get_queue_items(manager)
+    position = next((i for i, it in enumerate(items) if it.get("item_uid") == open_item_uid), None)
+    started = False
+    if start and position == 0 and manager.status().get("manager_state") == "idle":
+        start_response = manager.queue_start()
+        if not start_response.get("success", False):
+            raise RuntimeError(f"queue_start failed: {start_response.get('msg', start_response)}")
+        started = True
+    return {"items": added, "started": started, "position": position}
+
+
 def get_queue_items(
     manager: REManagerAPI,
     *,
