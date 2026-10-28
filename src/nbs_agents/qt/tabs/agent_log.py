@@ -7,12 +7,17 @@ from qtpy.QtCore import Qt, QTimer
 from qtpy.QtGui import QColor
 from qtpy.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QSizePolicy,
     QSplitter,
@@ -25,6 +30,8 @@ from qtpy.QtWidgets import (
 )
 
 from ...agentlog import AGENT_LOG_TOPIC, AgentLog
+from ...launcher import claude_launch_parameters
+from ...queue import submit_agent_block
 
 ALL_AGENTS = "__all__"
 ENTRY_COLUMNS = ["Time", "Agent", "Kind", "Text", "Details"]
@@ -32,6 +39,14 @@ ENTRY_FIELDS = {"t", "kind", "text", "source"}
 STEERABLE_STATUSES = ("opening", "active", "finalizing")
 CONVERSATION_KINDS = ("note", "question", "operator", "stop", "finalize")
 WAITING_COLOR = "#f0ad4e"
+CLAUDE_AGENT = "claude"
+RUNNER_POLL_MS = 5000
+# runner_alive() result -> (label text, color)
+RUNNER_STATES = {
+    True: ("Agent runner: running", "#2e7d32"),
+    False: ("Agent runner: not running", "#c62828"),
+    None: ("Agent runner: unknown", "#a05f00"),
+}
 WAITING_BACKGROUND = "#fff1cc"
 
 # kind -> (side, background, label); "right" is the operator's side.
@@ -305,6 +320,98 @@ def conversation_html(records, pairs, show_agent=True):
     return "<div style='margin-top:4px'></div>".join(parts)
 
 
+class NewAgentDialog(QDialog):
+    """
+    Ask for a Claude agent's goal and budget before queueing its session.
+
+    Parameters
+    ----------
+    runner_alive : bool or None
+        Runner heartbeat state; ``False`` disables OK, ``None`` only warns.
+    parent : QWidget, optional
+        Parent widget.
+    """
+
+    def __init__(self, runner_alive=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("New Claude agent")
+        self.goal_edit = QPlainTextEdit(self)
+        self.goal_edit.setPlaceholderText("What should the agent work on? It will plan this with you before queueing scans.")
+        self.budget_edit = QLineEdit(self)
+        self.budget_edit.setPlaceholderText("optional, e.g. 90m or 2h")
+        self.start_check = QCheckBox("Start the queue if idle", self)
+        self.start_check.setChecked(True)
+        self.runner_label = QLabel(self)
+        self.runner_label.setWordWrap(True)
+        self.error_label = QLabel(self)
+        self.error_label.setStyleSheet("color: #c62828")
+        self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, self)
+        self.buttons.button(QDialogButtonBox.Ok).setText("Queue agent")
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+
+        form = QFormLayout()
+        form.addRow("Goal:", self.goal_edit)
+        form.addRow("Budget:", self.budget_edit)
+        form.addRow("", self.start_check)
+        layout = QVBoxLayout(self)
+        layout.addWidget(
+            QLabel(
+                "Queues open_agent, queue_stop and close_agent at the back of the queue. "
+                "When open_agent runs, nbs-agents-runner starts Claude for the session.",
+                self,
+            )
+        )
+        layout.addLayout(form)
+        layout.addWidget(self.runner_label)
+        layout.addWidget(self.error_label)
+        layout.addWidget(self.buttons)
+
+        self._runner_alive = runner_alive
+        text, color = RUNNER_STATES[runner_alive]
+        if runner_alive is False:
+            text += ". Start it (`pixi run agent-runner` in nbs-agents) on a host where `claude` is logged in."
+        elif runner_alive is None:
+            text += ". Could not read its heartbeat; the agent will only start if the runner is up."
+        self.runner_label.setText(text)
+        self.runner_label.setStyleSheet(f"color: {color}")
+        self.goal_edit.textChanged.connect(self._validate)
+        self.budget_edit.textChanged.connect(self._validate)
+        self._validate()
+
+    def parameters(self):
+        """
+        ``open_agent`` parameters for the entered goal and budget.
+
+        Returns
+        -------
+        dict
+            Parameters with ``launch: True``.
+
+        Raises
+        ------
+        ValueError
+            If the goal is empty or the budget is malformed.
+        """
+        return claude_launch_parameters(self.goal_edit.toPlainText(), self.budget_edit.text())
+
+    def start_queue(self):
+        """Whether to start the queue if the block lands at its idle head."""
+        return self.start_check.isChecked()
+
+    def _validate(self):
+        error = ""
+        try:
+            self.parameters()
+        except ValueError as e:
+            error = "" if not self.goal_edit.toPlainText().strip() else str(e)
+            ok = False
+        else:
+            ok = self._runner_alive is not False
+        self.error_label.setText(error)
+        self.buttons.button(QDialogButtonBox.Ok).setEnabled(ok)
+
+
 class AgentLogTab(QWidget):
     """
     Show agent sessions from the shared Redis agent log as a conversation.
@@ -343,10 +450,16 @@ class AgentLogTab(QWidget):
         self.agent_combo = QComboBox(self)
         self.agent_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         self.agent_combo.currentIndexChanged.connect(self._on_agent_selected)
+        self.new_agent_button = QPushButton("New agent…", self)
+        self.new_agent_button.setToolTip("Queue a Claude agent session with a goal; the agent runner starts Claude")
+        self.new_agent_button.clicked.connect(self.new_agent)
+        self.runner_label = QLabel(self)
         picker = QHBoxLayout()
         picker.addWidget(QLabel("Agent:", self))
         picker.addWidget(self.agent_combo)
+        picker.addWidget(self.new_agent_button)
         picker.addStretch(1)
+        picker.addWidget(self.runner_label)
 
         self.summary = QLabel(self)
         self.summary.setWordWrap(True)
@@ -427,11 +540,104 @@ class AgentLogTab(QWidget):
             running = [uid for uid, r in sorted_sessions(self._snapshot()) if r.get("status") in STEERABLE_STATUSES]
             if running:
                 self._selected = running[0]
+        # The heartbeat is outside the AGENT topic, so poll it
+        self._runner_timer = QTimer(self)
+        self._runner_timer.timeout.connect(self._update_runner_state)
+        self._runner_timer.start(RUNNER_POLL_MS)
+        self._update_runner_state()
         self.refresh()
 
     def _writer(self):
         records = self._records
         return AgentLog(records._redis, records._prefix, AGENT_LOG_TOPIC)
+
+    def runner_alive(self):
+        """
+        Whether nbs-agents-runner has written a recent heartbeat.
+
+        Returns
+        -------
+        bool or None
+            ``None`` if the heartbeat cannot be read.
+        """
+        if self._records is None:
+            return None
+        try:
+            return self._writer().runner_alive()
+        except Exception:
+            return None
+
+    def _update_runner_state(self):
+        alive = self.runner_alive()
+        text, color = RUNNER_STATES[alive]
+        self.runner_label.setText(text)
+        self.runner_label.setStyleSheet(f"color: {color}")
+        self.new_agent_button.setEnabled(alive is not False)
+        if alive is False:
+            self.new_agent_button.setToolTip("Start nbs-agents-runner first: it launches the Claude agent")
+        else:
+            self.new_agent_button.setToolTip("Queue a Claude agent session with a goal; the agent runner starts Claude")
+
+    def new_agent(self):
+        """Ask for a goal and queue a Claude session the runner will launch."""
+        dialog = NewAgentDialog(self.runner_alive(), self)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        busy = [
+            agent_label(uid, r)
+            for uid, r in sorted_sessions(self._snapshot())
+            if r.get("agent_name") == CLAUDE_AGENT and r.get("status") in STEERABLE_STATUSES
+        ]
+        if busy:
+            answer = QMessageBox.question(
+                self,
+                "New agent",
+                f"{', '.join(busy)} is still running. Queue another Claude session after it?",
+            )
+            if answer != QMessageBox.Yes:
+                return
+        try:
+            out = self.submit_new_agent(dialog.parameters(), start=dialog.start_queue())
+        except Exception as e:
+            QMessageBox.warning(self, "New agent", f"Could not queue the agent: {e}")
+            return
+        if not out["started"]:
+            where = "at the head of the queue" if out["position"] == 0 else f"behind {out['position']} item(s)"
+            QMessageBox.information(
+                self,
+                "New agent",
+                f"Queued {where}. Claude starts when open_agent runs; start the queue when ready.",
+            )
+
+    def submit_new_agent(self, parameters, start=True):
+        """
+        Queue a ``claude`` agent block through the GUI's queue server client.
+
+        Parameters
+        ----------
+        parameters : dict
+            ``open_agent`` parameters, normally from ``claude_launch_parameters``.
+        start : bool, optional
+            Start the queue if it is idle and the block is at its head.
+
+        Returns
+        -------
+        dict
+            ``submit_agent_block`` result: ``items``, ``started``, ``position``.
+        """
+        run_engine = self.model.run_engine
+        user = {}
+        if getattr(run_engine, "_user_name", None):
+            user["user"] = run_engine._user_name
+        if getattr(run_engine, "_user_group", None):
+            user["user_group"] = run_engine._user_group
+        try:
+            return submit_agent_block(run_engine._client, CLAUDE_AGENT, parameters, start=start, **user)
+        finally:
+            try:
+                run_engine.load_re_manager_status(unbuffered=True)
+            except Exception:
+                pass
 
     def _selected_record(self):
         if self._records is None or self._selected == ALL_AGENTS:

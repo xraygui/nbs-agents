@@ -23,6 +23,16 @@ from nbs_agents.qt.tabs.agent_log import (  # noqa: E402
     split_entries,
 )
 
+_APP = None
+
+
+def qapp():
+    """Return the QApplication, keeping a reference so it is not garbage collected."""
+    global _APP
+    _APP = QApplication.instance() or QApplication([])
+    return _APP
+
+
 RECORDS = {
     "aaaaaaaa-1": {
         "agent_name": "claude",
@@ -118,7 +128,7 @@ def test_conversation_html_marks_open_question_and_escapes():
 
 
 def test_tab_follows_redis_changes():
-    app = QApplication.instance() or QApplication([])
+    app = qapp()
     data = {k: dict(v, log=list(v["log"])) for k, v in RECORDS.items()}
     model = FakeModel(data)
     tab = AgentLogTab(model)
@@ -146,7 +156,7 @@ def test_tab_follows_redis_changes():
 
 
 def test_tab_shows_waiting_banner_and_title():
-    QApplication.instance() or QApplication([])
+    qapp()
     from qtpy.QtWidgets import QTabWidget
 
     from nbs_agents.agentlog import AgentLog
@@ -184,7 +194,7 @@ def test_tab_shows_waiting_banner_and_title():
 
 
 def test_tab_without_redis():
-    QApplication.instance() or QApplication([])
+    qapp()
 
     class NoRedis:
         def get_redis_dict(self, topic):
@@ -198,7 +208,7 @@ def test_tab_without_redis():
 
 
 def test_tab_sends_messages_and_stop():
-    QApplication.instance() or QApplication([])
+    qapp()
     from nbs_agents.agentlog import AgentLog
 
     redis = FakeRedis()
@@ -227,3 +237,88 @@ def test_tab_sends_messages_and_stop():
     tab.refresh()
     assert not tab.stop_button.isEnabled()
     assert "stop requested" in tab.summary.text()
+
+
+class FakeRunEngine:
+    def __init__(self, queue=()):
+        from unittest.mock import MagicMock
+
+        self._user_name = "gui-user"
+        self._user_group = "primary"
+        self._client = MagicMock()
+        added = [{"item_uid": "op"}, {"item_uid": "qs"}, {"item_uid": "ca"}]
+        self._client.item_add_batch.return_value = {"success": True, "items": added}
+        self._client.queue_get.return_value = {"success": True, "items": list(queue) + added}
+        self._client.status.return_value = {"manager_state": "idle"}
+        self._client.queue_start.return_value = {"success": True}
+        self.status_loads = 0
+
+    def load_re_manager_status(self, unbuffered=False):
+        self.status_loads += 1
+
+
+def test_new_agent_dialog_builds_launch_parameters():
+    qapp()
+    from qtpy.QtWidgets import QDialogButtonBox
+
+    from nbs_agents.qt.tabs.agent_log import NewAgentDialog
+
+    dialog = NewAgentDialog(runner_alive=True)
+    ok = dialog.buttons.button(QDialogButtonBox.Ok)
+    assert not ok.isEnabled()
+    dialog.goal_edit.setPlainText("  Map the C K-edge\non samples 1-3 ")
+    assert ok.isEnabled()
+    assert dialog.start_queue()
+    assert dialog.parameters() == {"goal": "Map the C K-edge\non samples 1-3", "launch": True}
+    dialog.budget_edit.setText("2h")
+    assert dialog.parameters()["budget"] == {"time_s": 7200.0}
+    dialog.budget_edit.setText("soon")
+    assert not ok.isEnabled()
+    assert "bad duration" in dialog.error_label.text()
+
+    down = NewAgentDialog(runner_alive=False)
+    down.goal_edit.setPlainText("g")
+    assert not down.buttons.button(QDialogButtonBox.Ok).isEnabled()
+    assert "not running" in down.runner_label.text()
+    unknown = NewAgentDialog(runner_alive=None)
+    unknown.goal_edit.setPlainText("g")
+    assert unknown.buttons.button(QDialogButtonBox.Ok).isEnabled()
+
+
+def test_tab_submits_claude_block_and_starts_queue():
+    qapp()
+    from nbs_agents.agentlog import AgentLog
+
+    redis = FakeRedis()
+    model = FakeModel({})
+    model.user_status.redis_dict._redis = redis
+    model.run_engine = FakeRunEngine()
+    tab = AgentLogTab(model)
+    assert "unknown" not in tab.runner_label.text()
+    assert not tab.new_agent_button.isEnabled()  # no heartbeat yet
+    AgentLog(redis, "bl-").heartbeat()
+    tab._update_runner_state()
+    assert tab.new_agent_button.isEnabled()
+    assert "running" in tab.runner_label.text()
+
+    out = tab.submit_new_agent({"goal": "g", "launch": True})
+    client = model.run_engine._client
+    items = client.item_add_batch.call_args.args[0]
+    assert [i.to_dict()["name"] for i in items] == ["open_agent", "queue_stop", "close_agent"]
+    assert items[0].to_dict()["args"] == ["claude", {"goal": "g", "launch": True}]
+    assert client.item_add_batch.call_args.kwargs == {"user": "gui-user", "user_group": "primary"}
+    client.queue_start.assert_called_once()
+    assert out["started"] and out["position"] == 0
+    assert model.run_engine.status_loads == 1
+
+
+def test_tab_does_not_start_queue_behind_other_items():
+    qapp()
+    model = FakeModel({})
+    model.run_engine = FakeRunEngine(queue=[{"item_uid": "other"}])
+    tab = AgentLogTab(model)
+    out = tab.submit_new_agent({"goal": "g", "launch": True}, start=True)
+    assert not out["started"] and out["position"] == 1
+    model.run_engine._client.queue_start.assert_not_called()
+    out = AgentLogTab(FakeModel({})).runner_alive()
+    assert out is None
