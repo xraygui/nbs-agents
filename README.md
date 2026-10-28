@@ -125,6 +125,42 @@ stream-json). It puts this repo's pixi `nbs-cli` on PATH and allows only
 `open` needs `nbs-agents-runner` running: its `ExternalAgent` (registered as
 `external` and `claude`) holds the block open and records the session.
 
+### Starting a Claude agent from nbs-gui
+
+The Agents Log tab has a **New agent…** button next to the Agent picker. It asks
+for a goal (required), an optional budget such as `90m` or `2h`, and whether to
+start the queue if it is idle. It queues
+`open_agent("claude", {"goal": ..., "budget": {"time_s": ...}, "launch": true})`,
+`queue_stop` and `close_agent` at the back of the queue (the same helper
+`nbs-cli open` uses), and starts the queue only if the block is at its head.
+The tab shows whether the runner's heartbeat is fresh; the button is disabled
+while the runner is down. The Agent Block plan widget offers the same `claude`
+block (goal and budget) without starting the queue.
+
+When that `open_agent` runs, `nbs-agents-runner` starts Claude itself:
+`claude_command --headless` in `claude_workdir`, with `NBS_AGENT_UID`,
+`NBS_AGENT_GOAL` and `NBS_DRIVER` set, stdout and stderr in a per-session file in
+`claude_log_dir`. `scripts/claude-beamline` sees `NBS_AGENT_UID`, attaches to the
+open session instead of calling `open` (nbs-cli reads `NBS_AGENT_UID` as the
+default `--agent-uid`), and plans the goal with the operator before queueing.
+The session record gets `driver` and `launch` (`pid`, `command`, `workdir`,
+`log_path`), and the log gets `launch` entries when Claude starts and exits, or
+an `error` entry if it cannot start (the runner keeps going). When the session
+closes, the runner sends Claude SIGTERM, then SIGKILL after
+`claude_stop_timeout_s`. Stopping the runner leaves a launched Claude running.
+
+So the runner must run on a host where `claude` is installed and logged in, with
+the beamline-steering skill linked into `~/.claude/skills`. Launch settings, in
+`[nbs_cli]` or as `NBS_CLAUDE_*` variables:
+
+```toml
+claude_command = "claude-beamline"            # empty turns launching off; a bare name not
+                                              # on PATH is taken from this repo's scripts/
+claude_workdir = "~/beamline-agents/{uid8}"   # {uid} and {uid8} are filled in
+claude_log_dir = "~/beamline-agents/logs"
+claude_stop_timeout_s = 10.0
+```
+
 Settings come from `$NBS_CLI_CONFIG` or `~/.config/nbs-cli.toml` (table
 `[nbs_cli]`), overridden by `NBS_<NAME>` environment variables. The runner reads
 the same settings.
