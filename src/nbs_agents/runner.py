@@ -1,3 +1,4 @@
+import dataclasses
 import logging
 import threading
 import time
@@ -7,7 +8,9 @@ from bluesky_queueserver_api.zmq import REManagerAPI
 
 from .agentlog import AgentLog
 from .catalog import ZMQCatalog
-from .cli.config import CliConfig
+from .agents.assistant import AssistantAgent
+from .cli.config import AssistantConfig, CliConfig
+from .cli.core import Beamline
 from .launcher import ClaudeLauncher
 from .supervisor import AgentSupervisor
 
@@ -26,6 +29,50 @@ def _start_heartbeat(agent_log: AgentLog, period_s: float = 5.0) -> None:
             time.sleep(period_s)
 
     threading.Thread(target=beat, name="runner-heartbeat", daemon=True).start()
+
+
+def start_assistant(config: CliConfig, catalog: ZMQCatalog, agent_log) -> "AssistantAgent | None":
+    """
+    Start the read-only beamline assistant if ``[assistant] enabled = true``.
+
+    Parameters
+    ----------
+    config : CliConfig
+        nbs-cli settings, for read access to the beamline.
+    catalog : ZMQCatalog
+        Document catalog.
+    agent_log : AgentLog or None
+        Agent log; the assistant needs one.
+
+    Returns
+    -------
+    AssistantAgent or None
+        The running assistant.
+    """
+    try:
+        settings = AssistantConfig.load()
+    except Exception:
+        LOGGER.exception("Assistant disabled: bad [assistant] settings")
+        return None
+    if not settings.enabled:
+        LOGGER.info("Assistant off ([assistant] enabled is not true)")
+        return None
+    if agent_log is None:
+        LOGGER.error("Assistant disabled: it needs the agent log in Redis")
+        return None
+    launcher = None
+    if (settings.command or "").strip():
+        launcher = ClaudeLauncher(settings.command, settings.workdir, settings.log_dir)
+    beamline = Beamline(dataclasses.replace(config, role="assistant"))
+    assistant = AssistantAgent(
+        settings, beamline, catalog, agent_log, launcher=launcher, signal=config.signal, norm=config.norm
+    )
+    assistant.start()
+    LOGGER.info(
+        "Assistant watching every run (record %s, workdir %s, models %s/%s)",
+        assistant.agent_uid, settings.workdir, settings.model, settings.alert_model,
+    )
+    return assistant
 
 
 def main() -> None:
@@ -56,7 +103,11 @@ def main() -> None:
         LOGGER.info("Claude launching off (claude_command is empty)")
     else:
         LOGGER.info("Launching Claude for GUI-opened sessions with %r", launcher.command)
-    AgentSupervisor(manager, catalog, agent_log=agent_log, launcher=launcher)
+    observers = []
+    assistant = start_assistant(config, catalog, agent_log)
+    if assistant is not None:
+        observers.append(assistant)
+    AgentSupervisor(manager, catalog, agent_log=agent_log, launcher=launcher, observers=observers)
     if agent_log is not None:
         _start_heartbeat(agent_log)
     LOGGER.info("Agent runner listening for Bluesky documents at %s", config.zmq_addr)
@@ -65,6 +116,9 @@ def main() -> None:
         dispatcher.start()
     except KeyboardInterrupt:
         LOGGER.info("Stopping agent runner")
+    finally:
+        if assistant is not None:
+            assistant.stop("runner stopped")
 
 
 if __name__ == "__main__":

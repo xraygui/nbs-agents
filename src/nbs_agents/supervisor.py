@@ -42,6 +42,9 @@ class AgentSupervisor:
         Starts a Claude child when a ``"claude"`` session opens with
         ``launch: true`` and stops it when the session closes. Without one,
         such sessions log an error and wait for a Claude started by hand.
+    observers : list, optional
+        Passive agents, such as the beamline assistant, that see every
+        finished run through ``on_run_stop`` but are never opened or queued.
     """
 
     def __init__(
@@ -51,6 +54,7 @@ class AgentSupervisor:
         registry: Optional[AgentRegistry] = None,
         agent_log: Optional[AgentLog] = None,
         launcher: Optional[ClaudeLauncher] = None,
+        observers: Optional[list[Any]] = None,
     ) -> None:
         self.manager = manager
         self.catalog = catalog
@@ -60,6 +64,7 @@ class AgentSupervisor:
         if launcher is not None:
             launcher.on_exit = self._on_launched_exit
         self.active_agents: dict[str, Any] = {}
+        self.observers = list(observers or [])
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="agent-qs")
         self.catalog.subscribe_stop(self._on_run_stop)
 
@@ -101,6 +106,11 @@ class AgentSupervisor:
                 agent.on_run_stop(run)
         except Exception:
             LOGGER.exception("Failed to handle run stop for run %s", run.uid)
+        for observer in self.observers:
+            try:
+                observer.on_run_stop(run)
+            except Exception:
+                LOGGER.exception("Observer %s failed on run %s", type(observer).__name__, run.uid)
 
     def _activate_agent(self, run: ZMQRun) -> None:
         """
