@@ -7,6 +7,7 @@ from qtpy.QtCore import Qt, QTimer
 from qtpy.QtGui import QColor
 from qtpy.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -29,7 +30,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from ...agentlog import AGENT_LOG_TOPIC, AgentLog, is_assistant_record
+from ...agentlog import ASSISTANT_POST_KINDS, AGENT_LOG_TOPIC, AgentLog, assistant_uid, is_assistant_record
 from ...launcher import claude_launch_parameters
 from ...queue import submit_agent_block
 
@@ -37,7 +38,10 @@ ALL_AGENTS = "__all__"
 ENTRY_COLUMNS = ["Time", "Agent", "Kind", "Text", "Details"]
 ENTRY_FIELDS = {"t", "kind", "text", "source"}
 STEERABLE_STATUSES = ("opening", "active", "finalizing")
-CONVERSATION_KINDS = ("note", "question", "operator", "stop", "finalize")
+CONVERSATION_KINDS = ("note", "question", "operator", "stop", "finalize") + ASSISTANT_POST_KINDS
+# The read-only assistant takes questions while it runs; it is never stopped from here
+ASSISTANT_LIVE_STATUSES = ("idle", "watching", "calling")
+RUN_LINK = "run:"
 WAITING_COLOR = "#f0ad4e"
 CLAUDE_AGENT = "claude"
 RUNNER_POLL_MS = 5000
@@ -56,6 +60,11 @@ BUBBLE_STYLES = {
     "finalize": ("left", "#e3f2e6", "Summary"),
     "operator": ("right", "#dbe8fb", ""),
     "stop": ("right", "#f9dcdb", "Stop requested"),
+    # Beamline assistant posts
+    "summary": ("left", "#e3f2e6", "Summary"),
+    "advice": ("left", "#dbe8fb", "Advice"),
+    "alert": ("left", "#f9dcdb", "Alert"),
+    "answer": ("left", "#ece3f7", "Answer"),
 }
 
 
@@ -276,9 +285,14 @@ def bubble_html(label, entry, open_question=False, show_agent=True):
         tag, background = "Waiting for your answer", WAITING_BACKGROUND
     header = f"<b>{html.escape(who)}</b> &middot; {format_time(entry.get('t'))}"
     if tag:
-        color = "#a05f00" if open_question else "#555555"
+        color = "#a05f00" if open_question else "#c62828" if kind == "alert" else "#555555"
         header += f" &middot; <b style='color:{color}'>{html.escape(tag)}</b>"
     body = html.escape(str(entry.get("text", ""))).replace("\n", "<br>")
+    if entry.get("run_uids"):
+        links = ", ".join(
+            f"<a href='{RUN_LINK}{html.escape(str(u))}'>{html.escape(str(u)[:8])}</a>" for u in entry["run_uids"]
+        )
+        body += f"<br><span style='font-size:small; color:#555555'>runs: {links}</span>"
     bubble = (
         f"<td width='80%' bgcolor='{background}' style='color:#1a1a1a'>"
         f"<span style='font-size:small; color:#555555'>{header}</span><br>{body}</td>"
@@ -423,7 +437,9 @@ class AgentLogTab(QWidget):
     table shows the rest of the log: opens, queued and removed plans, runs and
     status changes. When an agent asks a question with ``nbs-cli ask`` an
     amber banner says it is waiting for input until someone replies, and the
-    tab title counts waiting agents.
+    tab title counts waiting agents. Today's record of the read-only beamline
+    assistant is listed too: its summaries, advice, alerts and answers are
+    bubbles with run links, the box asks it a question, and it has no stop.
 
     Parameters
     ----------
@@ -477,6 +493,7 @@ class AgentLogTab(QWidget):
 
         self.conversation = QTextBrowser(self)
         self.conversation.setOpenLinks(False)
+        self.conversation.anchorClicked.connect(self._on_link)
         self._follow_conversation = True
         bar = self.conversation.verticalScrollBar()
         # Only the operator scrolling (wheel, drag, arrows) stops following new messages.
@@ -644,8 +661,20 @@ class AgentLogTab(QWidget):
             return None
         return self._snapshot().get(self._selected)
 
+    def _is_assistant(self):
+        return self._selected != ALL_AGENTS and is_assistant_record(self._selected_record(), self._selected)
+
     def _update_controls(self):
         record = self._selected_record()
+        if self._is_assistant():
+            live = record.get("status") in ASSISTANT_LIVE_STATUSES
+            self.message_edit.setEnabled(True)
+            self.send_button.setEnabled(True)
+            self.stop_button.hide()
+            text = "Ask the assistant…" if live else "Ask the assistant… (it answers once the runner is running)"
+            self.message_edit.setPlaceholderText(text)
+            return
+        self.stop_button.show()
         steerable = record is not None and record.get("status") in STEERABLE_STATUSES
         self.message_edit.setEnabled(steerable)
         self.send_button.setEnabled(steerable)
@@ -678,7 +707,12 @@ class AgentLogTab(QWidget):
         if not text or self._selected_record() is None:
             return
         try:
-            self._writer().message(self._selected, text, source="gui")
+            writer = self._writer()
+            if self._is_assistant():
+                # Questions go to today's record, which the running assistant reads
+                writer.message(writer.ensure_assistant_record(), text, source="gui")
+            else:
+                writer.message(self._selected, text, source="gui")
         except Exception as e:
             QMessageBox.warning(self, "Agents Log", f"Could not send message: {e}")
             return
@@ -687,7 +721,7 @@ class AgentLogTab(QWidget):
     def request_stop(self, confirm=True):
         """Ask the selected agent session to stop adding work and finalize."""
         record = self._selected_record()
-        if record is None:
+        if record is None or self._is_assistant():
             return
         if confirm:
             answer = QMessageBox.question(
@@ -708,9 +742,11 @@ class AgentLogTab(QWidget):
     def _snapshot(self):
         if self._records is None:
             return {}
-        # The assistant has its own tab, and its record is not a steerable session
+        # Only today's assistant record: older ones are history, not sessions to talk to
+        today = assistant_uid()
         return {
-            k: v for k, v in self._records.items() if isinstance(v, dict) and not is_assistant_record(v, k)
+            k: v for k, v in self._records.items()
+            if isinstance(v, dict) and (k == today or not is_assistant_record(v, k))
         }
 
     def refresh(self):
@@ -825,6 +861,13 @@ class AgentLogTab(QWidget):
         self._conversation_html = text
         self.conversation.setHtml(text)
         bar.setValue(bar.maximum() if self._follow_conversation else position)
+
+    def _on_link(self, url):
+        target = url.toString()
+        if target.startswith(RUN_LINK):
+            uid = target[len(RUN_LINK):]
+            QApplication.clipboard().setText(uid)
+            self.summary.setToolTip(f"Copied run {uid}")
 
     def _on_conversation_scrolled(self):
         bar = self.conversation.verticalScrollBar()
