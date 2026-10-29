@@ -122,6 +122,13 @@ Then start an agent from any folder with `scripts/claude-beamline`
 stream-json). It puts this repo's pixi `nbs-cli` on PATH and allows only
 `nbs-cli` commands. Steer it from the Agents Log tab or with `nbs-cli tell`.
 
+To run through the NSLS-II API gateway, add `--sandbox bwclaude` (or set
+`NBS_CLAUDE_SANDBOX=bwclaude`, e.g. when starting `nbs-agents-runner`). Claude
+then runs inside `bwclaude` from n2snscripts, with this repo, the nbs-cli config
+and the attachment store mounted. The key and host come from
+`~/.config/nbs-agents/gateway.env` (override with `NBS_GATEWAY_ENV`), which must
+be mode 600 and set `AIFAPIM_API_KEY` and `AIFAPIM_HOST`; keep it outside any repo.
+
 `open` needs `nbs-agents-runner` running: its `ExternalAgent` (registered as
 `external` and `claude`) holds the block open and records the session.
 
