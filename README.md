@@ -204,9 +204,17 @@ It reads the same nbs-cli settings, and shows agent sessions with their
 conversation, activity and queued block, beam status from the beam map, the
 queue state and the runner heartbeat. From the page you can message a running
 agent, request a stop, queue a new Claude agent, and ask the assistant. It
-binds to 127.0.0.1 and only accepts writes from its own page. A panel for
-agent plots is reserved but not filled yet. It needs `fastapi` and `uvicorn`
-(the `web` extra).
+binds to 127.0.0.1 and only accepts writes from its own page. It needs
+`fastapi` and `uvicorn` (the `web` extra).
+
+Message text is Markdown with `$...$` and `$$...$$` math, written so it still
+reads well as plain text. A figure is an image link to an attachment,
+`![alt](att:ID)`, stored by `nbs_agents.attachments.AttachmentStore` (a
+folder, `$NBS_ATTACHMENTS_DIR` or `~/.local/share/nbs-agents/attachments`).
+The page renders Markdown, math and figures (markdown-it, KaTeX and DOMPurify
+from jsDelivr, falling back to plain text offline) and lists the shown
+sessions' figures in a side panel. Plain views use
+`nbs_agents.richtext.plain_text`, which turns figures into `[figure: alt]`.
 
 ## Manual Validation
 
