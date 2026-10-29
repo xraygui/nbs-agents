@@ -84,3 +84,4 @@ nbs-agents = {path = ".", editable = true}
 
 [tool.pixi.tasks]
 agent-runner = "nbs-agents-runner"
+agent-web = "nbs-agents-web"
