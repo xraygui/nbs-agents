@@ -59,9 +59,11 @@ homepage = "https://github.com/xraygui/nbs-agents"
 [project.scripts]
 nbs-agents-runner = "nbs_agents.runner:main"
 nbs-cli = "nbs_agents.cli.main:main"
+nbs-agents-web = "nbs_agents.web.__main__:main"
 
 [project.optional-dependencies]
 gui = ["nbs-gui", "qtpy"]
+web = ["fastapi", "uvicorn"]
 
 [project.entry-points."nbs_gui.plans"]
 nbs-agents-block = "nbs_agents.qt.plans.agent_block:AgentBlockWidget"

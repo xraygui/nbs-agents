@@ -191,6 +191,23 @@ Every agent writes one JSON record per session to Redis under
 each agent's open, runs and close, and nbs-cli writes `add`, `remove`, `note`,
 `question` and `finalize` entries.
 
+### Web UI
+
+`nbs-agents-web` serves the nbs-gui "Agents Log" and "Assistant" tabs as a
+page on localhost, for watching and steering agents without the Qt GUI:
+
+```bash
+nbs-agents-web            # http://localhost:8765; --port, --config as for nbs-cli
+```
+
+It reads the same nbs-cli settings, and shows agent sessions with their
+conversation, activity and queued block, beam status from the beam map, the
+queue state and the runner heartbeat. From the page you can message a running
+agent, request a stop, queue a new Claude agent, and ask the assistant. It
+binds to 127.0.0.1 and only accepts writes from its own page. A panel for
+agent plots is reserved but not filled yet. It needs `fastapi` and `uvicorn`
+(the `web` extra).
+
 ## Manual Validation
 
 1. Start QueueServer and the agent runner.
