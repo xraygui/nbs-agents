@@ -33,6 +33,7 @@ from qtpy.QtWidgets import (
 from ...agentlog import ASSISTANT_POST_KINDS, AGENT_LOG_TOPIC, AgentLog, assistant_uid, is_assistant_record
 from ...launcher import claude_launch_parameters
 from ...queue import submit_agent_block
+from ...richtext import plain_text
 
 ALL_AGENTS = "__all__"
 ENTRY_COLUMNS = ["Time", "Agent", "Kind", "Text", "Details"]
@@ -287,7 +288,7 @@ def bubble_html(label, entry, open_question=False, show_agent=True):
     if tag:
         color = "#a05f00" if open_question else "#c62828" if kind == "alert" else "#555555"
         header += f" &middot; <b style='color:{color}'>{html.escape(tag)}</b>"
-    body = html.escape(str(entry.get("text", ""))).replace("\n", "<br>")
+    body = html.escape(plain_text(str(entry.get("text", "")))).replace("\n", "<br>")
     if entry.get("run_uids"):
         links = ", ".join(
             f"<a href='{RUN_LINK}{html.escape(str(u))}'>{html.escape(str(u)[:8])}</a>" for u in entry["run_uids"]
@@ -841,7 +842,7 @@ class AgentLogTab(QWidget):
                 format_time(entry.get("t")),
                 label,
                 str(entry.get("kind", "")),
-                str(entry.get("text", "")),
+                plain_text(str(entry.get("text", ""))),
                 entry_details(entry),
             ]
             for col, value in enumerate(values):
