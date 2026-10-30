@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-from .cli.config import AgentLogConfig
+from .config import AgentLogConfig
 
 LOGGER = logging.getLogger(__name__)
 

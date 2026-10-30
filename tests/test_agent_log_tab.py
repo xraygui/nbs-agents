@@ -12,6 +12,15 @@ from qtpy.QtWidgets import QApplication  # noqa: E402
 
 from fakes import FakeRedis  # noqa: E402
 
+
+@pytest.fixture(autouse=True)
+def claude_launcher(monkeypatch):
+    """Offer the claude launcher even where nbs-agents' entry points aren't installed."""
+    from nbs_agents import launchers
+    from nbs_agents.launcher import claude_launch_parameters
+
+    monkeypatch.setattr(launchers, "_launchers", lambda: {"claude": claude_launch_parameters})
+
 from nbs_agents.qt.tabs.agent_log import (  # noqa: E402
     ALL_AGENTS,
     AgentLogTab,

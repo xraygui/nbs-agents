@@ -284,10 +284,10 @@ def check(out=print) -> int:
 
 def tiled_login(out=print) -> int:
     """Log in to the configured Tiled server, reusing a cached login if it is still good."""
-    from .cli.config import CliConfig
+    from .config import AgentsConfig
     from .tiled_auth import login_context
 
-    config = CliConfig.load()
+    config = AgentsConfig.load()
     context = login_context(config.tiled_uri, interactive=True)
     who = context.whoami() if context.authenticated else None
     out(f"Tiled {config.tiled_uri}: " + (f"logged in as {who.get('identities', [{}])[0].get('id', '?')}" if who else "no login needed"))

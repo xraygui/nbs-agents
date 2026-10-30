@@ -31,7 +31,7 @@ from qtpy.QtWidgets import (
 )
 
 from ...agentlog import ASSISTANT_POST_KINDS, AGENT_LOG_TOPIC, AgentLog, assistant_uid, is_assistant_record
-from ...launcher import claude_launch_parameters
+from ...launchers import launch_parameters, launcher_names
 from ...queue import submit_agent_block
 from ...richtext import plain_text
 from ..agent_log_source import agent_log_dict
@@ -45,7 +45,6 @@ CONVERSATION_KINDS = ("note", "question", "operator", "stop", "finalize") + ASSI
 ASSISTANT_LIVE_STATUSES = ("idle", "watching", "calling")
 RUN_LINK = "run:"
 WAITING_COLOR = "#f0ad4e"
-CLAUDE_AGENT = "claude"
 RUNNER_POLL_MS = 5000
 # runner_alive() result -> (label text, color)
 RUNNER_STATES = {
@@ -336,9 +335,15 @@ def conversation_html(records, pairs, show_agent=True):
     return "<div style='margin-top:4px'></div>".join(parts)
 
 
+def launch_agent_name():
+    """The agent "New agent…" launches: the first installed launcher, or None."""
+    names = launcher_names()
+    return names[0] if names else None
+
+
 class NewAgentDialog(QDialog):
     """
-    Ask for a Claude agent's goal and budget before queueing its session.
+    Ask for a launched agent's goal and budget before queueing its session.
 
     Parameters
     ----------
@@ -346,11 +351,14 @@ class NewAgentDialog(QDialog):
         Runner heartbeat state; ``False`` disables OK, ``None`` only warns.
     parent : QWidget, optional
         Parent widget.
+    agent_name : str, optional
+        Launcher to use (see ``nbs_agents.launchers``); the first installed one by default.
     """
 
-    def __init__(self, runner_alive=None, parent=None):
+    def __init__(self, runner_alive=None, parent=None, agent_name=None):
         super().__init__(parent)
-        self.setWindowTitle("New Claude agent")
+        self.agent_name = agent_name or launch_agent_name()
+        self.setWindowTitle(f"New {self.agent_name} agent")
         self.goal_edit = QPlainTextEdit(self)
         self.goal_edit.setPlaceholderText("What should the agent work on? It will plan this with you before queueing scans.")
         self.budget_edit = QLineEdit(self)
@@ -409,7 +417,7 @@ class NewAgentDialog(QDialog):
         ValueError
             If the goal is empty or the budget is malformed.
         """
-        return claude_launch_parameters(self.goal_edit.toPlainText(), self.budget_edit.text())
+        return launch_parameters(self.agent_name, self.goal_edit.toPlainText(), self.budget_edit.text())
 
     def start_queue(self):
         """Whether to start the queue if the block lands at its idle head."""
@@ -471,6 +479,8 @@ class AgentLogTab(QWidget):
         self.new_agent_button = QPushButton("New agent…", self)
         self.new_agent_button.setToolTip("Queue a Claude agent session with a goal; the agent runner starts Claude")
         self.new_agent_button.clicked.connect(self.new_agent)
+        # Only offered when a package that launches agents from a goal is installed
+        self.new_agent_button.setVisible(launch_agent_name() is not None)
         self.runner_label = QLabel(self)
         picker = QHBoxLayout()
         picker.addWidget(QLabel("Agent:", self))
@@ -605,7 +615,7 @@ class AgentLogTab(QWidget):
         busy = [
             agent_label(uid, r)
             for uid, r in sorted_sessions(self._snapshot())
-            if r.get("agent_name") == CLAUDE_AGENT and r.get("status") in STEERABLE_STATUSES
+            if r.get("agent_name") == dialog.agent_name and r.get("status") in STEERABLE_STATUSES
         ]
         if busy:
             answer = QMessageBox.question(
@@ -616,7 +626,7 @@ class AgentLogTab(QWidget):
             if answer != QMessageBox.Yes:
                 return
         try:
-            out = self.submit_new_agent(dialog.parameters(), start=dialog.start_queue())
+            out = self.submit_new_agent(dialog.parameters(), start=dialog.start_queue(), agent_name=dialog.agent_name)
         except Exception as e:
             QMessageBox.warning(self, "New agent", f"Could not queue the agent: {e}")
             return
@@ -628,16 +638,18 @@ class AgentLogTab(QWidget):
                 f"Queued {where}. Claude starts when open_agent runs; start the queue when ready.",
             )
 
-    def submit_new_agent(self, parameters, start=True):
+    def submit_new_agent(self, parameters, start=True, agent_name=None):
         """
-        Queue a ``claude`` agent block through the GUI's queue server client.
+        Queue a launched agent's block through the GUI's queue server client.
 
         Parameters
         ----------
         parameters : dict
-            ``open_agent`` parameters, normally from ``claude_launch_parameters``.
+            ``open_agent`` parameters, normally from ``launch_parameters``.
         start : bool, optional
             Start the queue if it is idle and the block is at its head.
+        agent_name : str, optional
+            Agent to open; the first installed launcher by default.
 
         Returns
         -------
@@ -651,7 +663,8 @@ class AgentLogTab(QWidget):
         if getattr(run_engine, "_user_group", None):
             user["user_group"] = run_engine._user_group
         try:
-            return submit_agent_block(run_engine._client, CLAUDE_AGENT, parameters, start=start, **user)
+            name = agent_name or launch_agent_name()
+            return submit_agent_block(run_engine._client, name, parameters, start=start, **user)
         finally:
             try:
                 run_engine.load_re_manager_status(unbuffered=True)

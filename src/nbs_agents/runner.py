@@ -1,7 +1,22 @@
-import dataclasses
+"""
+``nbs-agents-runner``: the persistent agent runner.
+
+It watches the Bluesky document stream, opens and closes agents as their
+``open_agent`` / ``close_agent`` blocks run (``AgentSupervisor``), keeps the
+agent log (starting its own Redis with ``[agent_log] serve = true``), logs in
+to Tiled when needed and keeps agents a read-only Tiled key.
+
+Installed packages add to it through the ``nbs_agents.runner`` entry-point
+group: each entry is a callable ``plugin(runtime)`` returning supervisor
+observers (see ``AgentSupervisor``). An observer with a ``shutdown()``
+method has it called when the runner stops.
+"""
+
 import logging
 import threading
 import time
+from dataclasses import dataclass
+from typing import Any, Optional
 
 from bluesky.callbacks.zmq import RemoteDispatcher
 from bluesky_queueserver_api.zmq import REManagerAPI
@@ -9,17 +24,67 @@ from bluesky_queueserver_api.zmq import REManagerAPI
 from .agentlog import AgentLog
 from .agentlog_store import AgentLogServer, publish_location
 from .catalog import ZMQCatalog
-from .agents.assistant import AssistantAgent
-from .cli.config import AssistantConfig, CliConfig
-from .cli.core import Beamline
-from .launcher import ClaudeLauncher
+from .config import AgentsConfig
 from .supervisor import AgentSupervisor
 from .tiled_auth import AgentKeyKeeper
 
 LOGGER = logging.getLogger(__name__)
 
+RUNNER_ENTRY_POINT = "nbs_agents.runner"
 
-def _start_heartbeat(agent_log: AgentLog, config: CliConfig, period_s: float = 5.0) -> None:
+
+@dataclass
+class Runtime:
+    """
+    What runner plugins get to build on.
+
+    Attributes
+    ----------
+    config : AgentsConfig
+        Shared connection settings.
+    manager : REManagerAPI
+        QueueServer client.
+    catalog : ZMQCatalog
+        Document catalog.
+    agent_log : AgentLog or None
+        The agent log, if Redis was reachable.
+    """
+
+    config: AgentsConfig
+    manager: Any
+    catalog: ZMQCatalog
+    agent_log: Optional[AgentLog]
+
+
+def load_plugins(runtime: Runtime) -> list:
+    """
+    Observers from every installed ``nbs_agents.runner`` plugin; failures are logged.
+
+    Parameters
+    ----------
+    runtime : Runtime
+        Passed to each plugin.
+
+    Returns
+    -------
+    list
+        Supervisor observers.
+    """
+    from importlib.metadata import entry_points
+
+    observers: list = []
+    for entry in entry_points(group=RUNNER_ENTRY_POINT):
+        try:
+            made = entry.load()(runtime) or []
+        except Exception:
+            LOGGER.exception("Runner plugin %s (%s) failed to start", entry.name, entry.value)
+            continue
+        LOGGER.info("Runner plugin %s: %d observer(s)", entry.name, len(made))
+        observers.extend(made)
+    return observers
+
+
+def _start_heartbeat(agent_log: AgentLog, config: AgentsConfig, period_s: float = 5.0) -> None:
     """
     Write a heartbeat to Redis so nbs-cli open can tell the runner is up.
 
@@ -47,54 +112,10 @@ def _start_heartbeat(agent_log: AgentLog, config: CliConfig, period_s: float = 5
     threading.Thread(target=beat, name="runner-heartbeat", daemon=True).start()
 
 
-def _beamline_redis(config: CliConfig):
+def _beamline_redis(config: AgentsConfig):
     import redis
 
     return redis.Redis(host=config.redis_host, port=config.redis_port, db=config.redis_db, socket_timeout=5)
-
-
-def start_assistant(config: CliConfig, catalog: ZMQCatalog, agent_log) -> "AssistantAgent | None":
-    """
-    Start the read-only beamline assistant if ``[assistant] enabled = true``.
-
-    Parameters
-    ----------
-    config : CliConfig
-        nbs-cli settings, for read access to the beamline.
-    catalog : ZMQCatalog
-        Document catalog.
-    agent_log : AgentLog or None
-        Agent log; the assistant needs one.
-
-    Returns
-    -------
-    AssistantAgent or None
-        The running assistant.
-    """
-    try:
-        settings = AssistantConfig.load()
-    except Exception:
-        LOGGER.exception("Assistant disabled: bad [assistant] settings")
-        return None
-    if not settings.enabled:
-        LOGGER.info("Assistant off ([assistant] enabled is not true)")
-        return None
-    if agent_log is None:
-        LOGGER.error("Assistant disabled: it needs the agent log in Redis")
-        return None
-    launcher = None
-    if (settings.command or "").strip():
-        launcher = ClaudeLauncher(settings.command, settings.workdir, settings.log_dir)
-    beamline = Beamline(dataclasses.replace(config, role="assistant"))
-    assistant = AssistantAgent(
-        settings, beamline, catalog, agent_log, launcher=launcher, signal=config.signal, norm=config.norm
-    )
-    assistant.start()
-    LOGGER.info(
-        "Assistant watching every run (record %s, workdir %s, models %s/%s)",
-        assistant.agent_uid, settings.workdir, settings.model, settings.alert_model,
-    )
-    return assistant
 
 
 def main() -> None:
@@ -104,12 +125,13 @@ def main() -> None:
     Connection settings come from the same sources as nbs-cli
     (``NBS_QS_ADDR``, ``NBS_ZMQ_ADDR``, ``NBS_REDIS_*`` or a TOML file). With
     ``[agent_log] serve = true`` it also starts the agent log's own Redis.
+    Plugins (``nbs_agents.runner`` entry points) add their observers.
     """
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    config = CliConfig.load()
+    config = AgentsConfig.load()
     manager = REManagerAPI(zmq_control_addr=config.qs_addr)
     dispatcher = RemoteDispatcher(config.zmq_addr)
     catalog = ZMQCatalog(dispatcher)
@@ -133,16 +155,8 @@ def main() -> None:
     # keep a read-only key for agents
     keeper = AgentKeyKeeper(config, on_link=agent_log.set_tiled_login if agent_log is not None else None)
     keeper.start()
-    launcher = ClaudeLauncher.from_config(config)
-    if launcher is None:
-        LOGGER.info("Claude launching off (claude_command is empty)")
-    else:
-        LOGGER.info("Launching Claude for GUI-opened sessions with %r", launcher.command)
-    observers = []
-    assistant = start_assistant(config, catalog, agent_log)
-    if assistant is not None:
-        observers.append(assistant)
-    AgentSupervisor(manager, catalog, agent_log=agent_log, launcher=launcher, observers=observers)
+    observers = load_plugins(Runtime(config, manager, catalog, agent_log))
+    AgentSupervisor(manager, catalog, agent_log=agent_log, observers=observers)
     if agent_log is not None:
         _start_heartbeat(agent_log, config)
     LOGGER.info("Agent runner listening for Bluesky documents at %s", config.zmq_addr)
@@ -152,8 +166,12 @@ def main() -> None:
     except KeyboardInterrupt:
         LOGGER.info("Stopping agent runner")
     finally:
-        if assistant is not None:
-            assistant.stop("runner stopped")
+        for observer in observers:
+            if hasattr(observer, "shutdown"):
+                try:
+                    observer.shutdown()
+                except Exception:
+                    LOGGER.exception("Could not shut down %s", type(observer).__name__)
         keeper.stop()
         if server is not None:
             server.stop()

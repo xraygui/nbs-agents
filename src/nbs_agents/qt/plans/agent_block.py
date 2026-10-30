@@ -4,7 +4,7 @@ from qtpy.QtWidgets import QComboBox, QFormLayout, QLabel, QLineEdit, QPlainText
 
 from nbs_gui.plans.base import PlanWidgetBase
 
-from ...launcher import claude_launch_parameters
+from ...launchers import launch_parameters, launcher_names
 from ...queue import make_open_agent_block
 
 
@@ -25,7 +25,7 @@ class AgentBlockWidget(PlanWidgetBase):
         self.display_name = "Agent Block"
 
         self._agent_combo = QComboBox(self)
-        self._agent_combo.addItems(["repeat", "claude"])
+        self._agent_combo.addItems(["repeat", *launcher_names()])
         self._repeat_count = QSpinBox(self)
         self._repeat_count.setMinimum(1)
         self._repeat_count.setMaximum(1000)
@@ -54,7 +54,8 @@ class AgentBlockWidget(PlanWidgetBase):
         self.layout.addWidget(
             QLabel(
                 "Submits open_agent, queue_stop, and close_agent as one block. "
-                "For claude, nbs-agents-runner starts the agent when open_agent runs."
+                "For an agent launched from a goal (such as claude), nbs-agents-runner "
+                "starts it when open_agent runs."
             )
         )
 
@@ -90,9 +91,9 @@ class AgentBlockWidget(PlanWidgetBase):
         bool
             True if the widget can submit a block.
         """
-        if self._agent_combo.currentText() == "claude":
+        if self._agent_combo.currentText() in launcher_names():
             try:
-                claude_launch_parameters(self._goal.toPlainText(), self._budget.text())
+                launch_parameters(self._agent_combo.currentText(), self._goal.toPlainText(), self._budget.text())
             except ValueError:
                 return False
             return True
@@ -137,7 +138,7 @@ class AgentBlockWidget(PlanWidgetBase):
                 "plan_args": json.loads(self._plan_args.text()),
                 "plan_kwargs": json.loads(self._plan_kwargs.text()),
             }
-        elif agent_name == "claude":
-            parameters = claude_launch_parameters(self._goal.toPlainText(), self._budget.text())
+        elif agent_name in launcher_names():
+            parameters = launch_parameters(agent_name, self._goal.toPlainText(), self._budget.text())
 
         return make_open_agent_block(agent_name, parameters)

@@ -10,7 +10,7 @@ from fakes import FakeRedis
 from nbs_agents.agentlog import AgentLog
 
 from nbs_agents.agents.repeat import RepeatAgent
-from nbs_agents.launcher import ClaudeLauncher, LaunchedAgent, claude_launch_parameters
+from nbs_agents.launcher import ClaudeLaunchHook, ClaudeLauncher, LaunchedAgent, claude_launch_parameters
 from nbs_agents.catalog import ZMQRun
 from nbs_agents.constants import AGENT_NAME_KEY, AGENT_PARAMETERS_KEY, AGENT_UID_KEY
 from nbs_agents.supervisor import AgentSupervisor, default_registry
@@ -133,7 +133,8 @@ class FakeLauncher:
 class ClaudeLaunchTests(unittest.TestCase):
     def make(self, launcher):
         self.log = AgentLog(FakeRedis(), "bl-")
-        return AgentSupervisor(_sentinel_manager(), MagicMock(), agent_log=self.log, launcher=launcher)
+        self.hook = ClaudeLaunchHook(launcher, self.log)
+        return AgentSupervisor(_sentinel_manager(), MagicMock(), agent_log=self.log, observers=[self.hook])
 
     def test_launches_claude_with_goal_and_driver(self):
         launcher = FakeLauncher()
@@ -147,7 +148,7 @@ class ClaudeLaunchTests(unittest.TestCase):
         self.assertEqual(record["status"], "active")
         entry = record["log"][-1]
         self.assertEqual((entry["kind"], entry["pid"]), ("launch", 4242))
-        self.assertEqual(launcher.on_exit, supervisor._on_launched_exit)
+        self.assertEqual(launcher.on_exit, self.hook._on_exit)
         supervisor.shutdown()
 
     def test_no_launch_without_flag_or_for_other_agents(self):
@@ -167,7 +168,7 @@ class ClaudeLaunchTests(unittest.TestCase):
         self.assertEqual(launcher.terminated, ["uid-12345678"])
         self.assertNotIn("uid-12345678", supervisor.active_agents)
         launched = LaunchedAgent("uid-12345678", SimpleNamespace(pid=4242), [], "/w", "/logs/c.log")
-        supervisor._on_launched_exit(launched, -15)
+        self.hook._on_exit(launched, -15)
         entry = self.log.get("uid-12345678")["log"][-1]
         self.assertEqual((entry["kind"], entry["exit_status"]), ("launch", -15))
         supervisor.shutdown()
@@ -176,7 +177,7 @@ class ClaudeLaunchTests(unittest.TestCase):
         supervisor = self.make(FakeLauncher())
         supervisor._activate_agent(_open_run({"goal": "g", "launch": True}))
         launched = LaunchedAgent("uid-12345678", SimpleNamespace(pid=4242), [], "/w", "/logs/c.log")
-        supervisor._on_launched_exit(launched, 1)
+        self.hook._on_exit(launched, 1)
         self.assertEqual(self.log.get("uid-12345678")["log"][-1]["kind"], "error")
         supervisor.shutdown()
 
