@@ -7,6 +7,7 @@ from bluesky.callbacks.zmq import RemoteDispatcher
 from bluesky_queueserver_api.zmq import REManagerAPI
 
 from .agentlog import AgentLog
+from .agentlog_store import AgentLogServer, publish_location
 from .catalog import ZMQCatalog
 from .agents.assistant import AssistantAgent
 from .cli.config import AssistantConfig, CliConfig
@@ -17,18 +18,38 @@ from .supervisor import AgentSupervisor
 LOGGER = logging.getLogger(__name__)
 
 
-def _start_heartbeat(agent_log: AgentLog, period_s: float = 5.0) -> None:
-    """Write a heartbeat to Redis so nbs-cli open can tell the runner is up."""
+def _start_heartbeat(agent_log: AgentLog, config: CliConfig, period_s: float = 5.0) -> None:
+    """
+    Write a heartbeat to Redis so nbs-cli open can tell the runner is up.
+
+    With a separate agent-log Redis, also keep its address published in the
+    beamline Redis for nbs-gui, in case the beamline Redis restarted.
+    """
+    beamline = None
+    location = config.agent_log_settings if config.agent_log.dedicated else None
 
     def beat():
+        nonlocal beamline
         while True:
             try:
                 agent_log.heartbeat()
             except Exception:
                 LOGGER.exception("Could not write the runner heartbeat")
+            try:
+                if beamline is None:
+                    beamline = _beamline_redis(config)
+                publish_location(beamline, config.redis_prefix, location)
+            except Exception:
+                LOGGER.warning("Could not publish the agent log location in the beamline Redis", exc_info=True)
             time.sleep(period_s)
 
     threading.Thread(target=beat, name="runner-heartbeat", daemon=True).start()
+
+
+def _beamline_redis(config: CliConfig):
+    import redis
+
+    return redis.Redis(host=config.redis_host, port=config.redis_port, db=config.redis_db, socket_timeout=5)
 
 
 def start_assistant(config: CliConfig, catalog: ZMQCatalog, agent_log) -> "AssistantAgent | None":
@@ -80,7 +101,8 @@ def main() -> None:
     Start the persistent agent runner.
 
     Connection settings come from the same sources as nbs-cli
-    (``NBS_QS_ADDR``, ``NBS_ZMQ_ADDR``, ``NBS_REDIS_*`` or a TOML file).
+    (``NBS_QS_ADDR``, ``NBS_ZMQ_ADDR``, ``NBS_REDIS_*`` or a TOML file). With
+    ``[agent_log] serve = true`` it also starts the agent log's own Redis.
     """
     logging.basicConfig(
         level=logging.INFO,
@@ -90,13 +112,21 @@ def main() -> None:
     manager = REManagerAPI(zmq_control_addr=config.qs_addr)
     dispatcher = RemoteDispatcher(config.zmq_addr)
     catalog = ZMQCatalog(dispatcher)
+    server = None
+    if config.agent_log.serve:
+        server = AgentLogServer(config.agent_log)
+        try:
+            server.start()
+        except Exception:
+            LOGGER.exception("Could not start the agent log Redis")
     agent_log = None
+    settings = config.agent_log_settings
     try:
-        agent_log = AgentLog.from_settings(config.redis_settings)
+        agent_log = AgentLog.from_settings(settings)
         agent_log.redis.ping()
-        LOGGER.info("Writing agent log to Redis %s:%s key %s*", config.redis_host, config.redis_port, agent_log.key_prefix)
+        LOGGER.info("Writing agent log to Redis %s:%s key %s*", settings["host"], settings["port"], agent_log.key_prefix)
     except Exception:
-        LOGGER.exception("Agent log disabled: could not reach Redis at %s:%s", config.redis_host, config.redis_port)
+        LOGGER.exception("Agent log disabled: could not reach Redis at %s:%s", settings["host"], settings["port"])
         agent_log = None
     launcher = ClaudeLauncher.from_config(config)
     if launcher is None:
@@ -109,7 +139,7 @@ def main() -> None:
         observers.append(assistant)
     AgentSupervisor(manager, catalog, agent_log=agent_log, launcher=launcher, observers=observers)
     if agent_log is not None:
-        _start_heartbeat(agent_log)
+        _start_heartbeat(agent_log, config)
     LOGGER.info("Agent runner listening for Bluesky documents at %s", config.zmq_addr)
 
     try:
@@ -119,6 +149,8 @@ def main() -> None:
     finally:
         if assistant is not None:
             assistant.stop("runner stopped")
+        if server is not None:
+            server.stop()
 
 
 if __name__ == "__main__":

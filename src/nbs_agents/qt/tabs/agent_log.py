@@ -34,6 +34,7 @@ from ...agentlog import ASSISTANT_POST_KINDS, AGENT_LOG_TOPIC, AgentLog, assista
 from ...launcher import claude_launch_parameters
 from ...queue import submit_agent_block
 from ...richtext import plain_text
+from ..agent_log_source import agent_log_dict
 
 ALL_AGENTS = "__all__"
 ENTRY_COLUMNS = ["Time", "Agent", "Kind", "Text", "Details"]
@@ -460,7 +461,7 @@ class AgentLogTab(QWidget):
         self._error = None
         self._conversation_html = None
         try:
-            self._records = model.user_status.get_redis_dict(AGENT_LOG_TOPIC)
+            self._records = agent_log_dict(model.user_status, self)
         except Exception as e:  # Redis unreachable should not break the GUI
             self._error = str(e)
 

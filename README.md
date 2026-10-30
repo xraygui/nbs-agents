@@ -198,6 +198,27 @@ Every agent writes one JSON record per session to Redis under
 each agent's open, runs and close, and nbs-cli writes `add`, `remove`, `note`,
 `question` and `finalize` entries.
 
+By default that Redis is the beamline one. To keep the agent log in a Redis of
+its own, give it a port in the nbs-cli config:
+
+```toml
+[agent_log]
+port = 60740      # host = "localhost", db = 0, prefix = "" by default
+serve = true      # nbs-agents-runner starts redis-server on 127.0.0.1:60740
+# data_dir = "~/.local/state/nbs-agents/agent-log"   # snapshot, agent-log.rdb
+# redis_server = "redis-server"
+```
+
+With `serve = true` the runner starts `redis-server` unless one already
+answers on the port, and stops it on exit. The snapshot in `data_dir` keeps
+the log across restarts for a beamtime; stop the runner and delete
+`agent-log.rdb` to start afresh. Without `serve`, point `host`/`port` at a
+Redis run elsewhere, for example beside an agent container. nbs-cli and
+nbs-agents-web read `[agent_log]` too. nbs-gui often runs under another account
+without this config, so the runner publishes the address in the beamline Redis
+(`{prefix}NBS_AGENT_LOG_LOCATION`) and the Qt tabs connect there. Beam status
+still comes from the beamline Redis.
+
 ### Web UI
 
 `nbs-agents-web` serves the nbs-gui "Agents Log" and "Assistant" tabs as a
