@@ -1,0 +1,43 @@
+# nbs-cli and nbs-agents settings, written by `nbs-agents init`.
+# Every setting is optional; the commented values are the defaults.
+# NBS_<NAME> environment variables override [nbs_cli] settings.
+
+[nbs_cli]
+# --- Beamline services
+# qs_addr = "tcp://localhost:60615"     # QueueServer 0MQ control address
+# qs_user_group = "primary"             # QueueServer group agents submit as
+# zmq_addr = "localhost:5578"           # Bluesky document stream
+# tiled_uri = "http://localhost:8000"
+# tiled_path = ""                       # run catalog inside Tiled
+# Tiled key: set TILED_API_KEY in the environment rather than writing it here.
+# redis_host = "localhost"              # beamline Redis (status dicts, beam map)
+# redis_port = 6379
+# redis_db = 0
+# redis_prefix = ""
+
+# --- Run summaries
+# signal = "sc"
+# norm = "i0"
+# reference = "ref"
+# baseline_keys = ["ring_current"]
+
+# --- Claude agents
+# claude_command = "claude-beamline"    # e.g. "claude-beamline --model claude-opus-5-5"
+# allowed_plans = ["nbs_count", "move_sample"]   # client-side allowlist; unset = server decides
+# kb_dir = ""                           # human knowledge-base notes, usually knowledge/ in the profile
+
+# Folders default to $NBS_AGENTS_HOME (config/, state/, data/, work/):
+# claude_workdir, claude_log_dir, attachments_dir, kb_agent_dir.
+
+[assistant]
+# Read-only beamline assistant hosted by nbs-agents-runner.
+enabled = false
+# model = "sonnet"
+# alert_model = "opus"
+
+[agent_log]
+# The agent log's own Redis, started by nbs-agents-runner on 127.0.0.1.
+# Remove `port` to share the beamline Redis instead.
+port = 60740
+serve = true
+# data_dir defaults to state/agent-log under $NBS_AGENTS_HOME.

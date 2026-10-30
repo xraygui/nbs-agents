@@ -52,6 +52,7 @@ tinygp = "*"
 redis-py = "*"
 pyzmq = "*"
 qt6-wayland = "*"
+redis-server = ">=8.10.2,<9"
 
 [project.urls]
 homepage = "https://github.com/xraygui/nbs-agents"
@@ -60,6 +61,7 @@ homepage = "https://github.com/xraygui/nbs-agents"
 nbs-agents-runner = "nbs_agents.runner:main"
 nbs-cli = "nbs_agents.cli.main:main"
 nbs-agents-web = "nbs_agents.web.__main__:main"
+nbs-agents = "nbs_agents.admin:main"
 
 [project.optional-dependencies]
 gui = ["nbs-gui", "qtpy"]

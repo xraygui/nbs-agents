@@ -17,11 +17,50 @@ cd nbs-agents
 pip install -e .
 ```
 
-Or with pixi:
+Or with pixi (which also brings `redis-server` for the agent log):
 
 ```bash
 pixi install
 ```
+
+Install from a checkout (editable): the runner uses this repo's `scripts/`,
+`skills/` and `templates/` in place.
+
+### Setting up a beamline account
+
+Everything nbs-agents keeps lives under one folder, `$NBS_AGENTS_HOME`
+(default `~/.nbs-agents`):
+
+```
+config/   nbs-cli.toml, gateway.env (gateway key), token (web login)   mode 700
+state/    agent-log/  (the agent log's Redis snapshot)
+data/     attachments/ (figures), kb/ (agents' knowledge-base notes)
+work/     sessions/<uid8>/ (driver workdirs), assistant/, logs/
+```
+
+```bash
+export NBS_AGENTS_HOME=...          # optional; e.g. a staff account's area
+pixi run nbs-agents init            # make the layout, config template, gateway.env placeholder
+$EDITOR $NBS_AGENTS_HOME/config/nbs-cli.toml    # beamline addresses, kb_dir, models
+$EDITOR $NBS_AGENTS_HOME/config/gateway.env     # AIFAPIM_API_KEY, for --sandbox bwclaude
+export TILED_API_KEY=...            # until Tiled login (Entra ID) is supported
+pixi run nbs-agents check           # files, permissions, bwclaude, redis-server, services
+NBS_CLAUDE_SANDBOX=bwclaude pixi run agent-runner
+pixi run agent-web                  # open the printed ?token= link
+```
+
+`nbs-agents paths` prints every location. `nbs-agents init` never overwrites a
+file; `--refresh-assistant` updates the assistant's workdir (`CLAUDE.md`,
+`.claude/settings.json`) from `templates/assistant/`, keeping old copies as
+`*.bak`. Settings and variables that name a path (`NBS_CLI_CONFIG`,
+`attachments_dir`, `NBS_GATEWAY_ENV`, ...) still win. An install from before
+this layout (with `~/.config/nbs-cli.toml` and no `~/.nbs-agents`) keeps using
+`~/.config`, `~/.local/share/nbs-agents`, `~/.local/state/nbs-agents` and
+`~/beamline-agents` until `NBS_AGENTS_HOME` is set.
+
+nbs-gui needs nbs-agents in its own environment for the Agents Log and
+Assistant tabs, but no nbs-agents config: it finds the agent log through the
+beamline Redis.
 
 For GUI queue widgets:
 
@@ -126,7 +165,7 @@ To run through the NSLS-II API gateway, add `--sandbox bwclaude` (or set
 `NBS_CLAUDE_SANDBOX=bwclaude`, e.g. when starting `nbs-agents-runner`). Claude
 then runs inside `bwclaude` from n2snscripts, with this repo, the nbs-cli config
 and the attachment store mounted. The key and host come from
-`~/.config/nbs-agents/gateway.env` (override with `NBS_GATEWAY_ENV`), which must
+`config/gateway.env` under `$NBS_AGENTS_HOME` (override with `NBS_GATEWAY_ENV`), which must
 be mode 600 and set `AIFAPIM_API_KEY` and `AIFAPIM_HOST`; keep it outside any repo.
 
 `open` needs `nbs-agents-runner` running: its `ExternalAgent` (registered as
@@ -163,12 +202,12 @@ the beamline-steering skill linked into `~/.claude/skills`. Launch settings, in
 ```toml
 claude_command = "claude-beamline"            # empty turns launching off; a bare name not
                                               # on PATH is taken from this repo's scripts/
-claude_workdir = "~/beamline-agents/{uid8}"   # {uid} and {uid8} are filled in
-claude_log_dir = "~/beamline-agents/logs"
+claude_workdir = "$NBS_AGENTS_HOME/work/sessions/{uid8}"   # default; {uid}, {uid8} filled in
+claude_log_dir = "$NBS_AGENTS_HOME/work/logs"               # default
 claude_stop_timeout_s = 10.0
 ```
 
-Settings come from `$NBS_CLI_CONFIG` or `~/.config/nbs-cli.toml` (table
+Settings come from `$NBS_CLI_CONFIG` or `config/nbs-cli.toml` under `$NBS_AGENTS_HOME` (table
 `[nbs_cli]`), overridden by `NBS_<NAME>` environment variables. The runner reads
 the same settings.
 
@@ -205,7 +244,7 @@ its own, give it a port in the nbs-cli config:
 [agent_log]
 port = 60740      # host = "localhost", db = 0, prefix = "" by default
 serve = true      # nbs-agents-runner starts redis-server on 127.0.0.1:60740
-# data_dir = "~/.local/state/nbs-agents/agent-log"   # snapshot, agent-log.rdb
+# data_dir = "$NBS_AGENTS_HOME/state/agent-log"   # snapshot, agent-log.rdb
 # redis_server = "redis-server"
 ```
 
@@ -238,14 +277,14 @@ binds to 127.0.0.1 and only accepts writes from its own page. It needs
 Message text is Markdown with `$...$` and `$$...$$` math, written so it still
 reads well as plain text. A figure is an image link to an attachment,
 `![alt](att:ID)`, stored by `nbs_agents.attachments.AttachmentStore` (a
-folder, `$NBS_ATTACHMENTS_DIR` or `~/.local/share/nbs-agents/attachments`).
+folder, `$NBS_ATTACHMENTS_DIR` or `data/attachments` under `$NBS_AGENTS_HOME`).
 The page renders Markdown, math and figures (markdown-it, KaTeX and DOMPurify
 from jsDelivr, falling back to plain text offline) and lists the shown
 sessions' figures in a side panel. Plain views use
 `nbs_agents.richtext.plain_text`, which turns figures into `[figure: alt]`.
 
 The page needs a login token, as Jupyter does, so another user on the machine
-cannot open it and act as you. The token lives in `~/.config/nbs-agents/token`
+cannot open it and act as you. The token lives in `config/token` under `$NBS_AGENTS_HOME`
 (`$NBS_AGENTS_TOKEN_FILE`), mode 600 in a mode 700 folder, and is made on first
 start; a file that is not yours or that others can read is refused.
 `nbs-agents-web` prints a `http://localhost:8765/?token=...` link at start:
