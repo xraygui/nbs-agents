@@ -7,8 +7,10 @@
 # qs_addr = "tcp://localhost:60615"     # QueueServer 0MQ control address
 # qs_user_group = "primary"             # QueueServer group agents submit as
 # zmq_addr = "localhost:5578"           # Bluesky document stream
-# tiled_uri = "http://localhost:8000"   # e.g. the facility Tiled server
-# tiled_path = ""                       # run catalog inside Tiled, e.g. "<beamline>/raw"
+# Tiled server and this beamline's run catalog in it; `nbs-agents init --tiled-uri
+# ... --tiled-path ...` fills these in.
+# tiled_uri = "http://localhost:8000"
+# tiled_path = ""
 # Tiled login: nbs-agents-runner logs you in (Entra ID link) when the server needs
 # it and keeps a read-only key for agents; see `nbs-agents tiled-login`.
 # tiled_key_lifetime_s = 86400          # life of each agent key

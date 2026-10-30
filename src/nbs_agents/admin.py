@@ -13,6 +13,7 @@ See ``nbs_agents.paths`` for the layout.
 
 import argparse
 import os
+import re
 import shutil
 import stat
 import sys
@@ -42,12 +43,45 @@ def _write_new(path: Path, text: str, mode: int) -> bool:
     return True
 
 
-def init(refresh_assistant: bool = False, out=print) -> int:
+def config_text(tiled_uri: Optional[str] = None, tiled_path: Optional[str] = None) -> str:
+    """
+    The starting ``nbs-cli.toml``, with this install's Tiled server and catalog filled in.
+
+    Parameters
+    ----------
+    tiled_uri, tiled_path : str, optional
+        Values for the template's commented ``tiled_uri`` and ``tiled_path`` lines.
+    """
+    import json
+
+    text = CONFIG_TEMPLATE.read_text()
+    for name, value in (("tiled_uri", tiled_uri), ("tiled_path", tiled_path)):
+        if value is not None:
+            text = re.sub(rf"^# {name} = .*$", f"{name} = {json.dumps(value)}", text, count=1, flags=re.M)
+    return text
+
+
+def init(
+    refresh_assistant: bool = False,
+    out=print,
+    tiled_uri: Optional[str] = None,
+    tiled_path: Optional[str] = None,
+) -> int:
     """
     Make the folders and starting files of the current layout.
 
     Existing files are never overwritten, except the assistant's template
     files with ``refresh_assistant`` (old copies kept as ``*.bak``).
+
+    Parameters
+    ----------
+    refresh_assistant : bool, optional
+        Update the assistant's workdir from the template.
+    out : callable, optional
+        Where messages go.
+    tiled_uri, tiled_path : str, optional
+        This beamline's Tiled server and run catalog, written into a new
+        ``nbs-cli.toml``.
 
     Returns
     -------
@@ -65,8 +99,10 @@ def init(refresh_assistant: bool = False, out=print) -> int:
         if name in PRIVATE:
             os.chmod(folder, 0o700)
 
-    if CONFIG_TEMPLATE.exists() and _write_new(p.config_file, CONFIG_TEMPLATE.read_text(), 0o600):
+    if CONFIG_TEMPLATE.exists() and _write_new(p.config_file, config_text(tiled_uri, tiled_path), 0o600):
         out(f"wrote {p.config_file}: edit it for this beamline")
+    elif tiled_uri is not None or tiled_path is not None:
+        out(f"{p.config_file} already exists; set tiled_uri / tiled_path there by hand")
     ensure_token(str(p.token))
     prepare_workdir(str(p.assistant), refresh=refresh_assistant)
     out("done; run `nbs-agents check` next")
@@ -236,6 +272,8 @@ def check(out=print) -> int:
                 state, detail = WARN, "not running (nbs-agents-runner starts it)"
             rows.append((state, "agent-log Redis", detail))
         rows.append(_row("Tiled", _probe(lambda: _tiled(config.tiled_uri))))
+        if not config.tiled_path:
+            rows.append((WARN, "tiled_path", "not set: nbs-cli reads runs from the server's root catalog"))
         rows.append(_tiled_key_row(config))
 
     width = max(len(name) for _, name, _ in rows)
@@ -272,6 +310,8 @@ def main(argv=None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("paths", help="print where every file lives")
     init_parser = sub.add_parser("init", help=f"make ${HOME_ENV} and its starting files")
+    init_parser.add_argument("--tiled-uri", help="this beamline's Tiled server, e.g. https://tiled.example.org")
+    init_parser.add_argument("--tiled-path", help="run catalog inside Tiled, e.g. BEAMLINE/raw")
     init_parser.add_argument(
         "--refresh-assistant", action="store_true",
         help="overwrite the assistant's workdir files that differ from the template (keeps *.bak)",
@@ -282,7 +322,7 @@ def main(argv=None) -> int:
     if args.command == "paths":
         return show_paths()
     if args.command == "init":
-        return init(args.refresh_assistant)
+        return init(args.refresh_assistant, tiled_uri=args.tiled_uri, tiled_path=args.tiled_path)
     if args.command == "tiled-login":
         return tiled_login()
     return check()

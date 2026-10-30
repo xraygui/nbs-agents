@@ -41,7 +41,8 @@ work/     sessions/<uid8>/ (driver workdirs), assistant/, logs/
 
 ```bash
 export NBS_AGENTS_HOME=...          # optional; e.g. a staff account's area
-pixi run nbs-agents init            # make the layout and a config template
+pixi run nbs-agents init --tiled-uri https://... --tiled-path BEAMLINE/raw
+                                    # make the layout and a config for this beamline
 $EDITOR $NBS_AGENTS_HOME/config/nbs-cli.toml    # beamline addresses, kb_dir, models
 # load AIFAPIM_HOST and AIFAPIM_API_KEY (e.g. from your gpg-encrypted .env) for --sandbox bwclaude
 pixi run nbs-agents tiled-login     # optional: log in to Tiled now (the runner asks when needed)
@@ -58,8 +59,9 @@ file; `--refresh-assistant` updates the assistant's workdir (`CLAUDE.md`,
 
 ### Tiled login
 
-Set `tiled_uri` and `tiled_path` (the run catalog, e.g. `"<beamline>/raw"`) in
-`[nbs_cli]`. When the server needs a login (Entra ID at NSLS-II),
+Each install names its Tiled server and run catalog: `tiled_uri` and
+`tiled_path` in `[nbs_cli]`, which `nbs-agents init --tiled-uri ... --tiled-path
+...` writes; `nbs-agents check` warns while `tiled_path` is unset. When the server needs a login (Entra ID at NSLS-II),
 `nbs-agents-runner` starts one as it starts: Tiled prints a link and a code and
 opens a browser, and the web page shows the same link until you finish. The
 login is cached in `state/tiled` and refreshed, so later starts are usually

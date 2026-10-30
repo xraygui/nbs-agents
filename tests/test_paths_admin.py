@@ -98,3 +98,21 @@ def test_paths_command_lists_every_location(nbs_agents_home):
     assert admin.show_paths(out=lines.append) == 0
     assert lines[0].split()[1] == str(nbs_agents_home)
     assert len(lines) == 12
+
+
+def test_init_writes_this_beamlines_tiled_catalog(nbs_agents_home):
+    admin.init(out=lambda line: None, tiled_uri="https://tiled.example.org", tiled_path="bl/raw")
+    config = CliConfig.load()
+    assert (config.tiled_uri, config.tiled_path) == ("https://tiled.example.org", "bl/raw")
+    lines = []
+    admin.init(out=lines.append, tiled_path="other/raw")
+    assert any("already exists" in line for line in lines)
+    assert CliConfig.load().tiled_path == "bl/raw"
+
+
+def test_check_warns_without_a_catalog(nbs_agents_home, monkeypatch):
+    monkeypatch.setattr(admin, "PROBE_TIMEOUT_S", 0.2)
+    admin.init(out=lambda line: None)
+    lines = []
+    admin.check(out=lines.append)
+    assert any(line.startswith("warn  tiled_path") for line in lines)
