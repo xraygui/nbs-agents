@@ -8,7 +8,7 @@ authors = [
     {name = "Charles Titus", email = "ctitus@bnl.gov"},
 ]
 requires-python = ">=3.9"
-description = "NBS Agent Framework"
+description = "Run beamline agents alongside the Bluesky QueueServer"
 dynamic = ["version"]
 readme = "README.md"
 keywords = ["bluesky", "nsls-ii", "beamline"]
@@ -25,12 +25,6 @@ dependencies = [
     "tiled",
     "numpy",
     "ipython",
-    "numpydoc",
-    "scikit-learn",
-    "matplotlib",
-    "numpyro",
-    "jax",
-    "tinygp",
     "redis",
     "pyzmq",
     'tomli ; python_version < "3.11"'
@@ -43,12 +37,6 @@ bluesky-queueserver-api = "*"
 tiled = "*"
 numpy = "*"
 ipython = "*"
-numpydoc = "*"
-scikit-learn = "*"
-matplotlib = "*"
-numpyro = "*"
-jax = "*"
-tinygp = "*"
 redis-py = "*"
 pyzmq = "*"
 qt6-wayland = "*"
@@ -59,29 +47,16 @@ homepage = "https://github.com/xraygui/nbs-agents"
 
 [project.scripts]
 nbs-agents-runner = "nbs_agents.runner:main"
-nbs-cli = "nbs_agents.cli.main:main"
-nbs-agents-web = "nbs_agents.web.__main__:main"
 nbs-agents = "nbs_agents.admin:main"
 
 [project.optional-dependencies]
 gui = ["nbs-gui", "qtpy"]
-web = ["fastapi", "uvicorn"]
 
 [project.entry-points."nbs_gui.plans"]
 nbs-agents-block = "nbs_agents.qt.plans.agent_block:AgentBlockWidget"
 
-[project.entry-points."nbs_agents.agents"]
-claude = "nbs_agents.agents.external:ExternalAgent"
-
-[project.entry-points."nbs_agents.runner"]
-claude = "nbs_agents.claude_runner:plugin"
-
-[project.entry-points."nbs_agents.launchers"]
-claude = "nbs_agents.launcher:claude_launch_parameters"
-
 [project.entry-points."nbs_gui.tabs"]
 nbs-agents-log = "nbs_agents.qt.tabs.agent_log:AgentLogTab"
-nbs-agents-assistant = "nbs_agents.qt.tabs.assistant:AssistantTab"
 
 [tool.hatch.version]
 source = "vcs"
@@ -95,4 +70,11 @@ nbs-agents = {path = ".", editable = true}
 
 [tool.pixi.tasks]
 agent-runner = "nbs-agents-runner"
-agent-web = "nbs-agents-web"
+test = "pytest tests"
+
+[tool.pixi.feature.test.dependencies]
+pytest = "*"
+
+[tool.pixi.environments]
+default = {features = [], solve-group = "default"}
+test = {features = ["test"], solve-group = "default"}

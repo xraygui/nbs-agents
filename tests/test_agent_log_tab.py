@@ -15,9 +15,21 @@ from fakes import FakeRedis  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def claude_launcher(monkeypatch):
-    """Offer the claude launcher even where nbs-agents' entry points aren't installed."""
+    """Install a "claude" launcher, as sst-assistant does through its entry point."""
     from nbs_agents import launchers
-    from nbs_agents.launcher import claude_launch_parameters
+
+    def claude_launch_parameters(goal, budget=None):
+        goal = (goal or "").strip()
+        if not goal:
+            raise ValueError("a goal is required")
+        params = {"goal": goal, "launch": True}
+        if budget and budget.strip():
+            units = {"m": 60, "h": 3600, "s": 1}
+            try:
+                params["budget"] = {"time_s": float(budget[:-1]) * units[budget[-1]]}
+            except (KeyError, ValueError):
+                raise ValueError(f"bad duration {budget!r}")
+        return params
 
     monkeypatch.setattr(launchers, "_launchers", lambda: {"claude": claude_launch_parameters})
 

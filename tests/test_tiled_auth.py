@@ -11,7 +11,7 @@ from fakes import FakeRedis
 
 from nbs_agents import tiled_auth
 from nbs_agents.agentlog import AgentLog
-from nbs_agents.cli.config import CliConfig
+from nbs_agents.config import AgentsConfig
 from nbs_agents.paths import paths
 
 
@@ -97,9 +97,9 @@ def test_connect_prefers_fixed_key_then_agent_key(monkeypatch, server, nbs_agent
     monkeypatch.setattr(tiled.client, "from_uri", lambda uri, api_key=None: calls.append(("uri", api_key)) or {"raw": "node"})
     monkeypatch.setattr(tiled.client, "from_context", lambda context: calls.append(("context", None)) or {"raw": "node"})
     monkeypatch.delenv("TILED_API_KEY", raising=False)
-    config = CliConfig(tiled_uri="https://tiled", tiled_path="raw")
+    config = AgentsConfig(tiled_uri="https://tiled", tiled_path="raw")
 
-    assert tiled_auth.connect(CliConfig(tiled_uri="https://tiled", tiled_api_key="fixed")) == {"raw": "node"}
+    assert tiled_auth.connect(AgentsConfig(tiled_uri="https://tiled", tiled_api_key="fixed")) == {"raw": "node"}
     tiled_auth.write_key_file({"secret": "agent", "first_eight": "x", "expires": time.time() + 60})
     assert tiled_auth.connect(config) == "node"
     assert calls == [("uri", "fixed"), ("uri", "agent")]
@@ -121,7 +121,7 @@ def test_keeper_makes_rotates_and_revokes_read_only_keys(server, nbs_agents_home
         log.set_tiled_login(url, code)
 
     monkeypatch.delenv("TILED_API_KEY", raising=False)
-    keeper = tiled_auth.AgentKeyKeeper(CliConfig(tiled_uri="https://tiled", tiled_key_lifetime_s=7200), on_link=on_link)
+    keeper = tiled_auth.AgentKeyKeeper(AgentsConfig(tiled_uri="https://tiled", tiled_key_lifetime_s=7200), on_link=on_link)
     assert keeper.needed
     assert keeper.renew()
     context = server["context"]
@@ -145,19 +145,7 @@ def test_keeper_makes_rotates_and_revokes_read_only_keys(server, nbs_agents_home
 
 
 def test_keeper_not_needed_with_fixed_key():
-    keeper = tiled_auth.AgentKeyKeeper(CliConfig(tiled_api_key="fixed"))
+    keeper = tiled_auth.AgentKeyKeeper(AgentsConfig(tiled_api_key="fixed"))
     assert not keeper.needed
     keeper.start()
     keeper.stop()
-
-
-def test_web_snapshot_shows_pending_login():
-    from test_web import FakeBeamline, client_for
-
-    bl = FakeBeamline()
-    bl.agent_log.heartbeat()
-    bl.agent_log.set_tiled_login("https://login.example/device", "ABCD-EFGH")
-    snap = client_for(bl).get("/api/snapshot").json()
-    assert snap["tiled_login"]["code"] == "ABCD-EFGH"
-    bl.agent_log.set_tiled_login(None)
-    assert client_for(bl).get("/api/snapshot").json()["tiled_login"] is None

@@ -9,8 +9,7 @@ from fakes import FakeRedis
 
 from nbs_agents.agentlog import AgentLog
 from nbs_agents.agentlog_store import AgentLogServer, location_key, publish_location, read_location
-from nbs_agents.cli.config import AgentLogConfig, CliConfig
-from nbs_agents.cli.core import Beamline
+from nbs_agents.config import AgentLogConfig, AgentsConfig
 
 
 def _write(tmp_path, text):
@@ -20,13 +19,13 @@ def _write(tmp_path, text):
 
 
 def test_agent_log_shares_beamline_redis_by_default(tmp_path):
-    config = CliConfig.load(_write(tmp_path, '[nbs_cli]\nredis_port = 60737\nredis_db = 4\nredis_prefix = "claude-"\n'))
+    config = AgentsConfig.load(_write(tmp_path, '[nbs_cli]\nredis_port = 60737\nredis_db = 4\nredis_prefix = "claude-"\n'))
     assert not config.agent_log.dedicated
     assert config.agent_log_settings == config.redis_settings
 
 
 def test_agent_log_table(tmp_path):
-    config = CliConfig.load(_write(tmp_path, (
+    config = AgentsConfig.load(_write(tmp_path, (
         '[nbs_cli]\nredis_port = 60737\nredis_prefix = "claude-"\n'
         '[agent_log]\nport = 60740\nserve = true\ndata_dir = "/x"\n'
     )))
@@ -37,18 +36,9 @@ def test_agent_log_table(tmp_path):
 
 def test_agent_log_table_errors(tmp_path):
     with pytest.raises(ValueError, match="needs a port"):
-        CliConfig.load(_write(tmp_path, "[agent_log]\nserve = true\n"))
+        AgentsConfig.load(_write(tmp_path, "[agent_log]\nserve = true\n"))
     with pytest.raises(ValueError, match="Unknown \\[agent_log\\]"):
-        CliConfig.load(_write(tmp_path, "[agent_log]\nprot = 1\n"))
-
-
-def test_beamline_uses_the_agent_log_redis():
-    bl = Beamline(CliConfig(agent_log=AgentLogConfig(port=60740, prefix="ag-")))
-    assert bl.agent_log.prefix == "ag-"
-    assert bl.agent_log.redis.connection_pool.connection_kwargs["port"] == 60740
-    shared = Beamline(CliConfig(redis_prefix="claude-"))
-    shared._redis = FakeRedis()
-    assert shared.agent_log.redis is shared._redis and shared.agent_log.prefix == "claude-"
+        AgentsConfig.load(_write(tmp_path, "[agent_log]\nprot = 1\n"))
 
 
 def test_location_round_trip():

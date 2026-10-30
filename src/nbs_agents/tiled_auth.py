@@ -192,7 +192,7 @@ def connect(config: Any, interactive: Optional[bool] = None, on_link=None):
 
     Parameters
     ----------
-    config : nbs_agents.cli.config.CliConfig
+    config : nbs_agents.config.AgentsConfig
         ``tiled_uri``, ``tiled_path``, ``tiled_api_key`` and ``tiled_api_key_file``.
     interactive : bool, optional
         Whether a new login may be started; by default when stdin is a terminal.
@@ -224,7 +224,7 @@ class AgentKeyKeeper:
 
     Parameters
     ----------
-    config : nbs_agents.cli.config.CliConfig
+    config : nbs_agents.config.AgentsConfig
         Tiled settings; ``tiled_key_lifetime_s`` sets each key's life.
     on_link : callable, optional
         Called as ``on_link(url, code)`` when a login is needed, and as

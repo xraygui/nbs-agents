@@ -9,7 +9,6 @@ import pytest
 from nbs_agents import launchers, runner, supervisor
 from nbs_agents.agents.external import ExternalAgent
 from nbs_agents.config import AgentsConfig
-from nbs_agents.cli.config import CliConfig
 
 
 def fake_entry_points(groups):
@@ -34,6 +33,12 @@ def test_registry_adds_installed_agents_and_skips_broken_ones(monkeypatch):
         registry.get("broken")
     with pytest.raises(KeyError):
         registry.get("claude")  # only when a package declares it
+
+
+def launch_goal(goal, budget=None):
+    if not goal:
+        raise ValueError("a goal is required")
+    return {"goal": goal, "launch": True}
 
 
 def make_observers(runtime):
@@ -76,7 +81,7 @@ def test_launchers_come_from_entry_points(monkeypatch):
     import importlib.metadata
 
     monkeypatch.setattr(importlib.metadata, "entry_points", fake_entry_points({
-        launchers.LAUNCHERS_ENTRY_POINT: [("claude", "nbs_agents.launcher:claude_launch_parameters")],
+        launchers.LAUNCHERS_ENTRY_POINT: [("claude", "test_plugins:launch_goal")],
     }))
     launchers._launchers.cache_clear()
     try:
@@ -89,13 +94,20 @@ def test_launchers_come_from_entry_points(monkeypatch):
 
 
 def test_core_config_ignores_other_packages_settings(tmp_path):
+    from dataclasses import dataclass
+
+    @dataclass
+    class PackageConfig(AgentsConfig):
+        strict = True
+        claude_command: str = ""
+
     path = tmp_path / "nbs-cli.toml"
     path.write_text('[nbs_cli]\nqs_addr = "tcp://qs:1"\nclaude_command = "x"\n[agent_log]\nport = 60740\n')
     core = AgentsConfig.load(str(path))
     assert core.qs_addr == "tcp://qs:1" and core.agent_log.port == 60740
     assert not hasattr(core, "claude_command")
-    assert CliConfig.load(str(path)).claude_command == "x"
+    assert PackageConfig.load(str(path)).claude_command == "x"
     path.write_text('[nbs_cli]\nno_such_setting = 1\n')
     AgentsConfig.load(str(path))
     with pytest.raises(ValueError, match="Unknown nbs-cli settings"):
-        CliConfig.load(str(path))
+        PackageConfig.load(str(path))
