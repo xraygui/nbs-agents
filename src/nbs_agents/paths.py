@@ -11,12 +11,6 @@ Everything lives under one folder, ``$NBS_AGENTS_HOME`` (default
 
 ``nbs-agents init`` makes it. Settings and variables that name a path
 (``NBS_CLI_CONFIG``, ``attachments_dir``, ...) still win.
-
-Installs from before this layout kept files in ``~/.config``,
-``~/.local/share``, ``~/.local/state`` and ``~/beamline-agents``. While
-``$NBS_AGENTS_HOME`` is unset, the home folder does not exist and
-``~/.config/nbs-cli.toml`` does, those old places are used instead, all
-together, so an existing install keeps working until it moves.
 """
 
 import os
@@ -25,7 +19,6 @@ from pathlib import Path
 
 HOME_ENV = "NBS_AGENTS_HOME"
 DEFAULT_HOME = "~/.nbs-agents"
-LEGACY_CONFIG = "~/.config/nbs-cli.toml"
 
 
 @dataclass(frozen=True)
@@ -36,9 +29,7 @@ class Paths:
     Attributes
     ----------
     home : Path
-        Root folder (``$NBS_AGENTS_HOME``); for a legacy install, ``~``.
-    legacy : bool
-        Whether this is a pre-``NBS_AGENTS_HOME`` install.
+        Root folder (``$NBS_AGENTS_HOME``).
     config_file, gateway_env, token : Path
         nbs-cli settings, the gateway key file and the web login token.
     agent_log_dir : Path
@@ -51,7 +42,6 @@ class Paths:
     """
 
     home: Path
-    legacy: bool
     config_file: Path
     gateway_env: Path
     token: Path
@@ -76,23 +66,6 @@ class Paths:
         }
 
 
-def _legacy() -> Paths:
-    user = Path("~").expanduser()
-    return Paths(
-        home=user,
-        legacy=True,
-        config_file=user / ".config" / "nbs-cli.toml",
-        gateway_env=user / ".config" / "nbs-agents" / "gateway.env",
-        token=user / ".config" / "nbs-agents" / "token",
-        agent_log_dir=user / ".local" / "state" / "nbs-agents" / "agent-log",
-        attachments=user / ".local" / "share" / "nbs-agents" / "attachments",
-        kb_agent=user / ".local" / "share" / "nbs-agents" / "kb",
-        sessions=user / "beamline-agents",
-        assistant=user / "beamline-agents" / "assistant",
-        logs=user / "beamline-agents" / "logs",
-    )
-
-
 def paths() -> Paths:
     """
     The layout in use now.
@@ -100,17 +73,12 @@ def paths() -> Paths:
     Returns
     -------
     Paths
-        Under ``$NBS_AGENTS_HOME`` (or ``~/.nbs-agents``), or the legacy
-        places for an install made before that existed.
+        Under ``$NBS_AGENTS_HOME``, or ``~/.nbs-agents`` if it is unset.
     """
-    explicit = os.environ.get(HOME_ENV)
-    home = Path(explicit or DEFAULT_HOME).expanduser()
-    if not explicit and not home.exists() and Path(LEGACY_CONFIG).expanduser().exists():
-        return _legacy()
+    home = Path(os.environ.get(HOME_ENV) or DEFAULT_HOME).expanduser()
     config = home / "config"
     return Paths(
         home=home,
-        legacy=False,
         config_file=config / "nbs-cli.toml",
         gateway_env=config / "gateway.env",
         token=config / "token",

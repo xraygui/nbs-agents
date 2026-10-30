@@ -62,12 +62,8 @@ def init(refresh_assistant: bool = False, out=print) -> int:
     from .auth import ensure_token
 
     p = paths()
-    if p.legacy:
-        out(f"Using the pre-{HOME_ENV} layout because ~/.config/nbs-cli.toml exists;")
-        out(f"set {HOME_ENV} to make a self-contained one instead.")
-    else:
-        p.home.mkdir(parents=True, exist_ok=True)
-        out(f"nbs-agents home: {p.home}")
+    p.home.mkdir(parents=True, exist_ok=True)
+    out(f"nbs-agents home: {p.home}")
     for name, folder in p.folders.items():
         folder.mkdir(mode=0o700 if name == "config" else 0o777, parents=True, exist_ok=True)
     os.chmod(p.token.parent, 0o700)
@@ -171,7 +167,7 @@ def check(out=print) -> int:
 
     p = paths()
     rows: list[tuple[str, str, str]] = []
-    rows.append((OK, "home", f"{p.home}{' (pre-' + HOME_ENV + ' layout)' if p.legacy else ''}"))
+    rows.append((OK, "home", str(p.home)))
 
     config: Optional[CliConfig] = None
     if not p.config_file.exists() and not os.environ.get("NBS_CLI_CONFIG"):
@@ -231,7 +227,7 @@ def check(out=print) -> int:
 def show_paths(out=print) -> int:
     """Print every file location of the current layout."""
     p = paths()
-    out(f"home           {p.home}{'  (pre-' + HOME_ENV + ' layout)' if p.legacy else ''}")
+    out(f"home           {p.home}")
     for name in ("config_file", "gateway_env", "token", "agent_log_dir", "attachments", "kb_agent",
                  "sessions", "assistant", "logs"):
         out(f"{name:<14} {getattr(p, name)}")

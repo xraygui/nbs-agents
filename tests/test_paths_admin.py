@@ -14,7 +14,7 @@ from nbs_agents.paths import HOME_ENV, paths
 def test_every_default_is_under_the_home(nbs_agents_home, monkeypatch):
     monkeypatch.delenv("NBS_AGENTS_TOKEN_FILE")
     p = paths()
-    assert not p.legacy and p.home == nbs_agents_home
+    assert p.home == nbs_agents_home
     assert p.config_file == nbs_agents_home / "config" / "nbs-cli.toml"
     config = CliConfig.load()
     assert config.claude_workdir == str(nbs_agents_home / "work" / "sessions" / "{uid8}")
@@ -26,22 +26,10 @@ def test_every_default_is_under_the_home(nbs_agents_home, monkeypatch):
     assert token_path() == nbs_agents_home / "config" / "token"
 
 
-def test_old_install_keeps_its_places(tmp_path, monkeypatch):
-    user = tmp_path / "user"
-    (user / ".config").mkdir(parents=True)
-    (user / ".config" / "nbs-cli.toml").write_text("")
-    monkeypatch.setenv("HOME", str(user))
+def test_home_defaults_to_dot_nbs_agents(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv(HOME_ENV)
-    p = paths()
-    assert p.legacy
-    assert p.config_file == user / ".config" / "nbs-cli.toml"
-    assert p.token == user / ".config" / "nbs-agents" / "token"
-    assert p.sessions == user / "beamline-agents"
-    # A new install, or one that set NBS_AGENTS_HOME, uses the home folder
-    (user / ".nbs-agents").mkdir()
-    assert not paths().legacy
-    monkeypatch.setenv(HOME_ENV, str(tmp_path / "elsewhere"))
-    assert paths().home == tmp_path / "elsewhere"
+    assert paths().home == tmp_path / ".nbs-agents"
 
 
 def test_init_makes_layout_and_keeps_existing_files(nbs_agents_home):

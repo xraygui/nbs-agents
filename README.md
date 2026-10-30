@@ -53,10 +53,7 @@ pixi run agent-web                  # open the printed ?token= link
 file; `--refresh-assistant` updates the assistant's workdir (`CLAUDE.md`,
 `.claude/settings.json`) from `templates/assistant/`, keeping old copies as
 `*.bak`. Settings and variables that name a path (`NBS_CLI_CONFIG`,
-`attachments_dir`, `NBS_GATEWAY_ENV`, ...) still win. An install from before
-this layout (with `~/.config/nbs-cli.toml` and no `~/.nbs-agents`) keeps using
-`~/.config`, `~/.local/share/nbs-agents`, `~/.local/state/nbs-agents` and
-`~/beamline-agents` until `NBS_AGENTS_HOME` is set.
+`attachments_dir`, `NBS_GATEWAY_ENV`, ...) still win.
 
 nbs-gui needs nbs-agents in its own environment for the Agents Log and
 Assistant tabs, but no nbs-agents config: it finds the agent log through the
