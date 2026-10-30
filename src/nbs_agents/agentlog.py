@@ -154,6 +154,7 @@ class AgentLog:
 
     # Kept outside key_prefix so records() never sees it
     HEARTBEAT_KEY = "NBS_AGENTS_RUNNER_HEARTBEAT"
+    TILED_LOGIN_KEY = "NBS_AGENTS_TILED_LOGIN"
     HEARTBEAT_STALE_S = 20.0
 
     @property
@@ -180,6 +181,27 @@ class AgentLog:
             return time.time() - float(raw) < self.HEARTBEAT_STALE_S
         except ValueError:
             return False
+
+    def set_tiled_login(self, url: Optional[str], code: Optional[str] = None) -> None:
+        """
+        Show (or, with ``url=None``, clear) a pending Tiled login link and code.
+
+        The runner sets it while it waits for the user to log in, so the web
+        page can show the link even when the runner's terminal is hidden.
+        """
+        key = f"{self.prefix}{self.TILED_LOGIN_KEY}"
+        if url is None:
+            self.redis.delete(key)
+        else:
+            self.redis.set(key, json.dumps({"url": url, "code": code, "t": time.time()}))
+
+    def tiled_login(self) -> Optional[dict[str, Any]]:
+        """The pending Tiled login (``url``, ``code``, ``t``), or None."""
+        raw = self.redis.get(f"{self.prefix}{self.TILED_LOGIN_KEY}")
+        try:
+            return json.loads(raw) if raw else None
+        except ValueError:
+            return None
 
     def _key(self, agent_uid: str) -> str:
         return f"{self.key_prefix}{agent_uid}"

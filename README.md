@@ -33,7 +33,8 @@ Everything nbs-agents keeps lives under one folder, `$NBS_AGENTS_HOME`
 
 ```
 config/   nbs-cli.toml, token (web login), optional gateway.env        mode 700
-state/    agent-log/  (the agent log's Redis snapshot)
+state/    agent-log/ (the agent log's Redis snapshot), tiled/ (your Tiled
+          login, mode 700), tiled-agent/ (the agents' Tiled key, mode 700)
 data/     attachments/ (figures), kb/ (agents' knowledge-base notes)
 work/     sessions/<uid8>/ (driver workdirs), assistant/, logs/
 ```
@@ -43,7 +44,7 @@ export NBS_AGENTS_HOME=...          # optional; e.g. a staff account's area
 pixi run nbs-agents init            # make the layout and a config template
 $EDITOR $NBS_AGENTS_HOME/config/nbs-cli.toml    # beamline addresses, kb_dir, models
 # load AIFAPIM_HOST and AIFAPIM_API_KEY (e.g. from your gpg-encrypted .env) for --sandbox bwclaude
-export TILED_API_KEY=...            # until Tiled login (Entra ID) is supported
+pixi run nbs-agents tiled-login     # optional: log in to Tiled now (the runner asks when needed)
 pixi run nbs-agents check           # files, permissions, bwclaude, redis-server, services
 NBS_CLAUDE_SANDBOX=bwclaude pixi run agent-runner
 pixi run agent-web                  # open the printed ?token= link
@@ -54,6 +55,24 @@ file; `--refresh-assistant` updates the assistant's workdir (`CLAUDE.md`,
 `.claude/settings.json`) from `templates/assistant/`, keeping old copies as
 `*.bak`. Settings and variables that name a path (`NBS_CLI_CONFIG`,
 `attachments_dir`, `NBS_GATEWAY_ENV`, ...) still win.
+
+### Tiled login
+
+Set `tiled_uri` and `tiled_path` (the run catalog, e.g. `"<beamline>/raw"`) in
+`[nbs_cli]`. When the server needs a login (Entra ID at NSLS-II),
+`nbs-agents-runner` starts one as it starts: Tiled prints a link and a code and
+opens a browser, and the web page shows the same link until you finish. The
+login is cached in `state/tiled` and refreshed, so later starts are usually
+silent; `nbs-agents tiled-login` logs in ahead of time, and `nbs-cli` in a
+terminal asks the same way.
+
+Agents never use your login. The runner makes them a read-only
+(`read:metadata`, `read:data`) Tiled API key that expires after
+`tiled_key_lifetime_s` (a day), replaces it after two thirds of that, and
+revokes it on exit. It lives in `state/tiled-agent/api-key.json`, whose folder
+`claude-beamline --sandbox bwclaude` mounts read-only. An agent without a valid
+key is told to ask the operator. A fixed `TILED_API_KEY` (or `tiled_api_key`)
+skips all of this.
 
 nbs-gui needs nbs-agents in its own environment for the Agents Log and
 Assistant tabs, but no nbs-agents config: it finds the agent log through the

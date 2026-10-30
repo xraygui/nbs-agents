@@ -6,6 +6,7 @@
     nbs-agents init --refresh-assistant
                                      also update the assistant's workdir from the template
     nbs-agents check                 check files, permissions, tools and services
+    nbs-agents tiled-login           log in to Tiled now (the runner also asks when needed)
 
 See ``nbs_agents.paths`` for the layout.
 """
@@ -20,7 +21,7 @@ import urllib.request
 from pathlib import Path
 from typing import Callable, Optional
 
-from .paths import HOME_ENV, paths
+from .paths import HOME_ENV, PRIVATE, paths
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_TEMPLATE = REPO_ROOT / "templates" / "nbs-cli.toml"
@@ -60,8 +61,9 @@ def init(refresh_assistant: bool = False, out=print) -> int:
     p.home.mkdir(parents=True, exist_ok=True)
     out(f"nbs-agents home: {p.home}")
     for name, folder in p.folders.items():
-        folder.mkdir(mode=0o700 if name == "config" else 0o777, parents=True, exist_ok=True)
-    os.chmod(p.token.parent, 0o700)
+        folder.mkdir(mode=0o700 if name in PRIVATE else 0o777, parents=True, exist_ok=True)
+        if name in PRIVATE:
+            os.chmod(folder, 0o700)
 
     if CONFIG_TEMPLATE.exists() and _write_new(p.config_file, CONFIG_TEMPLATE.read_text(), 0o600):
         out(f"wrote {p.config_file}: edit it for this beamline")
@@ -148,6 +150,23 @@ def _tiled(uri: str) -> str:
         return f"{uri} (HTTP {response.status})"
 
 
+def _tiled_key_row(config) -> tuple[str, str, str]:
+    """Where agents get Tiled access from."""
+    import json
+    import time
+
+    if config.tiled_api_key or os.environ.get("TILED_API_KEY"):
+        return OK, "Tiled key", "fixed key from tiled_api_key or TILED_API_KEY"
+    path = Path(config.tiled_api_key_file).expanduser() if config.tiled_api_key_file else paths().tiled_agent_key
+    try:
+        expires = json.loads(path.read_text()).get("expires")
+    except (OSError, ValueError):
+        return WARN, "Tiled key", f"no agent key yet; nbs-agents-runner makes one after you log in ({path})"
+    if isinstance(expires, (int, float)) and expires > time.time():
+        return OK, "Tiled key", f"agent key valid for {(expires - time.time()) / 3600:.1f} h ({path})"
+    return WARN, "Tiled key", f"agent key expired; is nbs-agents-runner running? ({path})"
+
+
 def _row(name: str, result: tuple[str, str]) -> tuple[str, str, str]:
     return result[0], name, result[1]
 
@@ -185,8 +204,12 @@ def check(out=print) -> int:
         rows.append((state, "web token", f"{p.token}, {detail}"))
     else:
         rows.append((WARN, "web token", f"{p.token} (made by nbs-agents-web or init)"))
+    for name in PRIVATE[1:]:
+        if p.folders[name].exists():
+            state, detail = _private(p.folders[name], 0o700)
+            rows.append((state, name, f"{p.folders[name]}, {detail}"))
     for name, folder in p.folders.items():
-        if name != "config":
+        if name not in PRIVATE:
             rows.append((OK if folder.is_dir() else WARN, name, f"{folder}{'' if folder.is_dir() else ' (made on first use)'}"))
     if config is not None and config.kb_dir:
         rows.append((OK if Path(config.kb_dir).expanduser().is_dir() else WARN, "kb_dir", config.kb_dir))
@@ -213,8 +236,7 @@ def check(out=print) -> int:
                 state, detail = WARN, "not running (nbs-agents-runner starts it)"
             rows.append((state, "agent-log Redis", detail))
         rows.append(_row("Tiled", _probe(lambda: _tiled(config.tiled_uri))))
-        if not (config.tiled_api_key or os.environ.get("TILED_API_KEY")):
-            rows.append((WARN, "Tiled key", "no TILED_API_KEY; fine only if Tiled allows anonymous reads"))
+        rows.append(_tiled_key_row(config))
 
     width = max(len(name) for _, name, _ in rows)
     for state, name, detail in rows:
@@ -222,13 +244,26 @@ def check(out=print) -> int:
     return 1 if any(state == FAIL for state, _, _ in rows) else 0
 
 
+def tiled_login(out=print) -> int:
+    """Log in to the configured Tiled server, reusing a cached login if it is still good."""
+    from .cli.config import CliConfig
+    from .tiled_auth import login_context
+
+    config = CliConfig.load()
+    context = login_context(config.tiled_uri, interactive=True)
+    who = context.whoami() if context.authenticated else None
+    out(f"Tiled {config.tiled_uri}: " + (f"logged in as {who.get('identities', [{}])[0].get('id', '?')}" if who else "no login needed"))
+    return 0
+
+
 def show_paths(out=print) -> int:
     """Print every file location of the current layout."""
     p = paths()
-    out(f"home           {p.home}")
-    for name in ("config_file", "gateway_env", "token", "agent_log_dir", "attachments", "kb_agent",
+    out(f"home             {p.home}")
+    for name in ("config_file", "gateway_env", "token", "agent_log_dir", "tiled_cache", "tiled_agent_key",
+                 "attachments", "kb_agent",
                  "sessions", "assistant", "logs"):
-        out(f"{name:<14} {getattr(p, name)}")
+        out(f"{name:<16} {getattr(p, name)}")
     return 0
 
 
@@ -242,11 +277,14 @@ def main(argv=None) -> int:
         help="overwrite the assistant's workdir files that differ from the template (keeps *.bak)",
     )
     sub.add_parser("check", help="check files, permissions, tools and services")
+    sub.add_parser("tiled-login", help="log in to Tiled now")
     args = parser.parse_args(argv)
     if args.command == "paths":
         return show_paths()
     if args.command == "init":
         return init(args.refresh_assistant)
+    if args.command == "tiled-login":
+        return tiled_login()
     return check()
 
 

@@ -14,6 +14,7 @@ from .cli.config import AssistantConfig, CliConfig
 from .cli.core import Beamline
 from .launcher import ClaudeLauncher
 from .supervisor import AgentSupervisor
+from .tiled_auth import AgentKeyKeeper
 
 LOGGER = logging.getLogger(__name__)
 
@@ -128,6 +129,10 @@ def main() -> None:
     except Exception:
         LOGGER.exception("Agent log disabled: could not reach Redis at %s:%s", settings["host"], settings["port"])
         agent_log = None
+    # Log in to Tiled (a link is printed and shown on the web page if needed) and
+    # keep a read-only key for agents
+    keeper = AgentKeyKeeper(config, on_link=agent_log.set_tiled_login if agent_log is not None else None)
+    keeper.start()
     launcher = ClaudeLauncher.from_config(config)
     if launcher is None:
         LOGGER.info("Claude launching off (claude_command is empty)")
@@ -149,6 +154,7 @@ def main() -> None:
     finally:
         if assistant is not None:
             assistant.stop("runner stopped")
+        keeper.stop()
         if server is not None:
             server.stop()
 

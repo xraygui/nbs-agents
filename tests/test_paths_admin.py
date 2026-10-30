@@ -97,4 +97,4 @@ def test_paths_command_lists_every_location(nbs_agents_home):
     lines = []
     assert admin.show_paths(out=lines.append) == 0
     assert lines[0].split()[1] == str(nbs_agents_home)
-    assert len(lines) == 10
+    assert len(lines) == 12

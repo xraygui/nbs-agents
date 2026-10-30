@@ -41,6 +41,9 @@ class FakeRedis:
     def set(self, key, value):
         self.store[key] = value.encode() if isinstance(value, str) else value
 
+    def delete(self, key):
+        return 1 if self.store.pop(key, None) is not None else 0
+
     def scan_iter(self, match="*"):
         return [k.encode() for k in self.store if fnmatch.fnmatch(k, match)]
 
