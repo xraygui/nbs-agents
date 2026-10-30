@@ -39,7 +39,8 @@ def test_init_makes_layout_and_keeps_existing_files(nbs_agents_home):
     for folder in p.folders.values():
         assert folder.is_dir()
     assert stat.S_IMODE(p.token.parent.stat().st_mode) == 0o700
-    for f in (p.config_file, p.gateway_env, p.token):
+    assert not p.gateway_env.exists()  # the gateway key normally comes from the environment
+    for f in (p.config_file, p.token):
         assert stat.S_IMODE(f.stat().st_mode) == 0o600
     assert "[agent_log]" in p.config_file.read_text()
     assert (p.assistant / ".claude" / "settings.json").exists()
@@ -57,6 +58,8 @@ def test_init_makes_layout_and_keeps_existing_files(nbs_agents_home):
 
 def test_check_reports_files_and_unreachable_services(nbs_agents_home, monkeypatch):
     monkeypatch.setattr(admin, "PROBE_TIMEOUT_S", 0.5)
+    monkeypatch.delenv("AIFAPIM_HOST", raising=False)
+    monkeypatch.delenv("AIFAPIM_API_KEY", raising=False)
     admin.init(out=lambda line: None)
     p = paths()
     p.config_file.write_text(
@@ -65,15 +68,29 @@ def test_check_reports_files_and_unreachable_services(nbs_agents_home, monkeypat
     lines = []
     assert admin.check(out=lines.append) == 1
     text = "\n".join(lines)
-    assert "gateway.env" in text and "AIFAPIM_API_KEY not set" in text
+    assert "warn  gateway" in text and "not in the environment" in text
     assert " ok  web token" in text
     assert "FAIL  beamline Redis" in text and "FAIL  Tiled" in text
     assert "AIFAPIM_API_KEY=" not in text
 
+    # A key file is the fallback, and must be private
+    p.gateway_env.write_text("AIFAPIM_HOST=h\nAIFAPIM_API_KEY=k\n")
     os.chmod(p.gateway_env, 0o644)
     lines.clear()
     admin.check(out=lines.append)
-    assert any(line.startswith("FAIL  gateway.env") and "mode 644" in line for line in lines)
+    assert any(line.startswith("FAIL  gateway") and "mode 644" in line for line in lines)
+    os.chmod(p.gateway_env, 0o600)
+    lines.clear()
+    admin.check(out=lines.append)
+    assert any(line.startswith("  ok  gateway") and "from " in line for line in lines)
+
+    # The environment wins, and its values are never printed
+    monkeypatch.setenv("AIFAPIM_HOST", "gw.example")
+    monkeypatch.setenv("AIFAPIM_API_KEY", "s3cret-value")
+    lines.clear()
+    admin.check(out=lines.append)
+    assert any(line.startswith("  ok  gateway") and "environment" in line for line in lines)
+    assert "s3cret-value" not in "\n".join(lines)
 
 
 def test_paths_command_lists_every_location(nbs_agents_home):

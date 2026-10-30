@@ -24,11 +24,6 @@ from .paths import HOME_ENV, paths
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_TEMPLATE = REPO_ROOT / "templates" / "nbs-cli.toml"
-GATEWAY_TEMPLATE = """\
-# NSLS-II API gateway for `claude-beamline --sandbox bwclaude`. Keep this file mode 600.
-AIFAPIM_HOST=<gateway-host>
-AIFAPIM_API_KEY=
-"""
 GATEWAY_KEYS = ("AIFAPIM_HOST", "AIFAPIM_API_KEY")
 PROBE_TIMEOUT_S = 5.0
 
@@ -70,8 +65,6 @@ def init(refresh_assistant: bool = False, out=print) -> int:
 
     if CONFIG_TEMPLATE.exists() and _write_new(p.config_file, CONFIG_TEMPLATE.read_text(), 0o600):
         out(f"wrote {p.config_file}: edit it for this beamline")
-    if _write_new(p.gateway_env, GATEWAY_TEMPLATE, 0o600):
-        out(f"wrote {p.gateway_env}: add the gateway key (AIFAPIM_API_KEY)")
     ensure_token(str(p.token))
     prepare_workdir(str(p.assistant), refresh=refresh_assistant)
     out("done; run `nbs-agents check` next")
@@ -94,18 +87,24 @@ def _private(path: Path, mode: int) -> tuple[str, str]:
 
 
 def _gateway(path: Path) -> tuple[str, str]:
+    """Where ``claude-beamline --sandbox bwclaude`` will get the gateway host and key."""
+    if all(os.environ.get(k) for k in GATEWAY_KEYS):
+        return OK, "AIFAPIM_HOST and AIFAPIM_API_KEY set in the environment"
+    if not path.exists():
+        return WARN, (f"AIFAPIM_HOST/AIFAPIM_API_KEY not in the environment and no {path} "
+                      "(needed only for --sandbox bwclaude; load them before starting the runner)")
     state, detail = _private(path, 0o600)
     if state != OK:
-        return state, detail
+        return state, f"{path}: {detail}"
     values = {}
     for line in path.read_text().splitlines():
         name, sep, value = line.strip().removeprefix("export ").partition("=")
         if sep:
             values[name.strip()] = value.strip().strip("'\"")
-    missing = [k for k in GATEWAY_KEYS if not values.get(k)]
+    missing = [k for k in GATEWAY_KEYS if not (os.environ.get(k) or values.get(k))]
     if missing:
-        return WARN, f"{', '.join(missing)} not set (needed only for --sandbox bwclaude)"
-    return OK, f"{detail}, key set"
+        return WARN, f"{', '.join(missing)} not set in the environment or {path} (needed only for --sandbox bwclaude)"
+    return OK, f"from {path} ({detail})"
 
 
 def _probe(func: Callable[[], str]) -> tuple[str, str]:
@@ -180,8 +179,7 @@ def check(out=print) -> int:
         rows.append((FAIL, "config", f"{type(exc).__name__}: {exc}"))
     state, detail = _private(p.token.parent, 0o700)
     rows.append((state, "private folder", f"{p.token.parent}, {detail}"))
-    state, detail = _gateway(Path(os.environ.get("NBS_GATEWAY_ENV") or p.gateway_env))
-    rows.append((state if state != FAIL or p.gateway_env.exists() else WARN, "gateway.env", detail))
+    rows.append(_row("gateway", _gateway(Path(os.environ.get("NBS_GATEWAY_ENV") or p.gateway_env))))
     if p.token.exists():
         state, detail = _private(p.token, 0o600)
         rows.append((state, "web token", f"{p.token}, {detail}"))

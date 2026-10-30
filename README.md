@@ -32,7 +32,7 @@ Everything nbs-agents keeps lives under one folder, `$NBS_AGENTS_HOME`
 (default `~/.nbs-agents`):
 
 ```
-config/   nbs-cli.toml, gateway.env (gateway key), token (web login)   mode 700
+config/   nbs-cli.toml, token (web login), optional gateway.env        mode 700
 state/    agent-log/  (the agent log's Redis snapshot)
 data/     attachments/ (figures), kb/ (agents' knowledge-base notes)
 work/     sessions/<uid8>/ (driver workdirs), assistant/, logs/
@@ -40,9 +40,9 @@ work/     sessions/<uid8>/ (driver workdirs), assistant/, logs/
 
 ```bash
 export NBS_AGENTS_HOME=...          # optional; e.g. a staff account's area
-pixi run nbs-agents init            # make the layout, config template, gateway.env placeholder
+pixi run nbs-agents init            # make the layout and a config template
 $EDITOR $NBS_AGENTS_HOME/config/nbs-cli.toml    # beamline addresses, kb_dir, models
-$EDITOR $NBS_AGENTS_HOME/config/gateway.env     # AIFAPIM_API_KEY, for --sandbox bwclaude
+# load AIFAPIM_HOST and AIFAPIM_API_KEY (e.g. from your gpg-encrypted .env) for --sandbox bwclaude
 export TILED_API_KEY=...            # until Tiled login (Entra ID) is supported
 pixi run nbs-agents check           # files, permissions, bwclaude, redis-server, services
 NBS_CLAUDE_SANDBOX=bwclaude pixi run agent-runner
@@ -161,9 +161,12 @@ stream-json). It puts this repo's pixi `nbs-cli` on PATH and allows only
 To run through the NSLS-II API gateway, add `--sandbox bwclaude` (or set
 `NBS_CLAUDE_SANDBOX=bwclaude`, e.g. when starting `nbs-agents-runner`). Claude
 then runs inside `bwclaude` from n2snscripts, with this repo, the nbs-cli config
-and the attachment store mounted. The key and host come from
-`config/gateway.env` under `$NBS_AGENTS_HOME` (override with `NBS_GATEWAY_ENV`), which must
-be mode 600 and set `AIFAPIM_API_KEY` and `AIFAPIM_HOST`; keep it outside any repo.
+and the attachment store mounted. The gateway host and key come from
+`AIFAPIM_HOST` and `AIFAPIM_API_KEY` in the environment, normally loaded from a
+gpg-encrypted `.env` in the shell that starts `nbs-agents-runner` (launched
+agents inherit them). Without them, `claude-beamline` sources
+`config/gateway.env` under `$NBS_AGENTS_HOME` (override with `NBS_GATEWAY_ENV`),
+which must be mode 600; keep it outside any repo.
 
 `open` needs `nbs-agents-runner` running: its `ExternalAgent` (registered as
 `external` and `claude`) holds the block open and records the session.
