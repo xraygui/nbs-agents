@@ -92,7 +92,7 @@ class AgentBlockWidget(PlanWidgetBase):
         """
         if self._agent_combo.currentText() == "claude":
             try:
-                claude_launch_parameters(self._goal.toPlainText(), self._budget.text(), sign=False)
+                claude_launch_parameters(self._goal.toPlainText(), self._budget.text())
             except ValueError:
                 return False
             return True

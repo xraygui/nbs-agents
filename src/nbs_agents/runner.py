@@ -7,7 +7,6 @@ from bluesky.callbacks.zmq import RemoteDispatcher
 from bluesky_queueserver_api.zmq import REManagerAPI
 
 from .agentlog import AgentLog
-from .auth import LaunchVerifier, Signer, token_path
 from .catalog import ZMQCatalog
 from .agents.assistant import AssistantAgent
 from .cli.config import AssistantConfig, CliConfig
@@ -88,15 +87,12 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     config = CliConfig.load()
-    # Only this user's launch requests and operator messages are acted on
-    signer = Signer.load(create=True)
-    LOGGER.info("Using the nbs-agents token in %s", token_path())
     manager = REManagerAPI(zmq_control_addr=config.qs_addr)
     dispatcher = RemoteDispatcher(config.zmq_addr)
     catalog = ZMQCatalog(dispatcher)
     agent_log = None
     try:
-        agent_log = AgentLog.from_settings(config.redis_settings, signer=signer)
+        agent_log = AgentLog.from_settings(config.redis_settings)
         agent_log.redis.ping()
         LOGGER.info("Writing agent log to Redis %s:%s key %s*", config.redis_host, config.redis_port, agent_log.key_prefix)
     except Exception:
@@ -111,10 +107,7 @@ def main() -> None:
     assistant = start_assistant(config, catalog, agent_log)
     if assistant is not None:
         observers.append(assistant)
-    AgentSupervisor(
-        manager, catalog, agent_log=agent_log, launcher=launcher, observers=observers,
-        launch_verifier=LaunchVerifier(signer),
-    )
+    AgentSupervisor(manager, catalog, agent_log=agent_log, launcher=launcher, observers=observers)
     if agent_log is not None:
         _start_heartbeat(agent_log)
     LOGGER.info("Agent runner listening for Bluesky documents at %s", config.zmq_addr)

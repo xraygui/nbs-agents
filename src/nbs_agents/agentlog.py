@@ -29,11 +29,6 @@ are messages to the agent, and a ``stop`` entry plus a top-level
 ``stop_requested`` field ask it to wrap up. ``operator_read`` holds the time of
 the newest operator entry the agent has seen.
 
-When the user's nbs-agents token is readable (see ``nbs_agents.auth``),
-operator and stop entries, and ``stop_requested``, carry a ``sig`` made with
-it. Readers holding the token ignore operator entries without a valid one, so
-only the user who runs the runner can steer their agents.
-
 An agent that needs an answer writes a ``question`` entry with ``ask``, which
 also sets a top-level ``awaiting_input`` field (``{"t", "text", "source"}``).
 The next operator, ``finalize`` or ``close`` entry clears it, so a GUI can show
@@ -51,8 +46,6 @@ import logging
 import time
 from typing import Any, Optional
 
-from .auth import Signer, operator_payload, verify_operator_entry
-
 LOGGER = logging.getLogger(__name__)
 
 AGENT_LOG_TOPIC = "AGENT"
@@ -61,8 +54,6 @@ ANSWER_KINDS = OPERATOR_KINDS + ("finalize", "close")
 ASSISTANT_NAME = "assistant"
 ASSISTANT_KIND = "assistant"
 ASSISTANT_POST_KINDS = ("summary", "advice", "alert", "answer")
-# Default for AgentLog(signer=...): load the user's token if it is readable
-AUTO = "auto"
 
 
 def assistant_uid(t: Optional[float] = None) -> str:
@@ -116,19 +107,15 @@ class AgentLog:
         Beamline Redis prefix, for example ``"claude-"``.
     topic : str, optional
         Topic appended to the prefix.
-    signer : Signer or None, optional
-        Signs operator entries written here and checks those read back. By
-        default the user's token is loaded if readable; None turns signing off.
     """
 
-    def __init__(self, redis_client: Any, prefix: str = "", topic: str = AGENT_LOG_TOPIC, signer: Any = AUTO) -> None:
+    def __init__(self, redis_client: Any, prefix: str = "", topic: str = AGENT_LOG_TOPIC) -> None:
         self.redis = redis_client
         self.prefix = prefix
         self.topic = topic
-        self.signer: Optional[Signer] = Signer.load_optional() if signer == AUTO else signer
 
     @classmethod
-    def from_settings(cls, settings: dict[str, Any], topic: str = AGENT_LOG_TOPIC, signer: Any = AUTO) -> "AgentLog":
+    def from_settings(cls, settings: dict[str, Any], topic: str = AGENT_LOG_TOPIC) -> "AgentLog":
         """
         Build an agent log from nbs-style Redis settings.
 
@@ -138,8 +125,6 @@ class AgentLog:
             Keys ``host``, and optionally ``port``, ``db`` and ``prefix``.
         topic : str, optional
             Topic appended to the prefix.
-        signer : Signer or None, optional
-            As for ``AgentLog``.
 
         Returns
         -------
@@ -153,7 +138,7 @@ class AgentLog:
             port=int(settings.get("port", 6379)),
             db=int(settings.get("db", 0)),
         )
-        return cls(client, settings.get("prefix", ""), topic, signer=signer)
+        return cls(client, settings.get("prefix", ""), topic)
 
     @property
     def key_prefix(self) -> str:
@@ -350,8 +335,6 @@ class AgentLog:
         """
         entry = {"t": time.time(), "kind": kind, "text": text}
         entry.update({k: v for k, v in refs.items() if v is not None})
-        if kind in OPERATOR_KINDS:
-            self._sign(agent_uid, entry)
 
         def update(record):
             if record is None:
@@ -488,14 +471,14 @@ class AgentLog:
             The appended entry.
         """
         text = text or "Stop requested"
-        entry = self._sign(agent_uid, {"t": time.time(), "kind": "stop", "text": text, "source": source})
+        entry = {"t": time.time(), "kind": "stop", "text": text, "source": source}
 
         def update(record):
             if record is None:
                 record = {"agent_uid": agent_uid, "status": "unknown", "log": []}
             record.setdefault("log", []).append(entry)
             record.pop("awaiting_input", None)
-            record["stop_requested"] = {k: entry[k] for k in ("t", "text", "source", "sig") if k in entry}
+            record["stop_requested"] = {"t": entry["t"], "text": text, "source": source}
             return record
 
         self._modify(agent_uid, update)
@@ -530,16 +513,9 @@ class AgentLog:
             )
         return uid
 
-    def _sign(self, agent_uid: str, entry: dict[str, Any]) -> dict[str, Any]:
-        if self.signer is not None:
-            entry["sig"] = self.signer.sign("operator", operator_payload(agent_uid, entry))
-        return entry
-
     def take_operator_messages(self, agent_uid: str) -> list[dict[str, Any]]:
         """
         Return operator entries the agent has not seen yet, and mark them seen.
-
-        Entries that fail the signature check are marked seen but not returned.
 
         Parameters
         ----------
@@ -564,13 +540,10 @@ class AgentLog:
 
         if unread_operator_entries(self.get(agent_uid) or {}):
             self._modify(agent_uid, update)
-        verified = [e for e in unread if verify_operator_entry(self.signer, agent_uid, e)]
-        if len(verified) < len(unread):
-            LOGGER.warning("Ignored %d unsigned operator entries for %s", len(unread) - len(verified), agent_uid)
-        return verified
+        return unread
 
 
-def unread_operator_entries(record: dict[str, Any], signer: Optional[Signer] = None) -> list[dict[str, Any]]:
+def unread_operator_entries(record: dict[str, Any]) -> list[dict[str, Any]]:
     """
     Operator entries newer than the record's ``operator_read`` mark.
 
@@ -578,8 +551,6 @@ def unread_operator_entries(record: dict[str, Any], signer: Optional[Signer] = N
     ----------
     record : dict
         Agent-log record.
-    signer : Signer, optional
-        If given, leave out entries whose signature does not verify.
 
     Returns
     -------
@@ -587,33 +558,4 @@ def unread_operator_entries(record: dict[str, Any], signer: Optional[Signer] = N
         Unseen ``operator`` and ``stop`` entries, oldest first.
     """
     seen = record.get("operator_read") or 0
-    uid = record.get("agent_uid") or ""
-    return [
-        e
-        for e in record.get("log") or []
-        if e.get("kind") in OPERATOR_KINDS
-        and (e.get("t") or 0) > seen
-        and verify_operator_entry(signer, uid, e)
-    ]
-
-
-def verified_stop(record: dict[str, Any], signer: Optional[Signer] = None) -> Optional[dict[str, Any]]:
-    """
-    The record's ``stop_requested``, if there is one and it verifies.
-
-    Parameters
-    ----------
-    record : dict
-        Agent-log record.
-    signer : Signer, optional
-        The user's signer; None accepts any stop request.
-
-    Returns
-    -------
-    dict or None
-        ``{"t", "text", "source"}`` or None.
-    """
-    stop = record.get("stop_requested")
-    if not stop or not verify_operator_entry(signer, record.get("agent_uid") or "", {**stop, "kind": "stop"}):
-        return None
-    return stop
+    return [e for e in record.get("log") or [] if e.get("kind") in OPERATOR_KINDS and (e.get("t") or 0) > seen]

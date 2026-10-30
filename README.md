@@ -223,34 +223,15 @@ from jsDelivr, falling back to plain text offline) and lists the shown
 sessions' figures in a side panel. Plain views use
 `nbs_agents.richtext.plain_text`, which turns figures into `[figure: alt]`.
 
-### Single-user access
-
-Only the Unix user who runs `nbs-agents-runner` can launch or steer that
-user's agents. Everything checks a per-user token in
-`~/.config/nbs-agents/token` (`$NBS_AGENTS_TOKEN_FILE`): mode 600 in a mode
-700 folder, made by the runner or `nbs-agents-web` if it is missing. A token
-file that is not yours or that others can read is refused.
-
-- `nbs-agents-web` prints a `http://localhost:8765/?token=...` link at start,
-  as Jupyter does. Opening it sets a cookie; otherwise the page asks for the
-  token. Scripts can send `Authorization: Bearer <token>`.
-- Launch requests (`claude_launch_parameters`, used by the web UI and the Qt
-  widgets) carry an HMAC made with the token. The runner launches Claude only
-  for a request that verifies, is under 7 days old, and has not launched a
-  session before. Anything else is logged in the session as `launch refused`.
-- Operator messages and stop requests written through `AgentLog` are signed
-  the same way. When the token is readable, agents (through nbs-cli) and the
-  assistant ignore operator entries that do not verify, and the web page tags
-  them "Unverified".
-- `claude-beamline --sandbox bwclaude` mounts the token file alone, read-only,
-  for the driver. It is never passed in `NBS_*` variables, because those end up
-  on the bwrap command line.
-
-To rotate the token, delete the file and restart the runner and web UI.
-Anyone who can reach the pods' Redis can still read the agent log or delete
-entries, and anyone who can reach the QueueServer can still queue plans:
-publish the pods' ports on 127.0.0.1 only and give Redis a password to close
-that.
+The page needs a login token, as Jupyter does, so another user on the machine
+cannot open it and act as you. The token lives in `~/.config/nbs-agents/token`
+(`$NBS_AGENTS_TOKEN_FILE`), mode 600 in a mode 700 folder, and is made on first
+start; a file that is not yours or that others can read is refused.
+`nbs-agents-web` prints a `http://localhost:8765/?token=...` link at start:
+opening it sets a cookie, otherwise the page asks for the token. Scripts can
+send `Authorization: Bearer <token>`. To change the token, delete the file and
+restart nbs-agents-web. Programs on the machine itself (the runner, nbs-cli,
+nbs-gui) do not use it.
 
 ## Manual Validation
 

@@ -264,11 +264,8 @@ class ClaudeLauncherTests(unittest.TestCase):
         launcher = ClaudeLauncher.from_config(CliConfig())
         self.assertTrue(launcher.resolve_command()[0].endswith("claude-beamline"))
         self.assertEqual(
-            claude_launch_parameters(" g ", "90m", sign=False),
-            {"goal": "g", "launch": True, "budget": {"time_s": 5400.0}},
+            claude_launch_parameters(" g ", "90m"), {"goal": "g", "launch": True, "budget": {"time_s": 5400.0}}
         )
-        signed = claude_launch_parameters(" g ", "90m")
-        self.assertEqual(set(signed["auth"]), {"t", "nonce", "sig"})
         self.assertRaises(ValueError, claude_launch_parameters, "  ")
         self.assertRaises(ValueError, claude_launch_parameters, "g", "later")
 
