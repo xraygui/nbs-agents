@@ -43,3 +43,28 @@ def test_works_with_a_server_that_refuses_hello():
     finally:
         server.terminate()
         server.wait()
+
+
+def test_encrypted_redis_uses_tls_and_the_password_file(tmp_path, monkeypatch):
+    from nbs_agents.config import AgentsConfig
+    from nbs_agents.redisclient import connect_settings, redis_password
+
+    secret = tmp_path / "redis.secret"
+    secret.write_text("pw-from-file\n")
+    monkeypatch.delenv("REDIS_PASSWORD", raising=False)
+    monkeypatch.delenv("REDIS_SECRET_FILE", raising=False)
+    config = AgentsConfig(redis_host="info.example", redis_port=6380, redis_ssl=True, redis_password_file=str(secret))
+    kw = connect_settings(config.redis_settings).connection_pool.connection_kwargs
+    assert kw["password"] == "pw-from-file" and kw["protocol"] == 2
+    assert connect_settings(config.redis_settings).connection_pool.connection_class.__name__ == "SSLConnection"
+    # The agent log shares these settings when it has no Redis of its own
+    assert config.agent_log_settings["ssl"] is True
+
+    monkeypatch.setenv("REDIS_SECRET_FILE", str(secret))
+    assert redis_password() == "pw-from-file"
+    monkeypatch.setenv("REDIS_PASSWORD", "pw-from-env")
+    assert redis_password(str(secret)) == "pw-from-env"
+
+    plain = connect_settings(AgentsConfig().redis_settings)
+    assert plain.connection_pool.connection_class.__name__ == "Connection"
+    assert "password" not in plain.connection_pool.connection_kwargs or not plain.connection_pool.connection_kwargs["password"]

@@ -19,6 +19,9 @@
 # redis_port = 6379
 # redis_db = 0
 # redis_prefix = ""
+# redis_ssl = false                     # true for NSLS-II's encrypted beamline Redis (TLS, usually
+#                                       # port 6380); password from $REDIS_PASSWORD, else this file:
+# redis_password_file = ""              # default $REDIS_SECRET_FILE or /etc/bluesky/redis.secret
 
 [agent_log]
 # The agent log's own Redis, started by nbs-agents-runner on 127.0.0.1.

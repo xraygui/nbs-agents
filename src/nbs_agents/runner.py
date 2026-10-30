@@ -113,9 +113,9 @@ def _start_heartbeat(agent_log: AgentLog, config: AgentsConfig, period_s: float 
 
 
 def _beamline_redis(config: AgentsConfig):
-    from .redisclient import connect
+    from .redisclient import connect_settings
 
-    return connect(config.redis_host, config.redis_port, config.redis_db, socket_timeout=5)
+    return connect_settings(config.redis_settings, socket_timeout=5)
 
 
 def main(argv=None) -> int:

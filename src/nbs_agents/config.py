@@ -126,6 +126,14 @@ class AgentsConfig:
     redis_host, redis_port, redis_db, redis_prefix
         Beamline Redis holding nbs-bl status dicts (and the agent log, unless
         ``[agent_log]`` gives it a Redis of its own).
+    redis_ssl : bool
+        Connect to the beamline Redis over TLS with a password, as NSLS-II's
+        encrypted beamline Redis needs (usually on port 6380). The password
+        comes from ``$REDIS_PASSWORD``, else ``redis_password_file``.
+    redis_password_file : str
+        File holding the beamline Redis password; empty for
+        ``$REDIS_SECRET_FILE`` or ``/etc/bluesky/redis.secret`` (as nslsii
+        does). Only read with ``redis_ssl``.
     agent_log : AgentLogConfig
         Where the agent log lives (``[agent_log]`` table).
     """
@@ -146,6 +154,8 @@ class AgentsConfig:
     redis_port: int = 6379
     redis_db: int = 0
     redis_prefix: str = ""
+    redis_ssl: bool = False
+    redis_password_file: str = ""
     agent_log: AgentLogConfig = field(default_factory=AgentLogConfig)
 
     @property
@@ -156,13 +166,16 @@ class AgentsConfig:
         Returns
         -------
         dict
-            ``host``, ``port``, ``db`` and ``prefix``.
+            ``host``, ``port``, ``db``, ``prefix``, ``ssl`` and
+            ``password_file`` (see ``nbs_agents.redisclient.connect_settings``).
         """
         return {
             "host": self.redis_host,
             "port": self.redis_port,
             "db": self.redis_db,
             "prefix": self.redis_prefix,
+            "ssl": self.redis_ssl,
+            "password_file": self.redis_password_file,
         }
 
     @property

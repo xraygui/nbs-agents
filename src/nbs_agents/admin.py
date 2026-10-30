@@ -155,12 +155,12 @@ def row(name: str, result: tuple[str, str]) -> Row:
 
 
 def _redis_ping(settings: dict) -> str:
-    from .redisclient import connect
+    from .redisclient import connect_settings
 
-    client = connect(settings["host"], settings["port"], settings.get("db", 0),
-                     socket_timeout=PROBE_TIMEOUT_S, socket_connect_timeout=PROBE_TIMEOUT_S)
+    client = connect_settings(settings, socket_timeout=PROBE_TIMEOUT_S, socket_connect_timeout=PROBE_TIMEOUT_S)
     client.ping()
-    return f"{settings['host']}:{settings['port']} db {settings.get('db', 0)}"
+    tls = ", TLS" if settings.get("ssl") else ""
+    return f"{settings['host']}:{settings['port']} db {settings.get('db', 0)}{tls}"
 
 
 def _queueserver(addr: str) -> str:

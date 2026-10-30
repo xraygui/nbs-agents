@@ -131,9 +131,9 @@ class AgentLog:
         AgentLog
             Agent log bound to a new Redis client.
         """
-        from .redisclient import connect
+        from .redisclient import connect_settings
 
-        client = connect(settings["host"], settings.get("port", 6379), settings.get("db", 0))
+        client = connect_settings(settings)
         return cls(client, settings.get("prefix", ""), topic)
 
     @property
