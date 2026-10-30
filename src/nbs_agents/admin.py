@@ -155,10 +155,10 @@ def row(name: str, result: tuple[str, str]) -> Row:
 
 
 def _redis_ping(settings: dict) -> str:
-    import redis
+    from .redisclient import connect
 
-    client = redis.Redis(host=settings["host"], port=int(settings["port"]), db=int(settings.get("db", 0)),
-                         socket_timeout=PROBE_TIMEOUT_S, socket_connect_timeout=PROBE_TIMEOUT_S)
+    client = connect(settings["host"], settings["port"], settings.get("db", 0),
+                     socket_timeout=PROBE_TIMEOUT_S, socket_connect_timeout=PROBE_TIMEOUT_S)
     client.ping()
     return f"{settings['host']}:{settings['port']} db {settings.get('db', 0)}"
 

@@ -90,8 +90,10 @@ def read_location(beamline_redis: Any, beamline_prefix: str) -> Optional[dict[st
 def _answers(host: str, port: int) -> bool:
     import redis
 
+    from .redisclient import connect
+
     try:
-        return bool(redis.Redis(host=host, port=port, socket_timeout=1, socket_connect_timeout=1).ping())
+        return bool(connect(host, port, socket_timeout=1, socket_connect_timeout=1).ping())
     except redis.RedisError:
         return False
 
