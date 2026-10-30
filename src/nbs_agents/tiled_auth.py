@@ -33,7 +33,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from .paths import paths
+from .paths import home, paths
 
 LOGGER = logging.getLogger(__name__)
 
@@ -51,7 +51,8 @@ class TiledLoginRequired(RuntimeError):
 
 def use_cache_dir() -> Path:
     """Keep Tiled's login cache under ``$NBS_AGENTS_HOME`` unless ``TILED_CACHE_DIR`` is set."""
-    folder = Path(os.environ.setdefault("TILED_CACHE_DIR", str(paths().tiled_cache)))
+    # Shared by every beamline, so it needs no beamline chosen
+    folder = Path(os.environ.setdefault("TILED_CACHE_DIR", str(home() / "tiled")))
     folder.mkdir(mode=0o700, parents=True, exist_ok=True)
     return folder
 

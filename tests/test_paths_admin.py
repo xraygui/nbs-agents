@@ -4,21 +4,57 @@ import stat
 
 from nbs_agents import admin
 from nbs_agents.config import AgentLogConfig, AgentsConfig
-from nbs_agents.paths import HOME_ENV, paths
+import pytest
+
+from nbs_agents.paths import BEAMLINE_ENV, HOME_ENV, BeamlineError, beamlines, paths, use_beamline
 
 
-def test_every_default_is_under_the_home(nbs_agents_home):
+def test_every_default_is_under_the_beamline_folder(nbs_agents_home, beamline_dir):
     p = paths()
-    assert p.home == nbs_agents_home
-    assert p.config_file == nbs_agents_home / "config" / "nbs-cli.toml"
-    assert AgentLogConfig().data_dir == str(nbs_agents_home / "state" / "agent-log")
-    assert p.tiled_agent_key == nbs_agents_home / "state" / "tiled-agent" / "api-key.json"
+    assert p.home == nbs_agents_home and p.beamline == "testbl" and p.root == beamline_dir
+    assert p.config_file == beamline_dir / "config" / "nbs-cli.toml"
+    assert AgentLogConfig().data_dir == str(beamline_dir / "state" / "agent-log")
+    assert p.tiled_agent_key == beamline_dir / "state" / "tiled-agent" / "api-key.json"
+    assert p.tiled_cache == nbs_agents_home / "tiled"  # one login for every beamline
 
 
 def test_home_defaults_to_dot_nbs_agents(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv(HOME_ENV)
     assert paths().home == tmp_path / ".nbs-agents"
+
+
+def test_beamline_choice(nbs_agents_home, monkeypatch):
+    monkeypatch.delenv(BEAMLINE_ENV)
+    with pytest.raises(BeamlineError, match="no beamline set up"):
+        paths()
+    with pytest.raises(BeamlineError, match="not set up"):
+        use_beamline("sst1")
+    use_beamline("sst1", must_exist=False)
+    admin.init(out=lambda line: None)
+    monkeypatch.delenv(BEAMLINE_ENV)
+    assert beamlines() == ["sst1"] and paths().beamline == "sst1"  # the only one
+    use_beamline("sst2", must_exist=False)
+    admin.init(out=lambda line: None)
+    monkeypatch.delenv(BEAMLINE_ENV)
+    with pytest.raises(BeamlineError, match="several beamlines.*sst1, sst2"):
+        paths()
+    assert paths("sst2").root == nbs_agents_home / "sst2"
+    assert use_beamline("sst1") == "sst1" and paths().beamline == "sst1"
+    with pytest.raises(BeamlineError, match="bad beamline name"):
+        paths("../etc")
+
+
+def test_main_takes_beamline(nbs_agents_home, monkeypatch, capsys):
+    monkeypatch.delenv(BEAMLINE_ENV)
+    assert admin.main(["check"]) == 2
+    assert "no beamline set up" in capsys.readouterr().err
+    assert admin.main(["init", "--beamline", "sst1"]) == 0
+    monkeypatch.delenv(BEAMLINE_ENV)
+    assert admin.main(["paths"]) == 0
+    assert "sst1" in capsys.readouterr().out
+    assert admin.main(["beamlines"]) == 0
+    assert "* sst1" in capsys.readouterr().out
 
 
 def test_init_makes_layout_and_keeps_existing_files(nbs_agents_home):
@@ -75,8 +111,8 @@ def test_check_reports_files_and_unreachable_services(nbs_agents_home, monkeypat
 def test_paths_command_lists_every_location(nbs_agents_home):
     lines = []
     assert admin.show_paths(out=lines.append) == 0
-    assert lines[0].split()[1] == str(nbs_agents_home)
-    assert len(lines) == 12
+    assert lines[0].split()[1] == "testbl" and lines[1].split()[1] == str(nbs_agents_home)
+    assert len(lines) == 14
 
 
 def test_init_writes_this_beamlines_tiled_catalog(nbs_agents_home):

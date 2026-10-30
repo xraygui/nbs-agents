@@ -1,10 +1,14 @@
 """
 ``nbs-agents``: set up and check an nbs-agents install.
 
-    nbs-agents paths                 where every file lives
-    nbs-agents init                  make $NBS_AGENTS_HOME and its starting files
+    nbs-agents init --beamline NAME  make $NBS_AGENTS_HOME/NAME and its starting files
     nbs-agents check                 check files, permissions, tools and services
+    nbs-agents paths                 where every file lives
+    nbs-agents beamlines             the beamlines set up
     nbs-agents tiled-login           log in to Tiled now (the runner also asks when needed)
+
+Each command takes ``--beamline NAME``; it may be left out when only one
+beamline is set up (or ``$NBS_BEAMLINE`` names one).
 
 See ``nbs_agents.paths`` for the layout. Packages built on nbs-agents (such as
 sst-assistant) run these first and add their own steps: ``init(...,
@@ -25,7 +29,7 @@ import urllib.request
 from pathlib import Path
 from typing import Callable, Optional
 
-from .paths import HOME_ENV, PRIVATE, paths
+from .paths import HOME_ENV, PRIVATE, BeamlineError, add_beamline_argument, beamlines, home, paths, use_beamline
 
 # Package data, so it is there however nbs-agents was installed
 CONFIG_TEMPLATE = Path(__file__).parent / "templates" / "nbs-cli.toml"
@@ -99,8 +103,8 @@ def init(
         Exit status.
     """
     p = paths()
-    p.home.mkdir(parents=True, exist_ok=True)
-    out(f"nbs-agents home: {p.home}")
+    p.root.mkdir(parents=True, exist_ok=True)
+    out(f"beamline {p.beamline}: {p.root}")
     for name, folder in p.folders.items():
         folder.mkdir(mode=0o700 if name in PRIVATE else 0o777, parents=True, exist_ok=True)
         if name in PRIVATE:
@@ -206,7 +210,7 @@ def check_rows(config=None) -> list[Row]:
     from .config import AgentsConfig
 
     p = paths()
-    rows: list[Row] = [(OK, "home", str(p.home))]
+    rows: list[Row] = [(OK, "beamline", f"{p.beamline} ({p.root})")]
     if not p.config_file.exists() and not os.environ.get("NBS_CLI_CONFIG"):
         rows.append((FAIL, "config", f"{p.config_file} missing; run `nbs-agents init`"))
     if config is None:
@@ -278,31 +282,73 @@ def tiled_login(out=print) -> int:
 def show_paths(out=print) -> int:
     """Print every file location of the current layout."""
     p = paths()
+    out(f"beamline         {p.beamline}")
     out(f"home             {p.home}")
-    for name in ("config_file", "gateway_env", "token", "agent_log_dir", "tiled_cache", "tiled_agent_key",
+    for name in ("root", "config_file", "gateway_env", "token", "agent_log_dir", "tiled_cache", "tiled_agent_key",
                  "attachments", "kb_agent", "sessions", "assistant", "logs"):
         out(f"{name:<16} {getattr(p, name)}")
     return 0
 
 
+def show_beamlines(out=print) -> int:
+    """Print the beamlines set up, marking the one used when none is named."""
+    found = beamlines()
+    if not found:
+        out(f"no beamline set up in {home()}; run `init --beamline NAME`")
+        return 1
+    try:
+        default = paths().beamline
+    except BeamlineError:
+        default = None
+    for name in found:
+        out(f"{'*' if name == default else ' '} {name}")
+    return 0
+
+
 def add_init_arguments(parser: argparse.ArgumentParser) -> None:
     """The ``init`` options, for packages that wrap it in their own command."""
+    add_beamline_argument(parser)
     parser.add_argument("--tiled-uri", help="this beamline's Tiled server, e.g. https://tiled.example.org")
     parser.add_argument("--tiled-path", help="run catalog inside Tiled, e.g. BEAMLINE/raw")
+
+
+def choose_beamline(args) -> Optional[int]:
+    """
+    Apply ``--beamline`` for a command; ``init`` may name a new one.
+
+    Returns
+    -------
+    int or None
+        An exit status to stop with (after printing why), or None to go on.
+    """
+    if args.command == "beamlines":
+        return None
+    try:
+        use_beamline(getattr(args, "beamline", None), must_exist=args.command != "init")
+    except BeamlineError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    return None
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="nbs-agents", description=__doc__.strip().splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("paths", help="print where every file lives")
-    add_init_arguments(sub.add_parser("init", help=f"make ${HOME_ENV} and its starting files"))
-    sub.add_parser("check", help="check files, permissions, tools and services")
-    sub.add_parser("tiled-login", help="log in to Tiled now")
+    add_init_arguments(sub.add_parser("init", help=f"make ${HOME_ENV}/BEAMLINE and its starting files"))
+    add_beamline_argument(sub.add_parser("check", help="check files, permissions, tools and services"))
+    add_beamline_argument(sub.add_parser("paths", help="print where every file lives"))
+    sub.add_parser("beamlines", help="list the beamlines set up")
+    add_beamline_argument(sub.add_parser("tiled-login", help="log in to Tiled now"))
     args = parser.parse_args(argv)
-    if args.command == "paths":
-        return show_paths()
+    stop = choose_beamline(args)
+    if stop is not None:
+        return stop
     if args.command == "init":
         return init(tiled_uri=args.tiled_uri, tiled_path=args.tiled_path)
+    if args.command == "paths":
+        return show_paths()
+    if args.command == "beamlines":
+        return show_beamlines()
     if args.command == "tiled-login":
         return tiled_login()
     return check()

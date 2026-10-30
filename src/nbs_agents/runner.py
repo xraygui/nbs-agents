@@ -118,20 +118,36 @@ def _beamline_redis(config: AgentsConfig):
     return redis.Redis(host=config.redis_host, port=config.redis_port, db=config.redis_db, socket_timeout=5)
 
 
-def main() -> None:
+def main(argv=None) -> int:
     """
     Start the persistent agent runner.
 
     Connection settings come from the same sources as nbs-cli
-    (``NBS_QS_ADDR``, ``NBS_ZMQ_ADDR``, ``NBS_REDIS_*`` or a TOML file). With
+    (``NBS_QS_ADDR``, ``NBS_ZMQ_ADDR``, ``NBS_REDIS_*`` or a TOML file) for
+    the beamline named by ``--beamline`` (see ``nbs_agents.paths``). With
     ``[agent_log] serve = true`` it also starts the agent log's own Redis.
     Plugins (``nbs_agents.runner`` entry points) add their observers.
     """
+    import argparse
+    import sys
+
+    from .paths import BeamlineError, add_beamline_argument, use_beamline
+
+    parser = argparse.ArgumentParser(prog="nbs-agents-runner", description="Run beamline agents.")
+    add_beamline_argument(parser)
+    args = parser.parse_args(argv)
+    try:
+        # Also sets $NBS_BEAMLINE, so the agents it launches use the same beamline
+        beamline = use_beamline(args.beamline)
+    except BeamlineError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     config = AgentsConfig.load()
+    LOGGER.info("Beamline %s", beamline)
     manager = REManagerAPI(zmq_control_addr=config.qs_addr)
     dispatcher = RemoteDispatcher(config.zmq_addr)
     catalog = ZMQCatalog(dispatcher)
@@ -175,7 +191,8 @@ def main() -> None:
         keeper.stop()
         if server is not None:
             server.stop()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
