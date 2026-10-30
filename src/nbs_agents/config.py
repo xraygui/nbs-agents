@@ -226,6 +226,8 @@ class AgentsConfig:
                 continue
             if name in LIST_SETTINGS:
                 values[name] = [p.strip() for p in env.split(",") if p.strip()]
+            elif spec.type in (bool, "bool"):
+                values[name] = env.strip().lower() in ("1", "true", "yes", "on")
             elif spec.type in (int, "int"):
                 values[name] = int(env)
             elif spec.type in (float, "float"):

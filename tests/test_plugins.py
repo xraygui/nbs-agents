@@ -111,3 +111,15 @@ def test_core_config_ignores_other_packages_settings(tmp_path):
     AgentsConfig.load(str(path))
     with pytest.raises(ValueError, match="Unknown nbs-cli settings"):
         PackageConfig.load(str(path))
+
+
+def test_bool_settings_from_the_environment(monkeypatch):
+    from dataclasses import dataclass
+
+    @dataclass
+    class PackageConfig(AgentsConfig):
+        enabled: bool = True
+
+    for text, value in (("false", False), ("0", False), ("yes", True), ("On", True)):
+        monkeypatch.setenv("NBS_ENABLED", text)
+        assert PackageConfig.load().enabled is value
