@@ -269,7 +269,9 @@ def test_new_agent_dialog_builds_launch_parameters():
     dialog.goal_edit.setPlainText("  Map the C K-edge\non samples 1-3 ")
     assert ok.isEnabled()
     assert dialog.start_queue()
-    assert dialog.parameters() == {"goal": "Map the C K-edge\non samples 1-3", "launch": True}
+    params = dialog.parameters()
+    assert set(params.pop("auth")) == {"t", "nonce", "sig"}
+    assert params == {"goal": "Map the C K-edge\non samples 1-3", "launch": True}
     dialog.budget_edit.setText("2h")
     assert dialog.parameters()["budget"] == {"time_s": 7200.0}
     dialog.budget_edit.setText("soon")

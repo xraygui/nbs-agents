@@ -16,6 +16,7 @@ from .constants import (
     CLOSE_AGENT_PLAN,
     OPEN_AGENT_PLAN,
 )
+from .auth import LaunchVerifier
 from .launcher import ClaudeLauncher, LaunchedAgent
 from .queue import ensure_queue_stop_before_close, update_close_agent_uid
 
@@ -45,6 +46,9 @@ class AgentSupervisor:
     observers : list, optional
         Passive agents, such as the beamline assistant, that see every
         finished run through ``on_run_stop`` but are never opened or queued.
+    launch_verifier : LaunchVerifier, optional
+        If given, Claude is launched only for requests it accepts (signed with
+        the user's nbs-agents token, recent, not used before).
     """
 
     def __init__(
@@ -55,12 +59,14 @@ class AgentSupervisor:
         agent_log: Optional[AgentLog] = None,
         launcher: Optional[ClaudeLauncher] = None,
         observers: Optional[list[Any]] = None,
+        launch_verifier: Optional[LaunchVerifier] = None,
     ) -> None:
         self.manager = manager
         self.catalog = catalog
         self.registry = registry or default_registry()
         self.agent_log = agent_log
         self.launcher = launcher
+        self.launch_verifier = launch_verifier
         if launcher is not None:
             launcher.on_exit = self._on_launched_exit
         self.active_agents: dict[str, Any] = {}
@@ -185,6 +191,11 @@ class AgentSupervisor:
         """
         if self.launcher is None:
             agent.log("error", "launch requested, but this runner has no claude_command configured")
+            return
+        refused = self.launch_verifier.check(agent.parameters or {}) if self.launch_verifier else None
+        if refused:
+            LOGGER.warning("Refused to launch Claude for %s: %s", agent.agent_uid, refused)
+            agent.log("error", f"launch refused: {refused}")
             return
         driver = f"runner-launch-{agent.agent_uid[:8]}"
         try:
