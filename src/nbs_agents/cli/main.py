@@ -166,7 +166,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("state", parents=[common], help="one JSON snapshot of the beamline")
     p.add_argument("--full", action="store_true", help="full queue, samples and agent log")
-    p.add_argument("--runs", type=int, default=5, help="number of recent runs")
+    p.add_argument("--runs", type=int, default=5, help="number of recent runs; 0 reads nothing from Tiled")
 
     p = sub.add_parser("beam", parents=[common], help="is beam expected at the endstation, and why not")
     p.add_argument("--map", action="store_true", help="include the beamline map with every node's status")

@@ -21,6 +21,10 @@ sandbox to reach the beamline; anything added keeps it inside, where every call
 fails to connect. A failed call prints `{"error": ...}` and exits non-zero; any
 other output is a result, even when it says there is nothing to report.
 
+For live values (ring current, ring mode, shutters, beam) use `beam`: it reads
+EPICS and the beam map, not Tiled. `run`, `runs` and `state` with recent runs read
+Tiled, which can be slow; `state --runs 0` skips it.
+
 `state` and `beam` also carry `status`: readings taken straight from EPICS, such
 as `ring_status`, the NSLS-II operating mode. Only Operations, Unscheduled Ops and
 Decay Mode Ops mean beam for users (Beamline Studies sometimes does); in Setup,

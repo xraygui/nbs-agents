@@ -637,7 +637,8 @@ class AssistantAgent(BaseAgent):
             return ["", f"## {title}", text]
 
         def state():
-            out = self.beamline.state(full=False, agent_uid=None)
+            # Nothing from Tiled, which can be slow: the record already has a line per run
+            out = self.beamline.state(full=False, agent_uid=None, n_runs=0)
             out["beam"] = out.get("beam") or self.beamline.beam()
             return out
 

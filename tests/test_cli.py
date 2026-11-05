@@ -256,6 +256,20 @@ class BeamlineVerbTests(unittest.TestCase):
         self.assertTrue(out["requeued_copy_removed"])
         self.assertEqual(bl.agent_log.get("u1")["log"][-1]["kind"], "abort")
 
+    def test_state_without_runs_reads_nothing_from_tiled(self):
+        bl, manager = self.make()
+        running = {"item_type": "plan", "name": "c_xas", "item_uid": "r1"}
+        manager.queue_get.return_value = {"success": True, "items": _queue("u1"), "running_item": running}
+        bl._tiled = MagicMock()
+        bl._tiled.values.side_effect = AssertionError("Tiled was read")
+        out = bl.state(n_runs=0)
+        self.assertNotIn("recent_runs", out)
+        self.assertNotIn("elapsed_s", out["running"])
+        self.assertNotIn("errors", out)
+        bl._tiled.values.side_effect = None
+        bl._tiled.values.return_value = []
+        self.assertIn("recent_runs", bl.state(n_runs=2))
+
     def test_add_passes_on_the_beamline_warning(self):
         bl, manager = self.make()
         bl._info = StaticInfo(warning="sample s2 is not in the beam")
