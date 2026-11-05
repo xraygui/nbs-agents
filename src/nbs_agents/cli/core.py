@@ -1056,7 +1056,8 @@ class Beamline:
         agent_uid : str, optional
             Session to describe; defaults to the newest open session.
         n_runs : int, optional
-            Number of recent runs.
+            Number of recent runs. 0 reads nothing from Tiled: no recent
+            runs, and no elapsed time for the running item.
 
         Returns
         -------
@@ -1081,16 +1082,17 @@ class Beamline:
 
         if running:
             run_view = compact_item(running, self.estimate(running, estimator))
-            try:
-                latest = self.tiled.values()[-1:-2:-1]
-                latest = next(iter(latest), None)
-                if latest is not None and not latest.metadata.get("stop"):
-                    started = latest.metadata["start"]["time"]
-                    run_view["elapsed_s"] = round(time.time() - started)
-                    if run_view.get("est_s") is not None:
-                        run_view["est_remaining_s"] = max(0, round(run_view["est_s"] - run_view["elapsed_s"]))
-            except Exception as exc:
-                errors["running"] = str(exc)
+            if n_runs > 0:
+                try:
+                    latest = self.tiled.values()[-1:-2:-1]
+                    latest = next(iter(latest), None)
+                    if latest is not None and not latest.metadata.get("stop"):
+                        started = latest.metadata["start"]["time"]
+                        run_view["elapsed_s"] = round(time.time() - started)
+                        if run_view.get("est_s") is not None:
+                            run_view["est_remaining_s"] = max(0, round(run_view["est_s"] - run_view["elapsed_s"]))
+                except Exception as exc:
+                    errors["running"] = str(exc)
             out["running"] = run_view
         else:
             out["running"] = None
@@ -1135,10 +1137,11 @@ class Beamline:
             out["plans"] = self.plans_overview()
         except Exception as exc:
             errors["plans"] = str(exc)
-        try:
-            out["recent_runs"] = self.recent_runs(n_runs, agent_uid=None)
-        except Exception as exc:
-            errors["recent_runs"] = str(exc)
+        if n_runs > 0:
+            try:
+                out["recent_runs"] = self.recent_runs(n_runs, agent_uid=None)
+            except Exception as exc:
+                errors["recent_runs"] = str(exc)
         if errors:
             out["errors"] = errors
         return out

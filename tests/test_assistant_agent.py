@@ -211,7 +211,7 @@ class AssistantAgentTests(unittest.TestCase):
         self.assertIn('"Maintenance"', prompt)
         self.assertIn("Cu L edge for Smith", prompt)
         self.assertIn('"run_uid":"bad"', prompt)
-        self.beamline.state.assert_called_with(full=False, agent_uid=None)
+        self.beamline.state.assert_called_with(full=False, agent_uid=None, n_runs=0)
 
     def test_snapshot_parts_are_cut_and_failures_noted(self):
         agent = self.make(snapshot_chars=50)
