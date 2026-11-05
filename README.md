@@ -9,8 +9,8 @@ nbs-agents is the base that agent packages build on:
 - **`nbs-agents-runner`**: watches the Bluesky document stream, opens and
   closes agents as their blocks run, and records each agent's session in the
   agent log.
-- **Agent log**: one JSON record per session in Redis, either the beamline
-  Redis or a Redis of its own that the runner starts (`[agent_log]`).
+- **Agent log**: one JSON record per session in a Redis of its own, which the
+  runner starts (`[agent_log]`).
 - **Tiled login**: logs in to Tiled (Entra ID at NSLS-II) when needed, and keeps
   agents a read-only, expiring API key.
 - **nbs-gui widgets**: the Agents Log tab and the agent block plan widget.
@@ -83,18 +83,21 @@ overridden by `NBS_<NAME>` environment variables; see
 
 Each session is a JSON record under `{prefix}AGENT{agent_uid}`: `goal`,
 `status`, `budget`, `opened`, and an append-only `log` of
-`{t, kind, text, ...refs}` (see `nbs_agents.agentlog`). With
+`{t, kind, text, ...refs}` (see `nbs_agents.agentlog`). By default the runner
+starts `redis-server` on 127.0.0.1:60740 (from the pixi environment) and keeps a
+snapshot in the beamline's `state/agent-log`; no `[agent_log]` table is needed.
+For another port, or a Redis that runs elsewhere:
 
 ```toml
 [agent_log]
-port = 60740
-serve = true
+host = "agents.example"    # default 127.0.0.1
+port = 60741               # default 60740
+serve = false              # default true: the runner starts it
 ```
 
-the runner starts `redis-server` on 127.0.0.1:60740 (from the pixi
-environment), keeps a snapshot in the beamline's `state/agent-log`, and publishes the address
-in the beamline Redis so nbs-gui finds it without this config. Without
-`port`, the agent log shares the beamline Redis.
+nbs-agents never reads or writes a beamline Redis. A beamline package whose
+nbs-gui finds the agent log there (sst-assistant) publishes its address from a
+runner plugin (`nbs_agents.agentlog_store.publish_location`).
 
 ### Tiled login
 
@@ -135,8 +138,20 @@ groups:
 | `nbs_agents.sample_layout` | `layout(samples)` for `nbs-cli samples --layout` |
 | `nbs_agents.skill_addenda` | a folder of `<skill-name>.md` files appended to the bundled skills |
 
-sst-assistant uses all four, and wraps `nbs_agents.assistant.admin.main` as
-`sst-assistant` with its own config presets.
+| `nbs_agents.beamline_info` | a `BeamlineInfo` provider: the beam map, device descriptions, samples, plan time estimates, XAS plans and `add` warnings |
+| `nbs_agents.settings` | extra `[nbs_cli]` settings and their defaults, in `config.extra` |
+| `nbs_agents.sandbox_paths` | files the package's nbs-cli needs inside bwclaude, such as a password file |
+
+sst-assistant uses them all (its provider reads nbs-bl's status dicts from the
+beamline Redis, whose `redis_*` settings it adds), and wraps
+`nbs_agents.assistant.admin.main` as `sst-assistant` with its own config presets.
+
+nbs-agents itself knows only the QueueServer, the document stream, Tiled, its
+own agent-log Redis and, with `beam_map_file`, a few EPICS status PVs. `nbs-cli
+state` lists what the beamline's provider adds under `capabilities`: `beam_map`
+(`beam`, `diagnose`, device nodes), `devices` (`device`), `samples`, `estimates`,
+`xas_plans`, and `status_pvs`. Verbs that need a missing one say it is not
+available at this beamline.
 
 #### Running it
 
@@ -166,8 +181,8 @@ prints one JSON document; errors print `{"error": ...}` and exit 1.
 
 | Command | What it does |
 |---|---|
-| `nbs-cli state [--full]` | Manager state, beam at the endstation, running item, the session's block and budget, other queue counts, samples, plans, recent run summaries |
-| `nbs-cli beam [--map]` | Whether beam is expected at the endstation and why not, from nbs-bl's `BEAM_MAP`; `--map` adds every node's upstream, children and status |
+| `nbs-cli state [--full]` | Manager state, beam at the endstation, running item, the session's block and budget, other queue counts, samples, plans, recent run summaries, and `capabilities` (below) |
+| `nbs-cli beam [--map]` | Whether beam is expected at the endstation and why not, from the beamline's beam map; `--map` adds every node's upstream, children and status |
 | `nbs-cli plans [name]` | Allowed plans and XAS edges, or one plan's parameters, docstring and time-estimate rule |
 | `nbs-cli run [ref] [--data] [--plot f.png]` | One run (uid, uid prefix, scan id, or `-1`) with a reducer summary |
 | `nbs-cli runs [-n 10] [--mine]` | Recent run summaries |
@@ -336,10 +351,6 @@ qs_addr = "tcp://localhost:60615"
 zmq_addr = "localhost:5578"
 tiled_uri = "http://localhost:8000"
 tiled_api_key = "secret"
-redis_host = "localhost"   # Redis with the nbs-bl status dicts (settings.redis.info)
-redis_port = 60737
-redis_db = 4
-redis_prefix = "claude-"
 qs_user_group = "primary"
 signal = "sc"              # summary signal and normalization keys (no default)
 norm = "i0"

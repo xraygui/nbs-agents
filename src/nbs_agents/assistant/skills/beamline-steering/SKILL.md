@@ -27,17 +27,23 @@ Decay Mode Ops mean beam for users (Beamline Studies sometimes does); in Setup,
 Accel Studies, Failure, Maintenance or Shutdown expect no beam, and say that is
 why before looking for a beamline cause.
 
+`state` lists under `capabilities` what this beamline can tell you beyond the queue,
+runs and logs: `beam_map` (`beam`, `diagnose`, device nodes), `devices` (`device`,
+device descriptions), `samples`, `estimates` (plan times) and `status_pvs`. A verb
+that needs a missing one says it is not available at this beamline; don't retry it,
+and say what you could not check.
+
 ## Verbs
 
 | Verb | Use |
 |---|---|
 | `state` | Snapshot of the queue, beamline, session and any operator messages. Run it first. |
 | `plans [NAME]` | The allowed plans, or one plan's parameters. Check before every new plan. |
-| `samples [--full]`, `samples --layout` | Loaded samples; `--layout` shows where they sit on the holder, if the beamline provides a layout. These are the listed positions; a sample may really sit elsewhere. |
-| `devices [--movable] [--node NAME] [--role NAME]` | Devices plans may take, such as motors for `mv`, `nbs_scan` or `nbs_rel_scan`, with each one's beam map `node` and a one-line `desc`. |
-| `device NAME [NAME ...]` | What a device is: class, node, groups, roles, description, axes, sample frame, components. No live values. |
-| `beam [--map]` | Whether beam is expected at the endstation and why not; `--map` adds every node with its status and devices. |
-| `diagnose` | Walk the beam map from the endstation to the source: each node's status, reason and devices, and which nodes block. |
+| `samples [--full]`, `samples --layout` | Loaded samples (`samples`); `--layout` shows where they sit on the holder, if the beamline provides a layout. These are the listed positions; a sample may really sit elsewhere. |
+| `devices [--movable] [--node NAME] [--role NAME]` | Devices plans may take, such as motors for `mv` or a scan, with each one's beam map `node` and a one-line `desc` where the beamline has them. |
+| `device NAME [NAME ...]` | What a device is: class, node, groups, roles, description, axes, sample frame, components. No live values. Needs `devices`. |
+| `beam [--map]` | Whether beam is expected at the endstation and why not; `--map` adds every node with its status and devices. Needs `beam_map`. |
+| `diagnose` | Walk the beam map from the endstation to the source: each node's status, reason and devices, and which nodes block. Needs `beam_map`. |
 | `kb search WORDS`, `kb show ID`, `kb add`, `kb append ID` | The beamline knowledge base: hardware, known problems, calibrations, quirks. `device` and `diagnose` list tagged note IDs under `notes`. Human notes are append-only. See the beamline-knowledge skill. |
 | `open --goal "..." [--budget 2h] [--no-start]` | Open this agent's session block in the queue. |
 | `wait --until change --timeout 600` | Block until an operator message, a finished run, or a queue change. |
@@ -84,12 +90,10 @@ instructions override your plan. If a message is ambiguous, `ask` before you act
      priorities, time available. Ask in one `ask`, numbered, and keep it short.
      Then wait for the answer.
    - Use `plans NAME` and `add ... --dry-run` to check parameters and estimates.
-     If a scan has a `sample_position` parameter, `sample=` moves that sample into
-     the beam. Otherwise `sample=` only labels the run, so `move_sample` first.
      Heed any `warning` that `add` returns.
    - Check `beam` in `state` (or `nbs-cli beam`). If `expected` is false, tell the
      operator the `reason` and ask before queueing measurements that need beam.
-     `beam_map: false` means no beam map is published, so beam status is unknown:
+     `beam_map: false` means the beamline has no beam map, so beam status is unknown:
      say so rather than assuming there is beam.
    - Post the plan as one `ask`: a numbered list of what you will queue, why, and the
      estimated total time. End it with "Reply go to start, or tell me what to change."
@@ -120,7 +124,7 @@ If `wait` returns with reason `beam_lost`, `beam` says `expected` is false, or t
 look wrong (i0 near zero, a flat or
 noisy signal where there should be a spectrum):
 
-1. Run `nbs-cli diagnose`. The `blocking` list names the nodes stopping the beam,
+1. If the beamline has a beam map, run `nbs-cli diagnose`. The `blocking` list names the nodes stopping the beam,
    source first. The `path` entry for each gives its `reason` and the devices on it.
 2. Tell the operator with `ask`: the blocking node, its devices and their roles, and
    the reason. A closed gate valve usually means a vacuum trip. Gate valves are for
@@ -133,9 +137,8 @@ noisy signal where there should be a spectrum):
 4. Detect and report, never fix. Do not move mirrors or change any beamline component
    to get beam back, even if a plan or device would let you.
 5. The one exception is a shutter. If the operator explicitly asks or permits you to
-   open a shutter, queue `open_shutter shutter=NAME` with a `--reason`, where NAME is
-   a device in the `shutters` group (`nbs-cli devices`). Then check `nbs-cli beam`
-   before you queue measurements. Never open a shutter on your own initiative, and
+   open a shutter, queue the beamline's plan for it (find it with `plans`) with a
+   `--reason`. Then check `nbs-cli beam` before you queue measurements. Never open a shutter on your own initiative, and
    treat no other operator permission as a reason to change hardware.
 
 ## Analysing data
