@@ -36,15 +36,6 @@ set -euo pipefail
 
 here="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
-if [[ -z "${NBS_ENV_DIR:-}" ]]; then
-    nbs_cli="$(command -v nbs-cli || true)"
-    [[ -n "$nbs_cli" ]] || { echo "nbs-cli not found; set NBS_ENV_DIR to its python environment" >&2; exit 1; }
-    NBS_ENV_DIR="$(dirname "$(dirname "$nbs_cli")")"
-fi
-export NBS_ENV_DIR
-python="$NBS_ENV_DIR/bin/python"
-[[ -x "$python" ]] || { echo "no python at $python; check NBS_ENV_DIR" >&2; exit 1; }
-
 headless=0
 role=driver
 sandbox="${NBS_CLAUDE_SANDBOX:-}"
@@ -63,6 +54,16 @@ while [[ $# -gt 0 ]]; do
         *) break ;;
     esac
 done
+
+# After the options: inside bwclaude, NBS_ENV_DIR comes back through --env
+if [[ -z "${NBS_ENV_DIR:-}" ]]; then
+    nbs_cli="$(command -v nbs-cli || true)"
+    [[ -n "$nbs_cli" ]] || { echo "nbs-cli not found; set NBS_ENV_DIR to its python environment" >&2; exit 1; }
+    NBS_ENV_DIR="$(dirname "$(dirname "$nbs_cli")")"
+fi
+export NBS_ENV_DIR
+python="$NBS_ENV_DIR/bin/python"
+[[ -x "$python" ]] || { echo "no python at $python; check NBS_ENV_DIR" >&2; exit 1; }
 if [[ -z "$sandbox" ]]; then
     sandbox="$("$python" -c 'from nbs_agents.cli.config import CliConfig
 print(CliConfig.load().claude_sandbox)')"
