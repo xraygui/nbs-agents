@@ -174,6 +174,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("plans", parents=[common], help="allowed plans, or one plan's parameters")
     p.add_argument("name", nargs="?")
 
+    p = sub.add_parser("metadata", parents=[common], help="the metadata the next run will carry (read only)")
+    p.add_argument("keys", nargs="*", help="only these keys")
+
     p = sub.add_parser("samples", parents=[common], help="loaded samples, or where they sit on the holder")
     p.add_argument("--full", action="store_true", help="every field, including position")
     p.add_argument("--layout", action="store_true", help="where samples sit on the holder, as the beamline package lays them out")
@@ -471,6 +474,8 @@ def run_command(bl: Beamline, args: argparse.Namespace) -> Any:
         return out
     if cmd == "plans":
         return bl.plan_info(args.name) if args.name else bl.plans_overview()
+    if cmd == "metadata":
+        return bl.metadata(args.keys or None)
     if cmd == "samples":
         return bl.sample_layout() if args.layout else bl.samples(full=args.full)
     if cmd == "devices":

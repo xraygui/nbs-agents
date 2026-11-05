@@ -4,6 +4,7 @@ run summaries, a blocking wait, and verbs that only touch the caller's own
 ``open_agent`` / ``queue_stop`` / ``close_agent`` block.
 """
 
+import json
 import logging
 import os
 import pickle
@@ -30,7 +31,7 @@ from nbs_agents.constants import (
     OPEN_AGENT_PLAN,
     QUEUE_STOP_INSTRUCTION,
 )
-from ..beamline_info import DEVICES, SAMPLES, BeamlineInfo, load_beamline_info
+from ..beamline_info import DEVICES, METADATA, SAMPLES, BeamlineInfo, load_beamline_info
 from .config import CliConfig
 from .summaries import SummaryContext, summarize
 
@@ -40,6 +41,8 @@ AGENT_REASON_KEY = "agent_reason"
 ACTIVE_STATUSES = ("opening", "active")
 SENTINEL_PLANS = (OPEN_AGENT_PLAN, CLOSE_AGENT_PLAN)
 SAMPLE_LAYOUT_ENTRY_POINT = "nbs_agents.sample_layout"
+# Longest metadata value (as JSON) that state shows in full
+METADATA_VALUE_CHARS = 300
 
 
 class CliError(RuntimeError):
@@ -313,6 +316,36 @@ class Beamline:
         if samples is None:
             raise CliError("samples are not available at this beamline")
         return samples
+
+    def metadata(self, keys: Optional[list[str]] = None) -> dict[str, Any]:
+        """
+        The metadata the beamline will stamp on its next run (read only).
+
+        Parameters
+        ----------
+        keys : list of str, optional
+            Only these keys.
+
+        Returns
+        -------
+        dict
+            Key to value.
+        """
+        md = self.info.metadata(keys)
+        if md is None:
+            raise CliError("run metadata is not available at this beamline")
+        return md
+
+    def metadata_summary(self, limit: int = METADATA_VALUE_CHARS) -> dict[str, Any]:
+        """
+        ``metadata`` for ``state``: each value cut to ``limit`` characters of
+        JSON, with a note to fetch it whole.
+        """
+        out = {}
+        for key, value in sorted(self.metadata().items()):
+            text = json.dumps(value, default=str)
+            out[key] = value if len(text) <= limit else f"({len(text)} chars; nbs-cli metadata {key})"
+        return out
 
     def sample_layout(self) -> dict[str, Any]:
         """
@@ -1128,6 +1161,11 @@ class Beamline:
                 out["status"] = status
         except Exception as exc:
             errors["status"] = str(exc)
+        if METADATA in self.info.capabilities:
+            try:
+                out["metadata"] = self.metadata_summary()
+            except Exception as exc:
+                errors["metadata"] = str(exc)
         if SAMPLES in self.info.capabilities:
             try:
                 out["samples"] = self.samples(full=full)

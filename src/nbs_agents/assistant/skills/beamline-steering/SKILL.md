@@ -33,7 +33,8 @@ why before looking for a beamline cause.
 
 `state` lists under `capabilities` what this beamline can tell you beyond the queue,
 runs and logs: `beam_map` (`beam`, `diagnose`, device nodes), `devices` (`device`,
-device descriptions), `samples`, `estimates` (plan times) and `status_pvs`. A verb
+device descriptions), `samples`, `metadata` (what the next run will carry),
+`estimates` (plan times) and `status_pvs`. A verb
 that needs a missing one says it is not available at this beamline; don't retry it,
 and say what you could not check.
 
@@ -45,6 +46,7 @@ and say what you could not check.
 | `plans [NAME]` | The allowed plans, or one plan's parameters. Check before every new plan. |
 | `samples [--full]`, `samples --layout` | Loaded samples (`samples`); `--layout` shows where they sit on the holder, if the beamline provides a layout. These are the listed positions; a sample may really sit elsewhere. |
 | `devices [--movable] [--node NAME] [--role NAME]` | Devices plans may take, such as motors for `mv` or a scan, with each one's beam map `node` and a one-line `desc` where the beamline has them. |
+| `metadata [KEY ...]` | The metadata the next run will carry, such as proposal and users. Needs `metadata`. |
 | `device NAME [NAME ...]` | What a device is: class, node, groups, roles, description, axes, sample frame, components. No live values. Needs `devices`. |
 | `beam [--map]` | Whether beam is expected at the endstation and why not; `--map` adds every node with its status and devices. Needs `beam_map`. |
 | `diagnose` | Walk the beam map from the endstation to the source: each node's status, reason and devices, and which nodes block. Needs `beam_map`. |

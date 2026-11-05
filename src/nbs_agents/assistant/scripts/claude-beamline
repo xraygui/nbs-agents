@@ -147,7 +147,7 @@ print(os.path.expanduser(CliConfig.load().beam_map_file) or "-")')"
         while IFS=$'\t' read -r path var; do
             [[ -n "$path" ]] || continue
             [[ -r "$path" ]] || { echo "$path is not readable (needed inside bwclaude for $var)" >&2; exit 1; }
-            mounts+=(--ro-path "$path")
+            [[ " ${mounts[*]} " == *" $path "* ]] || mounts+=(--ro-path "$path")
             export "$var=$path"
         done < <("$python" -m nbs_agents.assistant.resources sandbox-paths)
         # Mount the key's folder, not the file, so the runner's replacements show through
@@ -218,7 +218,7 @@ case "$role" in
         export PATH="$here:$PATH"
         tools=("Read" "Skill" "Glob" "Grep" "Edit(./notebook/**)"
                "Bash(sandbox-python:*)" "Bash(nbs-cli post:*)")
-        for verb in state beam plans samples devices device diagnose run runs log attach kb; do
+        for verb in state beam plans samples metadata devices device diagnose run runs log attach kb; do
             tools+=("Bash(nbs-cli $verb:*)")
         done
         ;;

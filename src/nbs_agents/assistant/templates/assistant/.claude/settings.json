@@ -13,6 +13,7 @@
       "Bash(nbs-cli devices:*)",
       "Bash(nbs-cli device:*)",
       "Bash(nbs-cli diagnose:*)",
+      "Bash(nbs-cli metadata:*)",
       "Bash(nbs-cli run:*)",
       "Bash(nbs-cli runs:*)",
       "Bash(nbs-cli log:*)",

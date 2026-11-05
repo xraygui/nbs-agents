@@ -270,6 +270,22 @@ class BeamlineVerbTests(unittest.TestCase):
         bl._tiled.values.return_value = []
         self.assertIn("recent_runs", bl.state(n_runs=2))
 
+    def test_metadata_verb_and_state_summary(self):
+        bl, manager = self.make()
+        md = {"proposal": {"proposal_id": "317000"}, "users": ["A. Scientist"], "notes": "x" * 1000}
+        bl._info = StaticInfo(metadata=md)
+        self.assertEqual(run_command(bl, build_parser().parse_args(["metadata", "users"])), {"users": ["A. Scientist"]})
+        self.assertEqual(run_command(bl, build_parser().parse_args(["metadata"]))["notes"], "x" * 1000)
+        bl._tiled = MagicMock()
+        out = bl.state(n_runs=0)
+        self.assertIn("metadata", out["capabilities"])
+        self.assertEqual(out["metadata"]["proposal"], {"proposal_id": "317000"})
+        self.assertEqual(out["metadata"]["notes"], "(1002 chars; nbs-cli metadata notes)")
+        bl._info = StaticInfo()
+        self.assertNotIn("metadata", bl.state(n_runs=0))
+        with self.assertRaisesRegex(CliError, "not available at this beamline"):
+            run_command(bl, build_parser().parse_args(["metadata"]))
+
     def test_add_passes_on_the_beamline_warning(self):
         bl, manager = self.make()
         bl._info = StaticInfo(warning="sample s2 is not in the beam")
