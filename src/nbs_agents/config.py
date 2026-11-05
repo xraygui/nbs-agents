@@ -1,6 +1,6 @@
 """
 Settings every nbs-agents program shares: where the QueueServer, the
-document stream, Redis, the agent log and Tiled are.
+document stream, the agent log and Tiled are.
 
 They come from, in increasing priority: built-in defaults, a TOML file
 (``$NBS_CLI_CONFIG`` or ``config/nbs-cli.toml`` under ``$NBS_AGENTS_HOME``;
@@ -13,6 +13,9 @@ A beamline package can change the built-in defaults through the
 ``nbs_agents.config_defaults`` entry point group: each entry is a dict of
 tables, such as ``{"nbs_cli": {"signal": "sc"}, "assistant": {...}}``,
 applied under the file and the environment (see ``plugin_defaults``).
+It can also add settings of its own to ``[nbs_cli]`` through the
+``nbs_agents.settings`` group: each entry is a dict of setting names and
+defaults (see ``plugin_settings``); their values land in ``AgentsConfig.extra``.
 """
 
 import copy
@@ -33,7 +36,28 @@ AGENT_LOG_TABLE = "agent_log"
 # Tables other than [nbs_cli] that packages read on their own
 OTHER_TABLES = {AGENT_LOG_TABLE, "assistant"}
 LIST_SETTINGS = ("allowed_plans", "baseline_keys")
+DEFAULT_AGENT_LOG_PORT = 60740
+NO_AGENT_LOG = "the agent log needs a Redis of its own: [agent_log] port must be set"
 CONFIG_DEFAULTS_ENTRY_POINT = "nbs_agents.config_defaults"
+SETTINGS_ENTRY_POINT = "nbs_agents.settings"
+
+
+def plugin_settings() -> dict[str, Any]:
+    """
+    ``[nbs_cli]`` settings that installed beamline packages add, with their defaults.
+
+    Returns
+    -------
+    dict
+        Name to default from every ``nbs_agents.settings`` entry point, in
+        name order (a later one wins on a clash).
+    """
+    from importlib.metadata import entry_points
+
+    out: dict[str, Any] = {}
+    for entry in sorted(entry_points(group=SETTINGS_ENTRY_POINT), key=lambda e: e.name):
+        out.update(entry.load() or {})
+    return copy.deepcopy(out)
 
 
 def plugin_defaults(table: str) -> dict[str, Any]:
@@ -64,27 +88,24 @@ class AgentLogConfig:
     """
     Where the agent log lives, from the ``[agent_log]`` table.
 
-    By default the agent log shares the beamline Redis. Give it a ``port`` to
-    use a Redis of its own, which nbs-agents-runner starts if ``serve`` is true
-    (or which runs elsewhere, such as beside an agent container). The runner
-    then publishes the address in the beamline Redis, so nbs-gui finds it
-    without an nbs-cli config.
+    The agent log lives in a Redis of its own. By default nbs-agents-runner
+    serves it on 127.0.0.1:60740, so no ``[agent_log]`` table is needed; give
+    another ``port``, a ``host`` elsewhere (such as beside an agent container)
+    or ``serve = false`` for one that runs on its own.
 
     Attributes
     ----------
     host : str
-        Redis host; empty for ``localhost`` with a ``port``, or the beamline
-        Redis without one.
-    port : int or None
-        Redis port; None to share the beamline Redis.
+        Redis host; empty for ``localhost``.
+    port : int
+        Redis port.
     db : int
         Redis database.
     prefix : str or None
-        Key prefix; None for ``""`` on a Redis of its own, or the beamline
-        prefix when shared.
+        Key prefix; None for ``""``.
     serve : bool
         Whether nbs-agents-runner starts ``redis-server`` on ``port`` (on
-        127.0.0.1) unless one already answers there.
+        127.0.0.1) unless one already answers there. Default true.
     data_dir : str
         Folder for the served Redis's snapshot, ``agent-log.rdb``, by default
         ``state/agent-log`` under ``$NBS_AGENTS_HOME``. It keeps the log across
@@ -94,10 +115,10 @@ class AgentLogConfig:
     """
 
     host: str = ""
-    port: Optional[int] = None
+    port: Optional[int] = DEFAULT_AGENT_LOG_PORT
     db: int = 0
     prefix: Optional[str] = None
-    serve: bool = False
+    serve: bool = True
     data_dir: str = field(default_factory=lambda: str(paths().agent_log_dir))
     redis_server: str = "redis-server"
 
@@ -153,19 +174,10 @@ class AgentsConfig:
         Life of each agent key; the runner replaces it after two thirds of that.
     tiled_path : str
         Path of the run catalog inside Tiled; empty for the root.
-    redis_host, redis_port, redis_db, redis_prefix
-        Beamline Redis holding nbs-bl status dicts (and the agent log, unless
-        ``[agent_log]`` gives it a Redis of its own).
-    redis_ssl : bool
-        Connect to the beamline Redis over TLS with a password, as NSLS-II's
-        encrypted beamline Redis needs (usually on port 6380). The password
-        comes from ``$REDIS_PASSWORD``, else ``redis_password_file``.
-    redis_password_file : str
-        File holding the beamline Redis password; empty for
-        ``$REDIS_SECRET_FILE`` or ``/etc/bluesky/redis.secret`` (as nslsii
-        does). Only read with ``redis_ssl``.
     agent_log : AgentLogConfig
         Where the agent log lives (``[agent_log]`` table).
+    extra : dict
+        Settings beamline packages add (``nbs_agents.settings``), by name.
     """
 
     # Subclasses that own the whole [nbs_cli] table refuse settings they don't know
@@ -180,50 +192,28 @@ class AgentsConfig:
     tiled_api_key_file: str = ""
     tiled_key_lifetime_s: float = 24 * 3600.0
     tiled_path: str = ""
-    redis_host: str = "localhost"
-    redis_port: int = 6379
-    redis_db: int = 0
-    redis_prefix: str = ""
-    redis_ssl: bool = False
-    redis_password_file: str = ""
     agent_log: AgentLogConfig = field(default_factory=AgentLogConfig)
-
-    @property
-    def redis_settings(self) -> dict[str, Any]:
-        """
-        Redis settings in the nbs ``settings.redis`` shape.
-
-        Returns
-        -------
-        dict
-            ``host``, ``port``, ``db``, ``prefix``, ``ssl`` and
-            ``password_file`` (see ``nbs_agents.redisclient.connect_settings``).
-        """
-        return {
-            "host": self.redis_host,
-            "port": self.redis_port,
-            "db": self.redis_db,
-            "prefix": self.redis_prefix,
-            "ssl": self.redis_ssl,
-            "password_file": self.redis_password_file,
-        }
+    extra: dict[str, Any] = field(default_factory=dict)
 
     @property
     def agent_log_settings(self) -> dict[str, Any]:
         """
-        Redis settings for the agent log, in the same shape as ``redis_settings``.
+        Redis settings for the agent log.
 
         Returns
         -------
         dict
-            The ``[agent_log]`` Redis if it has a port, else the beamline Redis.
+            ``host``, ``port``, ``db`` and ``prefix`` (see
+            ``nbs_agents.redisclient.connect_settings``).
+
+        Raises
+        ------
+        ValueError
+            If ``[agent_log]`` has no ``port``.
         """
         log = self.agent_log
         if not log.dedicated:
-            out = self.redis_settings
-            if log.prefix is not None:
-                out["prefix"] = log.prefix
-            return out
+            raise ValueError(NO_AGENT_LOG)
         return {"host": log.host or "localhost", "port": log.port, "db": log.db, "prefix": log.prefix or ""}
 
     @classmethod
@@ -248,33 +238,39 @@ class AgentsConfig:
         """
         data = read_config_file(path)
         table = {k: v for k, v in data.get(MAIN_TABLE, data).items() if k not in OTHER_TABLES}
-        known = {f.name: f for f in fields(cls)}
-        values = cls._from_env(known)
-        values = {**table, **values}
+        known = {f.name: f.type for f in fields(cls) if f.name not in (AGENT_LOG_TABLE, "extra")}
+        added = plugin_settings()
+        types = {**known, **{name: type(default) for name, default in added.items()}}
+        values = {**table, **cls._from_env(types)}
         if values.get("tiled_api_key") is None:
             values["tiled_api_key"] = os.environ.get("TILED_API_KEY")
-        unknown = set(values) - set(known)
+        unknown = set(values) - set(types)
         if unknown and cls.strict:
-            raise ValueError(f"Unknown nbs-cli settings: {sorted(unknown)}")
+            message = f"Unknown nbs-cli settings: {sorted(unknown)}"
+            if any(name.startswith("redis_") for name in unknown):
+                message += (" (the beamline Redis settings belong to a beamline package such as "
+                            "sst-assistant: install it, or remove them)")
+            raise ValueError(message)
         values = {**plugin_defaults(MAIN_TABLE), **values}
+        extra = {name: values.get(name, default) for name, default in added.items()}
         values = {k: v for k, v in values.items() if k in known}
         values["agent_log"] = AgentLogConfig.from_table(data.get(AGENT_LOG_TABLE))
-        return cls(**values)
+        return cls(**values, extra=extra)
 
     @staticmethod
-    def _from_env(known: dict[str, Any]) -> dict[str, Any]:
+    def _from_env(types: dict[str, Any]) -> dict[str, Any]:
         values: dict[str, Any] = {}
-        for name, spec in known.items():
+        for name, spec in types.items():
             env = os.environ.get(f"NBS_{name.upper()}")
-            if env is None or name == AGENT_LOG_TABLE:
+            if env is None:
                 continue
-            if name in LIST_SETTINGS:
+            if name in LIST_SETTINGS or spec is list:
                 values[name] = [p.strip() for p in env.split(",") if p.strip()]
-            elif spec.type in (bool, "bool"):
+            elif spec in (bool, "bool"):
                 values[name] = env.strip().lower() in ("1", "true", "yes", "on")
-            elif spec.type in (int, "int"):
+            elif spec in (int, "int"):
                 values[name] = int(env)
-            elif spec.type in (float, "float"):
+            elif spec in (float, "float"):
                 values[name] = float(env)
             else:
                 values[name] = env

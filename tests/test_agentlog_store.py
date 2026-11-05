@@ -18,25 +18,21 @@ def _write(tmp_path, text):
     return str(path)
 
 
-def test_agent_log_shares_beamline_redis_by_default(tmp_path):
-    config = AgentsConfig.load(_write(tmp_path, '[nbs_cli]\nredis_port = 60737\nredis_db = 4\nredis_prefix = "claude-"\n'))
-    assert not config.agent_log.dedicated
-    assert config.agent_log_settings == config.redis_settings
+def test_agent_log_has_its_own_served_redis_by_default(tmp_path):
+    config = AgentsConfig.load(_write(tmp_path, '[nbs_cli]\nqs_addr = "tcp://qs:60615"\n'))
+    assert config.agent_log.dedicated and config.agent_log.serve
+    assert config.agent_log_settings == {"host": "localhost", "port": 60740, "db": 0, "prefix": ""}
 
 
 def test_agent_log_table(tmp_path):
     config = AgentsConfig.load(_write(tmp_path, (
-        '[nbs_cli]\nredis_port = 60737\nredis_prefix = "claude-"\n'
-        '[agent_log]\nport = 60740\nserve = true\ndata_dir = "/x"\n'
+        '[agent_log]\nhost = "agents.example"\nport = 60741\nserve = false\nprefix = "x-"\ndata_dir = "/x"\n'
     )))
-    assert config.agent_log.dedicated and config.agent_log.serve
-    assert config.agent_log_settings == {"host": "localhost", "port": 60740, "db": 0, "prefix": ""}
-    assert config.redis_port == 60737
+    assert config.agent_log.dedicated and not config.agent_log.serve
+    assert config.agent_log_settings == {"host": "agents.example", "port": 60741, "db": 0, "prefix": "x-"}
 
 
 def test_agent_log_table_errors(tmp_path):
-    with pytest.raises(ValueError, match="needs a port"):
-        AgentsConfig.load(_write(tmp_path, "[agent_log]\nserve = true\n"))
     with pytest.raises(ValueError, match="Unknown \\[agent_log\\]"):
         AgentsConfig.load(_write(tmp_path, "[agent_log]\nprot = 1\n"))
 

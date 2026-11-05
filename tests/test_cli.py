@@ -9,54 +9,13 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 
-from fakes import FakeRedis
+from fakes import FakeRedis, StaticInfo
 from nbs_agents.agentlog import AgentLog
 from nbs_agents.cli.config import CliConfig
 from nbs_agents.cli.core import Beamline, CliError, plain_reason
-from nbs_agents.cli.estimate import _gscan_points, estimate_item
 from nbs_agents.cli.main import build_parser, main, parse_duration, parse_plan_params, run_command
 from nbs_agents.cli.summaries import SummaryContext, summarize
 from nbs_agents.constants import AGENT_UID_KEY, CLOSE_AGENT_PLAN, QUEUE_STOP_INSTRUCTION
-
-
-class EstimateTests(unittest.TestCase):
-    def test_gscan_points_match_nbs_bl(self):
-        self.assertEqual(_gscan_points(250), [250.0])
-        self.assertEqual(_gscan_points(250, 5, 260), [250.0, 255.0, 260.0])
-        self.assertEqual(_gscan_points(264, 2, 260, 5, 250), [264.0, 262.0, 260.0, 255.0, 250.0])
-
-    def test_xas_estimate_uses_region(self):
-        ptd = {
-            "c_xas": {
-                "estimator": "gscan_estimate",
-                "fixed": 5,
-                "overhead": 0.5,
-                "dwell": "dwell",
-                "region": [260, 1, 263],
-            }
-        }
-        item = {"name": "c_xas", "args": [], "kwargs": {"dwell": 1, "repeat": 2}}
-        self.assertAlmostEqual(estimate_item(item, ptd), 2 * (5 + 1.5 * 4))
-
-    def test_missing_dwell_uses_default_dwell(self):
-        ptd = {
-            "c_xas": {
-                "estimator": "gscan_estimate",
-                "fixed": 5,
-                "overhead": 0.5,
-                "dwell": "dwell",
-                "default_dwell": 1.0,
-                "region": [260, 1, 263],
-            }
-        }
-        item = {"name": "c_xas", "args": [], "kwargs": {"sample": "s1"}}
-        self.assertAlmostEqual(estimate_item(item, ptd), 5 + 1.5 * 4)
-
-    def test_generic_and_unknown(self):
-        ptd = {"nbs_count": {"estimator": "generic_estimate", "overhead": 0.05, "dwell": "dwell", "points": "num"}}
-        self.assertAlmostEqual(estimate_item({"name": "nbs_count", "kwargs": {"num": 10, "dwell": 1}}, ptd), 10.5)
-        self.assertIsNone(estimate_item({"name": "mystery"}, ptd))
-        self.assertEqual(estimate_item({"item_type": "instruction", "name": "queue_stop"}, ptd), 0.0)
 
 
 class SummaryTests(unittest.TestCase):
@@ -151,7 +110,7 @@ def _queue(uid):
 class BeamlineVerbTests(unittest.TestCase):
     def make(self, budget=None):
         bl = Beamline(CliConfig())
-        bl._redis = FakeRedis()
+        bl._agent_log = AgentLog(FakeRedis())
         bl.agent_log.open("u1", "claude", goal="g", budget=budget)
         manager = MagicMock()
         manager.queue_get.return_value = {"success": True, "items": _queue("u1"), "running_item": {}}
@@ -212,9 +171,7 @@ class BeamlineVerbTests(unittest.TestCase):
 
     def test_add_respects_budget(self):
         bl, manager = self.make(budget={"time_s": 10})
-        bl.status_dict = lambda name: (
-            {"c_xas": {"estimator": "generic_estimate", "fixed": 60}} if name == "PLAN_TIME_DICT" else {}
-        )
+        bl._info = StaticInfo(estimate=lambda item: 60.0)
         with self.assertRaises(CliError) as ctx:
             bl.add("c_xas", [], {}, "too long")
         self.assertIn("over budget", str(ctx.exception))
@@ -236,7 +193,7 @@ class BeamlineVerbTests(unittest.TestCase):
 
     def test_failed_open_removes_its_block(self):
         bl = Beamline(CliConfig())
-        bl._redis = FakeRedis()
+        bl._agent_log = AgentLog(FakeRedis())
         manager = MagicMock()
         block = [
             {"item_type": "plan", "name": "open_agent", "item_uid": "op"},
@@ -299,20 +256,13 @@ class BeamlineVerbTests(unittest.TestCase):
         self.assertTrue(out["requeued_copy_removed"])
         self.assertEqual(bl.agent_log.get("u1")["log"][-1]["kind"], "abort")
 
-    def test_add_warns_when_sample_is_not_in_the_beam(self):
+    def test_add_passes_on_the_beamline_warning(self):
         bl, manager = self.make()
-        bl.request_update = lambda key: {"sample_id": "s1"} if key == "GLOBAL_SELECTED" else {}
-        manager.plans_allowed.return_value = {
-            "success": True,
-            "plans_allowed": {"c_xas": {"parameters": [{"name": "sample", "kind": {"name": "KEYWORD_ONLY"}}]}},
-        }
-        out = bl.add("c_xas", [], {"sample": "s2"}, "PS", dry_run=True)
-        self.assertIn("move_sample s2", out["warning"])
-        self.assertNotIn("warning", bl.add("c_xas", [], {"sample": "s1"}, "graphite", dry_run=True))
-        manager.plans_allowed.return_value["plans_allowed"]["c_xas"]["parameters"].append(
-            {"name": "sample_position", "kind": {"name": "KEYWORD_ONLY"}}
-        )
-        self.assertNotIn("warning", bl.add("c_xas", [], {"sample": "s2"}, "moves itself", dry_run=True))
+        bl._info = StaticInfo(warning="sample s2 is not in the beam")
+        out = bl.add("c_xas", [], {"dwell": 1}, "PS", dry_run=True)
+        self.assertEqual(out["warning"], "sample s2 is not in the beam")
+        bl._info = StaticInfo()
+        self.assertNotIn("warning", bl.add("c_xas", [], {"dwell": 1}, "PS", dry_run=True))
 
     def test_abort_refuses_other_plans(self):
         bl, manager = self.make()
@@ -353,7 +303,7 @@ if __name__ == "__main__":
 class AgentUidEnvTests(unittest.TestCase):
     def make(self):
         bl = Beamline(CliConfig())
-        bl._redis = FakeRedis()
+        bl._agent_log = AgentLog(FakeRedis())
         bl.agent_log.open("old", "claude", goal="older")
         bl.agent_log.open("launched", "claude", goal="from the GUI")
         bl.agent_log.set_status("old", "active", opened=time.time() + 10)  # newest
@@ -398,7 +348,7 @@ class BeamTests(unittest.TestCase):
 
     def make(self, data):
         bl = Beamline(CliConfig())
-        bl.status_dict = lambda name: dict(data) if name == "BEAM_MAP" else {}
+        bl._info = StaticInfo(beam_map=data or None)
         return bl
 
     def test_beam_summary(self):
@@ -577,8 +527,7 @@ class DeviceInfoTests(unittest.TestCase):
 
     def make(self, info=None, bmap=None):
         bl = Beamline(CliConfig())
-        dicts = {"DEVICE_INFO": info or {}, "BEAM_MAP": bmap or {}}
-        bl.status_dict = lambda name: dict(dicts.get(name, {}))
+        bl._info = StaticInfo(beam_map=bmap, device_info=info)
         bl._manager = MagicMock()
         bl._manager.devices_allowed.return_value = self.ALLOWED
         return bl
@@ -611,26 +560,17 @@ class DeviceInfoTests(unittest.TestCase):
         self.assertEqual(list(bl.devices(role="default_shutter")), ["psh7"])
         self.assertEqual(bl.devices(node="nope"), {})
 
-    def test_device_from_redis(self):
+    def test_device_from_the_provider(self):
         bl = self.make(self.INFO)
         out = bl.device(["manipulator", "nope"])
         self.assertEqual(out["manipulator"]["roles"], ["primary_sampleholder"])
         self.assertEqual(out["nope"], {"error": "unknown device"})
-        bl._manager.function_execute.assert_not_called()
 
-    def test_device_falls_back_to_function_execute(self):
+    def test_device_without_device_information(self):
         bl = self.make()
-        bl._manager.function_execute.return_value = {"success": True, "task_uid": "t1"}
-        bl._manager.task_result.return_value = {
-            "status": "completed",
-            "result": {"success": True, "return_value": {"psh7": self.INFO["psh7"]}},
-        }
-        out = bl.device(["psh7"])
-        self.assertEqual(out["psh7"]["node"], "psh7")
-        bfunc = bl._manager.function_execute.call_args.args[0]
-        self.assertEqual(bfunc.to_dict()["name"], "device_info")
-        self.assertEqual(bfunc.to_dict()["args"], [["psh7"]])
-        self.assertTrue(bl._manager.function_execute.call_args.kwargs["run_in_background"])
+        with self.assertRaises(CliError) as ctx:
+            bl.device(["psh7"])
+        self.assertIn("not available at this beamline", str(ctx.exception))
 
     def test_beam_map_lists_devices_per_node(self):
         out = self.make(bmap=self.MAP).beam(full=True)
@@ -746,11 +686,3 @@ class FinalizeSummaryFileTests(unittest.TestCase):
             build_parser().parse_args(["finalize", "--summary", "x", "--summary-file", "s.md"])
         with self.assertRaises(SystemExit), patch("sys.stderr"):
             build_parser().parse_args(["finalize"])
-
-
-def test_beamline_redis_uses_resp2():
-    # redis-py 8 sends HELLO 3 by default, which Redis servers older than 6 refuse
-    from nbs_agents.cli.config import CliConfig
-    from nbs_agents.cli.core import Beamline
-
-    assert Beamline(CliConfig()).redis.connection_pool.connection_kwargs["protocol"] == 2

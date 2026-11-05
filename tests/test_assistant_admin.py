@@ -20,7 +20,7 @@ def test_init_runs_core_then_adds_the_assistant(nbs_agents_home, monkeypatch):
     data = tomllib.loads(p.config_file.read_text())
     assert data["nbs_cli"]["tiled_path"] == "bl/raw"
     assert data["assistant"] == {"enabled": False}
-    assert data["agent_log"]["port"] == 60740
+    assert data["agent_log"] == {}  # its own Redis by default
     config = CliConfig.load()
     assert config.claude_command == "claude-beamline" and not AssistantConfig.load().enabled
     assert stat.S_IMODE(p.token.stat().st_mode) == 0o600
@@ -42,12 +42,12 @@ def test_check_adds_gateway_and_claude_rows(nbs_agents_home, monkeypatch):
     admin.init(out=lambda line: None)
     p = paths()
     p.config_file.write_text(
-        '[nbs_cli]\nqs_addr = "tcp://127.0.0.1:1"\nredis_port = 1\ntiled_uri = "http://127.0.0.1:1"\n'
+        '[nbs_cli]\nqs_addr = "tcp://127.0.0.1:1"\ntiled_uri = "http://127.0.0.1:1"\n'
     )
     lines = []
     assert admin.check(out=lines.append) == 1
     text = "\n".join(lines)
-    assert "FAIL  beamline Redis" in text  # from nbs-agents
+    assert "FAIL  QueueServer" in text and "beamline Redis" not in text  # from nbs-agents
     assert "FAIL  gateway" in text and "not in the environment" in text  # bwclaude needs it
     assert " ok  web token" in text and "claude_command" in text
 

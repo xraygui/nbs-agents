@@ -215,3 +215,63 @@ def test_code_paths_cover_this_environment():
     found = resources.code_paths()
     assert any(Path(sys.prefix).resolve().is_relative_to(p) for p in found)
     assert any(resources.HERE.is_relative_to(p) for p in found)
+
+
+def test_packages_add_their_own_settings(monkeypatch):
+    import importlib.metadata
+
+    from nbs_agents.cli.config import CliConfig
+    from nbs_agents.paths import paths
+
+    paths().config_file.parent.mkdir(parents=True, exist_ok=True)
+    paths().config_file.write_text('[nbs_cli]\nredis_port = 60737\n')
+    monkeypatch.setattr(importlib.metadata, "entry_points", fake_entry_points({}))
+    with pytest.raises(ValueError, match="redis_port.*beamline package such as sst-assistant"):
+        CliConfig.load()
+
+    monkeypatch.setattr(importlib.metadata, "entry_points", fake_entry_points({
+        "nbs_agents.settings": [("bl", "plugin_targets:SETTINGS")],
+    }))
+    monkeypatch.setenv("NBS_REDIS_SSL", "true")
+    monkeypatch.setenv("NBS_KEYS", "a,b")
+    config = CliConfig.load()
+    assert config.extra == {"redis_host": "localhost", "redis_port": 60737, "redis_ssl": True, "keys": ["a", "b"]}
+    assert not hasattr(config, "redis_port")
+
+
+def test_sandbox_paths_come_from_plugins(monkeypatch):
+    import importlib.metadata
+
+    from nbs_agents.assistant import resources
+
+    monkeypatch.setattr(importlib.metadata, "entry_points", fake_entry_points({
+        "nbs_agents.settings": [("bl", "plugin_targets:SETTINGS")],
+        resources.SANDBOX_PATHS_ENTRY_POINT: [("bl", "plugin_targets:sandbox_paths")],
+    }))
+    assert resources.sandbox_paths() == []
+    monkeypatch.setenv("NBS_REDIS_SSL", "1")
+    assert resources.sandbox_paths() == [("/etc/bl.secret", "NBS_BL_SECRET")]
+
+
+def test_beamline_without_a_provider_says_what_it_lacks(monkeypatch):
+    import importlib.metadata
+
+    from nbs_agents.beamline_info import BeamlineInfo, load_beamline_info
+    from nbs_agents.cli.config import CliConfig
+    from nbs_agents.cli.core import Beamline, CliError
+
+    monkeypatch.setattr(importlib.metadata, "entry_points", fake_entry_points({}))
+    bl = Beamline(CliConfig())
+    assert type(bl.info) is BeamlineInfo and bl.capabilities() == []
+    assert bl.beam() is None and bl.estimate({"name": "x"}) is None
+    for verb, args in (("samples", ()), ("diagnose", ()), ("device", (["m"],))):
+        with pytest.raises(CliError, match="not available at this beamline"):
+            getattr(bl, verb)(*args)
+
+    monkeypatch.setattr(importlib.metadata, "entry_points", fake_entry_points({
+        "nbs_agents.beamline_info": [("bl", "plugin_targets:info")],
+    }))
+    bl = Beamline(CliConfig(beam_map_file="/x/beam_map.toml"))
+    assert bl.capabilities() == ["samples", "status_pvs"]
+    assert bl.samples() == {"s1": {"name": "graphite"}}
+    assert load_beamline_info().name == "static"

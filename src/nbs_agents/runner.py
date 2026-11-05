@@ -22,9 +22,9 @@ from bluesky.callbacks.zmq import RemoteDispatcher
 from bluesky_queueserver_api.zmq import REManagerAPI
 
 from .agentlog import AgentLog
-from .agentlog_store import AgentLogServer, publish_location
+from .agentlog_store import AgentLogServer
 from .catalog import ZMQCatalog
-from .config import AgentsConfig
+from .config import NO_AGENT_LOG, AgentsConfig
 from .supervisor import AgentSupervisor
 from .tiled_auth import AgentKeyKeeper
 
@@ -84,38 +84,18 @@ def load_plugins(runtime: Runtime) -> list:
     return observers
 
 
-def _start_heartbeat(agent_log: AgentLog, config: AgentsConfig, period_s: float = 5.0) -> None:
-    """
-    Write a heartbeat to Redis so nbs-cli open can tell the runner is up.
-
-    With a separate agent-log Redis, also keep its address published in the
-    beamline Redis for nbs-gui, in case the beamline Redis restarted.
-    """
-    beamline = None
-    location = config.agent_log_settings if config.agent_log.dedicated else None
+def _start_heartbeat(agent_log: AgentLog, period_s: float = 5.0) -> None:
+    """Write a heartbeat to the agent log so nbs-cli open can tell the runner is up."""
 
     def beat():
-        nonlocal beamline
         while True:
             try:
                 agent_log.heartbeat()
             except Exception:
                 LOGGER.exception("Could not write the runner heartbeat")
-            try:
-                if beamline is None:
-                    beamline = _beamline_redis(config)
-                publish_location(beamline, config.redis_prefix, location)
-            except Exception:
-                LOGGER.warning("Could not publish the agent log location in the beamline Redis", exc_info=True)
             time.sleep(period_s)
 
     threading.Thread(target=beat, name="runner-heartbeat", daemon=True).start()
-
-
-def _beamline_redis(config: AgentsConfig):
-    from .redisclient import connect_settings
-
-    return connect_settings(config.redis_settings, socket_timeout=5)
 
 
 def main(argv=None) -> int:
@@ -123,9 +103,9 @@ def main(argv=None) -> int:
     Start the persistent agent runner.
 
     Connection settings come from the same sources as nbs-cli
-    (``NBS_QS_ADDR``, ``NBS_ZMQ_ADDR``, ``NBS_REDIS_*`` or a TOML file) for
-    the beamline named by ``--beamline`` (see ``nbs_agents.paths``). With
-    ``[agent_log] serve = true`` it also starts the agent log's own Redis.
+    (``NBS_QS_ADDR``, ``NBS_ZMQ_ADDR`` or a TOML file) for the beamline named
+    by ``--beamline`` (see ``nbs_agents.paths``). The agent log needs its own
+    Redis (``[agent_log] port``); with ``serve = true`` the runner starts it.
     Plugins (``nbs_agents.runner`` entry points) add their observers.
     """
     import argparse
@@ -147,6 +127,9 @@ def main(argv=None) -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     config = AgentsConfig.load()
+    if not config.agent_log.dedicated:
+        print(f"error: {NO_AGENT_LOG}", file=sys.stderr)
+        return 2
     LOGGER.info("Beamline %s", beamline)
     manager = REManagerAPI(zmq_control_addr=config.qs_addr)
     dispatcher = RemoteDispatcher(config.zmq_addr)
@@ -174,7 +157,7 @@ def main(argv=None) -> int:
     observers = load_plugins(Runtime(config, manager, catalog, agent_log))
     AgentSupervisor(manager, catalog, agent_log=agent_log, observers=observers)
     if agent_log is not None:
-        _start_heartbeat(agent_log, config)
+        _start_heartbeat(agent_log)
     LOGGER.info("Agent runner listening for Bluesky documents at %s", config.zmq_addr)
 
     try:

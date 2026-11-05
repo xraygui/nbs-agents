@@ -23,7 +23,7 @@ def _queue(uid):
 
 def make(role="driver"):
     bl = Beamline(CliConfig(role=role))
-    bl._redis = FakeRedis()
+    bl._agent_log = AgentLog(FakeRedis())
     bl.agent_log.open("u1", "claude", goal="g")
     bl.agent_log.ensure_assistant_record()
     bl.agent_log.message(assistant_uid(), "is s4 ok?", source="gui")
@@ -72,13 +72,13 @@ class ReadOnlyRoleTests(unittest.TestCase):
 
     def test_write_verbs_are_refused(self):
         bl, manager = make("assistant")
-        before = {k: v for k, v in bl.redis.store.items()}
+        before = {k: v for k, v in bl.agent_log.redis.store.items()}
         for argv in self.WRITES:
             with self.subTest(argv=argv):
                 with self.assertRaises(CliError) as ctx:
                     run(bl, *argv)
                 self.assertIn("read-only assistant", str(ctx.exception))
-        self.assertEqual(bl.redis.store, before)
+        self.assertEqual(bl.agent_log.redis.store, before)
         for name in ("item_add", "item_add_batch", "item_remove", "queue_start", "re_abort", "queue_stop"):
             getattr(manager, name).assert_not_called()
 
@@ -131,7 +131,7 @@ class ReadOnlyRoleTests(unittest.TestCase):
 
     def test_post_creates_the_record_if_missing(self):
         bl = Beamline(CliConfig(role="assistant"))
-        bl._redis = FakeRedis()
+        bl._agent_log = AgentLog(FakeRedis())
         bl.post("summary", "quiet hour")
         record = bl.agent_log.get(assistant_uid())
         self.assertEqual(record["kind"], "assistant")
@@ -145,7 +145,6 @@ class ReadOnlyRoleTests(unittest.TestCase):
     def test_assistant_reads_without_taking_driver_messages(self):
         bl, manager = make("assistant")
         bl.agent_log.message("u1", "skip s3")
-        bl.status_dict = lambda name: {}
         bl.samples = lambda full=False: {}
         bl.recent_runs = lambda *a, **k: []
         out = run(bl, "state")
@@ -192,7 +191,6 @@ class DriverFirewallTests(unittest.TestCase):
             with self.subTest(argv=argv):
                 with self.assertRaises(CliError):
                     run(bl, "--agent-uid", assistant_uid(), *argv)
-        bl.status_dict = lambda name: {}
         bl.samples = lambda full=False: {}
         bl.recent_runs = lambda *a, **k: []
         out = run(bl, "--agent-uid", assistant_uid(), "state")
@@ -202,13 +200,12 @@ class DriverFirewallTests(unittest.TestCase):
 
     def test_driver_never_picks_the_assistant_as_its_session(self):
         bl = Beamline(CliConfig(agent_name="assistant"))
-        bl._redis = FakeRedis()
+        bl._agent_log = AgentLog(FakeRedis())
         bl.agent_log.ensure_assistant_record(status="active")
         self.assertIsNone(bl.find_session())
 
     def test_driver_state_has_no_assistant_messages(self):
         bl, _ = make("driver")
-        bl.status_dict = lambda name: {}
         bl.samples = lambda full=False: {}
         bl.recent_runs = lambda *a, **k: []
         out = run(bl, "state", "--full")
@@ -248,7 +245,7 @@ class ConnectionErrorTextTests(unittest.TestCase):
     def config(self):
         from nbs_agents.config import AgentLogConfig
 
-        return CliConfig(redis_host="bl-redis", redis_port=6380, agent_log=AgentLogConfig(port=60740))
+        return CliConfig(agent_log=AgentLogConfig(port=60740))
 
     def refused(self, address="localhost:60740"):
         from redis.exceptions import ConnectionError as RedisConnectionError
@@ -261,7 +258,7 @@ class ConnectionErrorTextTests(unittest.TestCase):
             text = error_text(self.refused(), self.config())
             self.assertIn("(localhost:60740 is the agent log, served by the runner)", text)
             self.assertNotIn("sandbox", text)
-            self.assertIn("(bl-redis:6380 is the beamline Redis)", error_text(self.refused("bl-redis:6380"), self.config()))
+            self.assertNotIn("(", error_text(self.refused("bl-redis:6380"), self.config()))
 
     def test_says_when_the_call_ran_in_claudes_sandbox(self):
         with patch.dict(os.environ, {"SANDBOX_RUNTIME": "1"}):
