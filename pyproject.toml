@@ -48,9 +48,13 @@ homepage = "https://github.com/xraygui/nbs-agents"
 [project.scripts]
 nbs-agents-runner = "nbs_agents.runner:main"
 nbs-agents = "nbs_agents.admin:main"
+# nbs-cli (the [assistant] extra)
+nbs-cli = "nbs_agents.cli.main:main"
 
 [project.optional-dependencies]
 gui = ["nbs-gui", "qtpy"]
+# nbs-cli, the Claude agents, the beamline assistant and its web UI
+assistant = ["fastapi", "uvicorn", "matplotlib", "pyyaml", "pyepics"]
 
 [project.entry-points."nbs_gui.plans"]
 nbs-agents-block = "nbs_agents.qt.plans.agent_block:AgentBlockWidget"
@@ -74,7 +78,18 @@ test = "pytest tests"
 
 [tool.pixi.feature.test.dependencies]
 pytest = "*"
+httpx = "*"
+
+# The [assistant] extra, plus scipy for the agents' sandbox-python
+[tool.pixi.feature.assistant.dependencies]
+fastapi = "*"
+uvicorn = "*"
+matplotlib = "*"
+pyyaml = "*"
+pyepics = "*"
+scipy = "*"
 
 [tool.pixi.environments]
 default = {features = [], solve-group = "default"}
-test = {features = ["test"], solve-group = "default"}
+assistant = {features = ["assistant"], solve-group = "default"}
+test = {features = ["test", "assistant"], solve-group = "default"}
