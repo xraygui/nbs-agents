@@ -22,6 +22,7 @@ DEVICES = "devices"
 SAMPLES = "samples"
 ESTIMATES = "estimates"
 XAS_PLANS = "xas_plans"
+METADATA = "metadata"
 
 
 class BeamlineInfo:
@@ -82,6 +83,23 @@ class BeamlineInfo:
         dict or None
             Sample id to its fields (``name``, ``description``, ``position``
             and so on); None when the beamline does not track samples.
+        """
+        return None
+
+    def metadata(self, keys: Optional[list[str]] = None) -> Optional[dict[str, Any]]:
+        """
+        The metadata the beamline will stamp on its next run, such as the
+        proposal, cycle and users. Read only.
+
+        Parameters
+        ----------
+        keys : list of str, optional
+            Only these keys; all of them if omitted.
+
+        Returns
+        -------
+        dict or None
+            Key to value; None when the beamline keeps no such metadata.
         """
         return None
 

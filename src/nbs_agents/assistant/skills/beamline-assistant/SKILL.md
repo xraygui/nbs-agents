@@ -31,7 +31,8 @@ why before looking for a beamline cause.
 
 `state` lists under `capabilities` what this beamline can tell you beyond the queue,
 runs and logs: `beam_map` (`beam`, `diagnose`, device nodes), `devices` (`device`,
-device descriptions), `samples`, `estimates` (plan times) and `status_pvs`. A verb
+device descriptions), `samples`, `metadata` (what the next run will carry),
+`estimates` (plan times) and `status_pvs`. A verb
 that needs a missing one says it is not available at this beamline; don't retry it,
 and say what you could not check.
 
@@ -44,6 +45,7 @@ and say what you could not check.
 | `run UID [--data] [--plot notebook/plots/NAME.png]` | One run in detail. Save plots under `notebook/` only. |
 | `beam`, `diagnose` | Whether beam is expected at the endstation and which beam map node blocks it (`beam_map`). `beam_map: false` means the beamline has none, so beam status is unknown. |
 | `samples [--full]`, `samples --layout` | Loaded samples (`samples`); `--layout` shows where they sit on the holder, if the beamline provides a layout. These are the listed positions; a sample may really sit elsewhere. |
+| `metadata [KEY ...]` | The metadata the next run will carry, such as proposal and users (`metadata`); `state` shows it with long values cut. |
 | `plans [NAME]`, `devices`, `device NAME` | Plan parameters and devices, for exact suggestions (`device` needs `devices`). |
 | `log --all` | Driver sessions' goals and notes (for context), and your own record. |
 | `log` | Today's assistant record: run lines, your earlier posts, operator questions. |

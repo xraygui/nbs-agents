@@ -51,7 +51,7 @@ class FakeRedis:
         return FakePipeline(self.store)
 
 
-from nbs_agents.beamline_info import BEAM_MAP, DEVICES, ESTIMATES, SAMPLES, XAS_PLANS, BeamlineInfo  # noqa: E402
+from nbs_agents.beamline_info import BEAM_MAP, DEVICES, ESTIMATES, METADATA, SAMPLES, XAS_PLANS, BeamlineInfo  # noqa: E402
 
 
 class StaticInfo(BeamlineInfo):
@@ -59,11 +59,14 @@ class StaticInfo(BeamlineInfo):
 
     name = "static"
 
-    def __init__(self, beam_map=None, device_info=None, samples=None, estimate=None, xas_plans=None, warning=None):
+    def __init__(self, beam_map=None, device_info=None, samples=None, estimate=None, xas_plans=None, warning=None,
+                 metadata=None):
         super().__init__(None)
         self._beam_map, self._device_info, self._samples = beam_map, device_info, samples
         self._estimate, self._xas_plans, self._warning = estimate, xas_plans, warning
-        given = {BEAM_MAP: beam_map, DEVICES: device_info, SAMPLES: samples, ESTIMATES: estimate, XAS_PLANS: xas_plans}
+        self._metadata = metadata
+        given = {BEAM_MAP: beam_map, DEVICES: device_info, SAMPLES: samples, ESTIMATES: estimate, XAS_PLANS: xas_plans,
+                 METADATA: metadata}
         self.capabilities = frozenset(name for name, value in given.items() if value is not None)
 
     def beam_map(self):
@@ -83,3 +86,8 @@ class StaticInfo(BeamlineInfo):
 
     def add_warning(self, plan, kwargs, parameters, block):
         return self._warning
+
+    def metadata(self, keys=None):
+        if self._metadata is None:
+            return None
+        return {k: v for k, v in self._metadata.items() if keys is None or k in keys}
