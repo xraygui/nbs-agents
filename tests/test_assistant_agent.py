@@ -449,6 +449,40 @@ class ScriptRoleTests(unittest.TestCase):
             self.assertIn(f"NBS_KB_DIR={real}", argv)
             self.assertNotIn(f"{tmp}/link/knowledge", argv)
 
+    def test_inner_run_in_bwclaude_gets_its_environment_back(self):
+        # A bwclaude that runs the inner command as the real one does: with a clean environment
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            fake = tmp / "bwclaude"
+            fake.write_text(
+                "#!/usr/bin/env python3\nimport os, sys\n"
+                "argv = sys.argv[1:]\ncmd = argv[argv.index('--exec') + 1:]\n"
+                f"os.execve(cmd[0], cmd, {{'PATH': '{tmp}:/usr/bin:/bin', 'HOME': '{tmp}'}})\n"
+            )
+            fake.chmod(0o755)
+            claude = tmp / "claude"
+            claude.write_text(
+                "#!/usr/bin/env python3\nimport json, os, sys\n"
+                "json.dump({'argv': sys.argv[1:], 'env_dir': os.environ.get('NBS_ENV_DIR')}, sys.stdout)\n"
+            )
+            claude.chmod(0o755)
+            config = tmp / "nbs-cli.toml"
+            config.write_text("[nbs_cli]\n")
+            env = dict(
+                os.environ, PATH=f"{tmp}:{os.environ['PATH']}", NBS_BWCLAUDE=str(fake), NBS_CLAUDE_SANDBOX="bwclaude",
+                NBS_CLI_CONFIG=str(config), NBS_AGENTS_HOME=str(tmp / "home"), AIFAPIM_HOST="gw", AIFAPIM_API_KEY="k", NBS_ENV_DIR=sys.prefix,
+                NBS_ASSISTANT_PROMPT="events",
+            )
+            out = subprocess.run(
+                [str(SCRIPTS_DIR / "claude-beamline"), "--headless", "--role", "assistant"],
+                env=env, capture_output=True, text=True, cwd=tmp,
+            )
+            self.assertEqual(out.returncode, 0, out.stderr)
+            result = json.loads(out.stdout)
+            self.assertEqual(result["env_dir"], sys.prefix)
+            prompt = result["argv"][result["argv"].index("--append-system-prompt-file") + 1]
+            self.assertTrue(Path(prompt).read_text().startswith("---\nname: beamline-assistant"))
+
     def test_assistant_role(self):
         out = self.run_script(
             "--headless", "--role", "assistant", "--model", "haiku",
