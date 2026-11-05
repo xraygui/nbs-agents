@@ -15,7 +15,7 @@ from fakes import FakeRedis  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def claude_launcher(monkeypatch):
-    """Install a "claude" launcher, as sst-assistant does through its entry point."""
+    """Install a stand-in "claude" launcher (the [assistant] extra registers the real one)."""
     from nbs_agents import launchers
 
     def claude_launch_parameters(goal, budget=None):
