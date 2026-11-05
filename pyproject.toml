@@ -48,13 +48,26 @@ homepage = "https://github.com/xraygui/nbs-agents"
 [project.scripts]
 nbs-agents-runner = "nbs_agents.runner:main"
 nbs-agents = "nbs_agents.admin:main"
-# nbs-cli (the [assistant] extra)
+# Claude agents and the beamline assistant (the [assistant] extra)
 nbs-cli = "nbs_agents.cli.main:main"
+nbs-agents-assistant = "nbs_agents.assistant.admin:main"
+claude-beamline = "nbs_agents.assistant.resources:claude_beamline"
 
 [project.optional-dependencies]
 gui = ["nbs-gui", "qtpy"]
 # nbs-cli, the Claude agents, the beamline assistant and its web UI
 assistant = ["fastapi", "uvicorn", "matplotlib", "pyyaml", "pyepics"]
+
+# The "claude" agent, the runner plugin (launch hook and assistant) and the
+# New agent launcher
+[project.entry-points."nbs_agents.agents"]
+claude = "nbs_agents.agents.external:ExternalAgent"
+
+[project.entry-points."nbs_agents.runner"]
+claude = "nbs_agents.assistant.claude_runner:plugin"
+
+[project.entry-points."nbs_agents.launchers"]
+claude = "nbs_agents.assistant.launcher:claude_launch_parameters"
 
 [project.entry-points."nbs_gui.plans"]
 nbs-agents-block = "nbs_agents.qt.plans.agent_block:AgentBlockWidget"

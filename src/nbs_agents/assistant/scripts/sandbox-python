@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Run the agents' python (NBS_ENV_DIR: numpy, scipy, matplotlib) in a bubblewrap sandbox
+# for agent data analysis:
+#   - the filesystem is read-only except the current folder (and a private /tmp);
+#     the folder's Claude Code settings and instructions (.claude/, CLAUDE.md,
+#     .mcp.json) stay read-only, so analysis code cannot widen the agent's permissions
+#   - no network: the queueserver, redis and tiled are unreachable, so the only way
+#     to act on the beamline stays nbs-cli
+#   - a clean environment: no NBS_* variables, tokens or API keys are passed in
+#
+#   sandbox-python script.py [args...]
+#   sandbox-python -c "print(1)"
+#
+# Get run data in first with `nbs-cli run REF --data --save FILE`.
+set -euo pipefail
+
+env_dir="${NBS_ENV_DIR:-}"
+if [[ -z "$env_dir" ]]; then
+    nbs_cli="$(command -v nbs-cli || true)"
+    [[ -n "$nbs_cli" ]] && env_dir="$(dirname "$(dirname "$nbs_cli")")"
+fi
+python="$env_dir/bin/python3"
+
+[[ -n "$env_dir" && -x "$python" ]] || { echo "no python at $python; set NBS_ENV_DIR" >&2; exit 1; }
+command -v bwrap >/dev/null 2>&1 || { echo "bwrap (bubblewrap) is not installed" >&2; exit 1; }
+
+work="$(pwd -P)"
+case "$work" in
+    /|"$(readlink -f "$HOME")") echo "refusing to sandbox with $work writable; run from a working folder" >&2; exit 2 ;;
+esac
+mkdir -p "$work/.mplconfig" "$work/.claude"
+
+exec bwrap \
+    --ro-bind / / \
+    --dev /dev \
+    --proc /proc \
+    --tmpfs /tmp \
+    --bind "$work" "$work" \
+    --ro-bind "$work/.claude" "$work/.claude" \
+    --ro-bind-try "$work/CLAUDE.md" "$work/CLAUDE.md" \
+    --ro-bind-try "$work/CLAUDE.local.md" "$work/CLAUDE.local.md" \
+    --ro-bind-try "$work/.mcp.json" "$work/.mcp.json" \
+    --chdir "$work" \
+    --unshare-all \
+    --die-with-parent \
+    --new-session \
+    --clearenv \
+    --setenv PATH "$env_dir/bin:/usr/bin:/bin" \
+    --setenv HOME "$work" \
+    --setenv TMPDIR /tmp \
+    --setenv LANG C.UTF-8 \
+    --setenv MPLBACKEND Agg \
+    --setenv MPLCONFIGDIR "$work/.mplconfig" \
+    --setenv PYTHONNOUSERSITE 1 \
+    --setenv PYTHONDONTWRITEBYTECODE 1 \
+    "$python" "$@"
