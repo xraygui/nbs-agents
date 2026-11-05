@@ -1,0 +1,1013 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Beamline Agents</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
+<script>
+// Markdown, math and sanitizing load from a CDN; until all three arrive (or offline) messages show as plain text
+window.richLibs = 0;
+function richLoaded() { if (++window.richLibs === 3 && window.onRichReady) window.onRichReady(); }
+</script>
+<script async src="https://cdn.jsdelivr.net/npm/markdown-it@14.1.0/dist/markdown-it.min.js" onload="richLoaded()"></script>
+<script async src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" onload="richLoaded()"></script>
+<script async src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js" onload="richLoaded()"></script>
+<style>
+:root {
+  --bg: #f5f6f8; --panel: #ffffff; --text: #1a1a1a; --muted: #5f6670; --faint: #8a9099;
+  --border: #dde1e6; --accent: #1565c0; --accent-soft: #e3edfb;
+  --ok: #2e7d32; --bad: #c62828; --warn: #a05f00; --warn-bg: #fff1cc; --warn-border: #f0ad4e;
+  --b-note: #eceff3; --b-question: #fff1cc; --b-finalize: #e3f2e6; --b-operator: #dbe8fb; --b-stop: #f9dcdb;
+  --b-advice: #dbe8fb; --b-alert: #f9dcdb; --b-answer: #ece3f7; --b-summary: #e3f2e6;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #15171a; --panel: #1e2125; --text: #e6e8eb; --muted: #a2a9b2; --faint: #7a828c;
+    --border: #33383e; --accent: #6ea8f0; --accent-soft: #1f3048;
+    --ok: #66bb6a; --bad: #ef6b6b; --warn: #f0b05a; --warn-bg: #3b2f14; --warn-border: #a8782a;
+    --b-note: #2a2e34; --b-question: #3b2f14; --b-finalize: #1f3324; --b-operator: #1f3048; --b-stop: #3e2222;
+    --b-advice: #1f3048; --b-alert: #3e2222; --b-answer: #2f2640; --b-summary: #1f3324;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body { background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; display: flex; flex-direction: column; }
+button, input, textarea { font: inherit; color: inherit; }
+button { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; cursor: pointer; white-space: nowrap; }
+button:hover:not(:disabled) { border-color: var(--accent); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.danger { color: var(--bad); }
+button:disabled { opacity: .45; cursor: default; }
+input[type=text], textarea { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; width: 100%; }
+input:focus, textarea:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+input:disabled { opacity: .6; }
+
+header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 8px 16px; background: var(--panel); border-bottom: 1px solid var(--border); }
+header h1 { font-size: 15px; margin: 0 8px 0 0; font-weight: 600; }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border: 1px solid var(--border); border-radius: 999px; font-size: 13px; white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.dot { width: 10px; height: 10px; border-radius: 50%; background: var(--faint); flex: none; }
+.dot.ok { background: var(--ok); } .dot.bad { background: var(--bad); } .dot.warn { background: var(--warn); }
+.pill .sub { color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+#conn { margin-left: auto; color: var(--muted); font-size: 12px; }
+
+nav { display: flex; gap: 4px; padding: 0 16px; background: var(--panel); border-bottom: 1px solid var(--border); }
+nav button { border: none; border-bottom: 2px solid transparent; border-radius: 0; padding: 8px 12px; background: none; }
+nav button.active { border-bottom-color: var(--accent); font-weight: 600; }
+nav button.waiting { color: var(--warn); font-weight: 600; }
+
+main { flex: 1; min-height: 0; display: flex; }
+.view { flex: 1; min-height: 0; display: none; }
+.view.active { display: grid; }
+#agents-view { grid-template-columns: 260px minmax(0, 1fr) 300px; }
+#assistant-view { grid-template-columns: minmax(0, 1fr); }
+.col { min-height: 0; display: flex; flex-direction: column; border-right: 1px solid var(--border); }
+.col:last-child { border-right: none; }
+.col-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+.col-head h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0; flex: 1; }
+.scroll { overflow: auto; min-height: 0; }
+
+#sessions { flex: 1; }
+.session { display: block; width: 100%; text-align: left; border: none; border-bottom: 1px solid var(--border); border-radius: 0; padding: 8px 12px; background: none; }
+.session.sel { background: var(--accent-soft); }
+.session.waiting { box-shadow: inset 3px 0 0 var(--warn-border); }
+.session .name { font-weight: 600; }
+.session .meta { font-size: 12px; color: var(--muted); }
+.session .goal { font-size: 12px; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.status { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: var(--b-note); color: var(--muted); }
+.status.active, .status.opening { background: var(--b-finalize); color: var(--ok); }
+.status.waiting { background: var(--warn-bg); color: var(--warn); }
+.status.failed { background: var(--b-stop); color: var(--bad); }
+
+#center { display: flex; flex-direction: column; }
+#summary { padding: 10px 14px; border-bottom: 1px solid var(--border); font-size: 13px; }
+#summary .goal { margin-top: 2px; }
+#summary .label { color: var(--muted); }
+.budget { height: 6px; background: var(--b-note); border-radius: 3px; margin-top: 6px; overflow: hidden; max-width: 360px; }
+.budget > span { display: block; height: 100%; background: var(--accent); }
+.budget > span.over { background: var(--bad); }
+#banner { display: none; margin: 8px 14px 0; padding: 8px 10px; background: var(--warn-bg); border: 2px solid var(--warn-border); border-radius: 6px; }
+#banner .q { white-space: pre-wrap; margin-top: 2px; }
+#banner a { color: var(--accent); cursor: pointer; margin-left: 6px; }
+
+.split { flex: 1; min-height: 0; display: grid; grid-template-rows: minmax(0, 3fr) auto minmax(0, 2fr); }
+#conversation, #feed { padding: 10px 14px; }
+.row { display: flex; margin: 6px 0; }
+.row.right { justify-content: flex-end; }
+.bubble { max-width: 80%; min-width: 0; padding: 8px 10px; border-radius: 8px; background: var(--b-note); overflow-wrap: anywhere; }
+.plain { white-space: pre-wrap; }
+.md > :first-child { margin-top: 0; } .md > :last-child { margin-bottom: 0; }
+.md p, .md ul, .md ol, .md pre, .md table, .md blockquote { margin: 0 0 .5em; }
+.md ul, .md ol { padding-left: 1.4em; }
+.md h1, .md h2, .md h3, .md h4 { font-size: 1em; margin: .6em 0 .3em; }
+.md code { font-family: var(--mono); font-size: .92em; background: rgba(127,127,127,.15); padding: 0 3px; border-radius: 3px; }
+.md pre { background: rgba(127,127,127,.12); padding: 6px 8px; border-radius: 6px; overflow-x: auto; }
+.md pre code { background: none; padding: 0; }
+.md table { border-collapse: collapse; font-size: .95em; display: block; overflow-x: auto; }
+.md th, .md td { border: 1px solid var(--border); padding: 2px 6px; position: static; background: none; }
+.md blockquote { border-left: 3px solid var(--border); padding-left: 8px; color: var(--muted); }
+.md a { color: var(--accent); }
+.md img.fig { display: block; max-width: 100%; max-height: 360px; border-radius: 4px; background: #fff; margin: 4px 0; }
+.md .katex-display { overflow-x: auto; overflow-y: hidden; margin: .3em 0; }
+.bubble .hd { font-size: 12px; color: var(--muted); white-space: normal; margin-bottom: 2px; }
+.bubble .hd b { color: var(--text); }
+.bubble .tag { font-weight: 600; }
+.bubble.open { outline: 2px solid var(--warn-border); }
+.bubble.open .tag { color: var(--warn); }
+.empty { color: var(--faint); padding: 8px 0; }
+
+#steer { display: flex; gap: 6px; padding: 8px 14px; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+#activity-wrap { display: flex; flex-direction: column; min-height: 0; }
+#activity-wrap .col-head { border-bottom: none; padding-bottom: 4px; }
+table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+th { position: sticky; top: 0; background: var(--panel); color: var(--muted); font-weight: 600; z-index: 1; }
+td.t { white-space: nowrap; color: var(--muted); font-family: var(--mono); }
+td.k { white-space: nowrap; }
+td.d { color: var(--muted); font-family: var(--mono); font-size: 11.5px; max-width: 280px; word-break: break-all; }
+td.text { white-space: pre-wrap; }
+#activity { padding: 0 6px 6px; flex: 1; }
+
+#right { background: var(--panel); }
+#block { padding: 8px 12px; }
+.item { border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; margin-bottom: 6px; font-size: 12.5px; }
+.item .nm { font-family: var(--mono); font-weight: 600; }
+.item .kw { font-family: var(--mono); color: var(--muted); word-break: break-all; }
+.item .why { margin-top: 2px; }
+.item.running { border-color: var(--accent); }
+#plot-slot { flex: 1; padding: 8px 12px 12px; }
+#plot-slot .empty { border: 1px dashed var(--border); border-radius: 8px; min-height: 140px; display: flex; align-items: center; justify-content: center; text-align: center; padding: 12px; font-size: 13px; }
+.figure { display: block; margin-bottom: 10px; color: inherit; text-decoration: none; }
+.figure img { display: block; width: 100%; border: 1px solid var(--border); border-radius: 6px; background: #fff; }
+.figure .cap { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+#assistant-view .col { border-right: none; }
+#feed { flex: 1; }
+.runline { font-size: 12.5px; color: var(--muted); margin: 2px 0; }
+.runline .t { font-family: var(--mono); color: var(--faint); }
+.runline .alert { color: var(--bad); font-weight: 600; }
+.runline .flag { color: var(--warn); font-weight: 600; }
+a.run { color: var(--accent); cursor: pointer; font-family: var(--mono); text-decoration: none; }
+a.run:hover { text-decoration: underline; }
+#ask-row { display: flex; gap: 6px; padding: 8px 14px; border-top: 1px solid var(--border); }
+#ask-status { padding: 0 14px 8px; color: var(--muted); font-size: 12px; min-height: 18px; }
+
+dialog { border: 1px solid var(--border); border-radius: 10px; background: var(--panel); color: var(--text); padding: 18px; width: min(520px, calc(100vw - 32px)); }
+dialog::backdrop { background: rgba(0,0,0,.35); }
+dialog h3 { margin: 0 0 6px; }
+dialog p { color: var(--muted); margin: 0 0 12px; font-size: 13px; }
+dialog label { display: block; margin: 10px 0 4px; font-weight: 600; font-size: 13px; }
+dialog .check { display: flex; gap: 6px; align-items: center; font-weight: normal; }
+dialog .msg { min-height: 18px; font-size: 13px; margin-top: 8px; }
+dialog .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+#toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 8px 14px; border-radius: 6px; font-size: 13px; display: none; max-width: calc(100vw - 32px); z-index: 10; }
+
+@media (max-width: 1100px) { #agents-view { grid-template-columns: 220px minmax(0, 1fr); } #right { display: none; } }
+@media (max-width: 720px) {
+  main { display: block; overflow: auto; }
+  .view.active { display: block; }
+  .col { border-right: none; border-bottom: 1px solid var(--border); }
+  #sessions { max-height: 200px; }
+  .split { display: block; }
+  #conversation { max-height: 55vh; }
+  #activity { max-height: 40vh; }
+  #right { display: flex; }
+  header, nav { padding-left: 16px; padding-right: 16px; }
+}
+#kb-view { grid-template-columns: 300px minmax(0, 1fr); }
+#kb-list { flex: 1; }
+.kb-group { padding: 8px 12px 4px; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.kb-item { display: block; width: 100%; text-align: left; border: none; border-bottom: 1px solid var(--border); border-radius: 0; padding: 6px 12px; background: none; white-space: normal; }
+.kb-item.sel { background: var(--accent-soft); }
+.kb-item .meta { font-size: 12px; color: var(--muted); }
+.kb-item.pending { box-shadow: inset 3px 0 0 var(--warn-border); }
+#kb-detail { padding: 12px 16px; }
+#kb-detail .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0 12px; }
+#kb-detail label { display: block; margin: 10px 0 4px; font-weight: 600; font-size: 13px; }
+#kb-detail textarea { font-family: var(--mono); font-size: 13px; }
+#kb-detail .actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+#kb-detail .from { color: var(--muted); font-size: 13px; }
+.kb-preview { border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; background: var(--panel); }
+.kb-entry { border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; margin: 8px 0; background: var(--panel); }
+.kb-entry .head { display: flex; gap: 8px; align-items: center; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+.kb-entry .head span { flex: 1; }
+#kb-who { width: 160px; }
+@media (max-width: 720px) { #kb-list { max-height: 260px; } }
+#tiled-login { display: none; padding: 8px 16px; background: var(--warn-bg); border-bottom: 1px solid var(--warn-border); }
+#tiled-login code { font-weight: 600; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Beamline agents</h1>
+  <span class="pill" id="beam" title="Beam status from the beamline map"><span class="dot"></span><span>Beam</span><span class="sub"></span></span>
+  <span class="pill" id="queue" title="QueueServer"><span class="dot"></span><span>Queue</span><span class="sub"></span></span>
+  <span class="pill" id="runner" title="nbs-agents-runner heartbeat"><span class="dot"></span><span>Agent runner</span><span class="sub"></span></span>
+  <span id="conn">connecting…</span>
+</header>
+<div id="tiled-login" role="status"></div>
+<nav>
+  <button id="tab-agents" class="active" data-view="agents-view">Agents Log</button>
+  <button id="tab-assistant" data-view="assistant-view">Assistant</button>
+  <button id="tab-kb" data-view="kb-view">Knowledge</button>
+</nav>
+<main>
+  <section id="agents-view" class="view active">
+    <div class="col">
+      <div class="col-head"><h2>Sessions</h2><button id="new-agent" class="primary">New agent…</button></div>
+      <div id="sessions" class="scroll"></div>
+    </div>
+    <div class="col" id="center">
+      <div id="summary"></div>
+      <div id="banner"></div>
+      <div class="split">
+        <div id="conversation" class="scroll"></div>
+        <form id="steer" autocomplete="off">
+          <input type="text" id="message" placeholder="Choose a running agent to send it a message">
+          <button type="submit" id="send">Send</button>
+          <button type="button" id="stop" class="danger" title="Ask the agent to stop adding scans and finalize">Request stop</button>
+        </form>
+        <div id="activity-wrap">
+          <div class="col-head"><h2>Activity <span style="text-transform:none;letter-spacing:0">(sessions, queued plans, runs)</span></h2></div>
+          <div id="activity" class="scroll"></div>
+        </div>
+      </div>
+    </div>
+    <div class="col" id="right">
+      <div class="col-head"><h2>Agent's queue block</h2></div>
+      <div id="block" class="scroll" style="max-height:40%"></div>
+      <div class="col-head"><h2>Figures</h2></div>
+      <!-- Figures the shown sessions attached to their messages (att:ID links), newest first -->
+      <div id="plot-slot" class="scroll"></div>
+    </div>
+  </section>
+  <section id="assistant-view" class="view">
+    <div class="col">
+      <div class="col-head">
+        <h2 id="assistant-state" style="text-transform:none;letter-spacing:0;font-size:14px">Assistant</h2>
+        <span id="calls" style="color:var(--muted);font-size:12px;flex:2"></span>
+        <label style="font-size:13px"><input type="checkbox" id="show-runs" checked> Show every run</label>
+      </div>
+      <div id="feed" class="scroll"></div>
+      <form id="ask-row" autocomplete="off">
+        <input type="text" id="question" placeholder="Ask the assistant (it reads the data; it never changes the queue)">
+        <button type="submit" id="ask">Ask</button>
+      </form>
+      <div id="ask-status"></div>
+    </div>
+  </section>
+  <section id="kb-view" class="view">
+    <div class="col">
+      <div class="col-head"><h2>Knowledge base</h2><button id="kb-new" class="primary">New note…</button></div>
+      <div class="col-head" style="gap:6px">
+        <input type="text" id="kb-who" placeholder="Your name" title="Recorded as the reviewer or author of notes you approve or write; remembered in this browser">
+        <input type="text" id="kb-filter" placeholder="Filter notes">
+      </div>
+      <div id="kb-list" class="scroll"></div>
+    </div>
+    <div class="col">
+      <div id="kb-detail" class="scroll" style="flex:1"></div>
+    </div>
+  </section>
+</main>
+
+<dialog id="new-dialog">
+  <form method="dialog" id="new-form">
+    <h3>New Claude agent</h3>
+    <p>Queues open_agent, queue_stop and close_agent at the back of the queue. When open_agent runs, nbs-agents-runner starts Claude for the session.</p>
+    <label for="goal">Goal</label>
+    <textarea id="goal" rows="4" placeholder="What should the agent work on? It will plan this with you before queueing scans."></textarea>
+    <label for="budget">Budget</label>
+    <input type="text" id="budget" placeholder="optional, e.g. 90m or 2h">
+    <label class="check"><input type="checkbox" id="start-queue" checked> Start the queue if idle</label>
+    <div class="msg" id="runner-msg"></div>
+    <div class="msg" id="new-error" style="color:var(--bad)"></div>
+    <div class="actions">
+      <button type="button" id="new-cancel">Cancel</button>
+      <button type="submit" id="new-ok" class="primary">Queue agent</button>
+    </div>
+  </form>
+</dialog>
+<div id="toast" role="status"></div>
+
+<script>
+"use strict";
+const ALL = "__all__";
+const STEERABLE = ["opening", "active", "finalizing"];
+// Assistant posts count as replies too, wherever they land
+const CONVERSATION_KINDS = ["note", "question", "operator", "stop", "finalize", "summary", "advice", "alert", "answer"];
+const ENTRY_FIELDS = new Set(["t", "kind", "text", "source"]);
+// kind -> [side, background variable, tag]; "right" is the operator's side (as in the Qt tab)
+const BUBBLES = {
+  note: ["left", "--b-note", ""], question: ["left", "--b-question", "Question"],
+  finalize: ["left", "--b-finalize", "Summary"], operator: ["right", "--b-operator", ""],
+  stop: ["right", "--b-stop", "Stop requested"],
+  summary: ["left", "--b-summary", "Summary"], advice: ["left", "--b-advice", "Advice"],
+  alert: ["left", "--b-alert", "Alert"], answer: ["left", "--b-answer", "Answer"],
+};
+const POSTS = {
+  summary: ["left", "--b-summary", "Summary"], advice: ["left", "--b-advice", "Advice"],
+  alert: ["left", "--b-alert", "Alert"], answer: ["left", "--b-answer", "Answer"],
+  operator: ["right", "--b-note", ""], error: ["left", "--b-question", "Assistant error"],
+};
+const ASSISTANT_STALE_S = 120;
+const ATT_RE = /!\[([^\]]*)\]\(att:([0-9A-Za-z_-]+)(?:\s+"[^"]*")?\)/g;
+const attUrl = (id) => `/api/attachments/${encodeURIComponent(id)}`;
+
+// ---------------------------------------------------------------- rich text
+// Agents write Markdown with $...$ math; figures are ![alt](att:ID). Plain text is the fallback.
+let md = null;
+const richCache = new Map();
+// Code spans/blocks are kept whole; math is $$..$$, \[..\], \(..\) or $..$ (no space inside the dollars, not before a digit)
+const MATH_RE = /(```[\s\S]*?```|`[^`\n]*`)|\$\$([\s\S]+?)\$\$|\\\[([\s\S]+?)\\\]|\\\(([\s\S]+?)\\\)|\$(?=[^\s$])((?:\\\$|[^$\n])*?[^\s\\])\$(?!\d)/g;
+
+function setupRich() {
+  if (md || !window.markdownit || !window.katex || !window.DOMPurify) return;
+  md = window.markdownit({html: false, linkify: true, breaks: true});
+  md.renderer.rules.image = (tokens, idx) => {
+    const t = tokens[idx];
+    const src = t.attrGet("src") || "";
+    const alt = t.content || "";
+    if (!src.startsWith("att:")) return esc(alt ? `[image: ${alt}]` : "[image]");  // no remote fetches
+    const url = attUrl(src.slice(4));
+    return `<a href="${url}" target="_blank" rel="noopener"><img class="fig" src="${url}" alt="${esc(alt)}" title="${esc(alt)}"></a>`;
+  };
+  DOMPurify.addHook("afterSanitizeAttributes", (node) => {
+    if (node.tagName === "A") { node.setAttribute("target", "_blank"); node.setAttribute("rel", "noopener noreferrer"); }
+    if (node.tagName === "IMG" && !(node.getAttribute("src") || "").startsWith("/api/attachments/")) node.remove();
+  });
+}
+
+function rich(text) {
+  text = String(text ?? "");
+  if (!md) return `<div class="plain">${esc(text)}</div>`;
+  let html = richCache.get(text);
+  if (html !== undefined) return html;
+  const math = [];
+  const src = text.replace(MATH_RE, (m, code, d1, d2, i1, i2) => {
+    if (code) return code;
+    const display = d1 !== undefined || d2 !== undefined;
+    const tex = d1 ?? d2 ?? i1 ?? i2;
+    math.push(katex.renderToString(tex, {displayMode: display, throwOnError: false, output: "html"}));
+    return `MATHPH${math.length - 1}END`;
+  });
+  html = md.render(src).replace(/MATHPH(\d+)END/g, (_, i) => math[Number(i)]);
+  html = `<div class="md">${DOMPurify.sanitize(html, {ADD_ATTR: ["target"]})}</div>`;
+  if (richCache.size > 2000) richCache.clear();
+  richCache.set(text, html);
+  return html;
+}
+
+// Text for plain places (the activity table): figures become [figure: alt]
+const plainText = (text) => String(text ?? "").replace(ATT_RE, (_, alt) => alt.trim() ? `[figure: ${alt.trim()}]` : "[figure]");
+
+function entryFigures(e) {
+  const out = [];
+  for (const m of String(e.text ?? "").matchAll(ATT_RE)) out.push({id: m[2], alt: m[1]});
+  for (const a of e.attachments || []) if (a && a.id) out.push({id: a.id, alt: a.alt || ""});
+  return out;
+}
+
+let snap = null;
+let selected = decodeURIComponent(location.hash.slice(1)) || null;
+// The session the operator chose; kept while its record is briefly missing (Redis restart)
+let wanted = selected;
+let rendered = {};
+const follow = {conversation: true, feed: true, activity: true};
+const $ = (id) => document.getElementById(id);
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+}
+function fmtTime(t, withDate) {
+  if (t == null) return "";
+  const d = new Date(Number(t) * 1000);
+  if (isNaN(d)) return String(t);
+  const p = (n) => String(n).padStart(2, "0");
+  const time = `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  return withDate ? `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${time}` : time;
+}
+function fmtDuration(s) {
+  s = Math.round(Math.abs(s));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  return h ? `${h}h${String(m).padStart(2, "0")}m` : `${m}m`;
+}
+const shortUid = (uid) => String(uid).slice(0, 8);
+const label = (uid, r) => `${r.agent_name || "?"} (${shortUid(uid)})`;
+const steerable = (r) => !!r && STEERABLE.includes(r.status);
+const waiting = (r) => !!r && !!r.awaiting_input && steerable(r);
+const statusText = (r) => waiting(r) ? "waiting for input" : String(r.status ?? "");
+const details = (e) => Object.entries(e).filter(([k]) => !ENTRY_FIELDS.has(k)).map(([k, v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : v}`).join(", ");
+const sortedSessions = (records) => Object.entries(records).sort((a, b) => (b[1].updated || b[1].opened || 0) - (a[1].updated || a[1].opened || 0));
+
+function toast(text) {
+  const el = $("toast");
+  el.textContent = text;
+  el.style.display = "block";
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => (el.style.display = "none"), 4000);
+}
+
+async function post(url, body) {
+  const res = await fetch(url, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  // Signed out (the token changed): reload to get the sign-in page
+  if (res.status === 401) location.reload();
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail ?? res.statusText));
+    err.status = res.status;
+    err.detail = data.detail;
+    throw err;
+  }
+  return data;
+}
+
+// Replace a scroller's contents only when they change, keeping the reader's place
+function setHtml(id, html) {
+  if (rendered[id] === html) return;
+  rendered[id] = html;
+  const el = $(id);
+  const pos = el.scrollTop;
+  el.innerHTML = html;
+  el.scrollTop = follow[id] ? el.scrollHeight : pos;
+}
+for (const id of Object.keys(follow)) {
+  $(id).addEventListener("scroll", () => {
+    const el = $(id);
+    follow[id] = el.scrollTop + el.clientHeight >= el.scrollHeight - 4;
+  });
+}
+// Figures load after layout; keep a followed view pinned to the newest message
+for (const id of Object.keys(follow)) {
+  $(id).addEventListener("load", () => { if (follow[id]) $(id).scrollTop = $(id).scrollHeight; }, true);
+}
+
+// ---------------------------------------------------------------- header
+function setPill(id, cls, main, sub, title) {
+  const el = $(id);
+  el.querySelector(".dot").className = "dot " + (cls || "");
+  el.children[1].textContent = main;
+  el.querySelector(".sub").textContent = sub || "";
+  if (title !== undefined) el.title = title;
+}
+
+function renderHeader() {
+  const errors = snap.errors || {};
+  const beam = snap.beam;
+  if (beam) {
+    const where = `Beam at ${beam.endstation || "endstation"}`;
+    if (beam.expected === true) setPill("beam", "ok", where, "expected", "Beam is expected at the endstation");
+    else if (beam.expected === false) setPill("beam", "bad", where, beam.reason ? `not expected: ${beam.reason}` : "not expected", beam.reason || "");
+    else setPill("beam", "", where, "unknown", beam.reason || "");
+  } else {
+    setPill("beam", "", "Beam", errors.beam ? "unavailable" : "no beam map", errors.beam || "No beam map published");
+  }
+  const m = snap.manager;
+  if (m) {
+    let sub = m.state || "?";
+    if (snap.running) sub += ` · running ${snap.running.name}`;
+    sub += ` · ${m.items_in_queue ?? 0} queued`;
+    if (m.queue_stop_pending) sub += " · stop pending";
+    const cls = m.state === "executing_queue" ? "ok" : m.environment_open === false ? "bad" : m.state === "idle" ? "" : "warn";
+    setPill("queue", cls, "Queue", sub, `manager ${m.state}, RE ${m.re_state}`);
+  } else {
+    setPill("queue", "bad", "Queue", "unreachable", errors.queue || "");
+  }
+  const alive = snap.runner_alive;
+  setPill("runner", alive === true ? "ok" : alive === false ? "bad" : "warn", "Agent runner",
+          alive === true ? "running" : alive === false ? "not running" : "unknown", errors.runner || "nbs-agents-runner heartbeat");
+  $("new-agent").disabled = alive === false || snap.read_only;
+  $("new-agent").hidden = snap.drivers === false;
+  $("new-agent").title = snap.read_only ? "This server runs with the read-only assistant role"
+    : alive === false ? "Start nbs-agents-runner first: it launches the Claude agent"
+    : "Queue a Claude agent session with a goal; the agent runner starts Claude";
+}
+
+// ---------------------------------------------------------------- agents
+function collectEntries(records, uid) {
+  const out = [];
+  for (const [u, r] of Object.entries(records)) {
+    if (uid !== ALL && u !== uid) continue;
+    for (const e of r.log || []) out.push([label(u, r), e, u]);
+  }
+  out.sort((a, b) => (a[1].t || 0) - (b[1].t || 0));
+  return out;
+}
+
+function bubble(lbl, e, open, showAgent) {
+  let [side, bg, tag] = BUBBLES[e.kind] || BUBBLES.note;
+  let who = lbl;
+  if (side === "right") {
+    who = [undefined, null, "gui", "web", "operator"].includes(e.source) ? "Operator" : `Operator (${e.source})`;
+    if (showAgent) who += ` to ${lbl}`;
+  }
+  if (open) { tag = "Waiting for your answer"; bg = "--b-question"; }
+  const tagHtml = tag ? ` · <span class="tag">${esc(tag)}</span>` : "";
+  return `<div class="row ${side}"><div class="bubble${open ? " open" : ""}" style="background:var(${bg})">` +
+    `<div class="hd"><b>${esc(who)}</b> · ${fmtTime(e.t)}${tagHtml}</div>${rich(e.text)}</div></div>`;
+}
+
+function renderSessions(records) {
+  const entries = sortedSessions(records);
+  const nWaiting = entries.filter(([, r]) => waiting(r)).length;
+  let html = `<button class="session${selected === ALL ? " sel" : ""}" data-uid="${ALL}"><div class="name">All agents (${entries.length})</div>` +
+    (nWaiting ? `<div class="meta"><span class="status waiting">${nWaiting} waiting for input</span></div>` : "") + `</button>`;
+  for (const [uid, r] of entries) {
+    const st = statusText(r);
+    const cls = waiting(r) ? "waiting" : esc(r.status || "");
+    html += `<button class="session${uid === selected ? " sel" : ""}${waiting(r) ? " waiting" : ""}" data-uid="${esc(uid)}" title="${esc(r.goal || "")}">` +
+      `<div class="name">${esc(label(uid, r))}</div>` +
+      `<div class="meta"><span class="status ${cls}">${esc(st)}</span> ${fmtTime(r.opened, true)}</div>` +
+      (r.goal ? `<div class="goal">${esc(r.goal)}</div>` : "") + `</button>`;
+  }
+  if (rendered.sessions !== html) { rendered.sessions = html; $("sessions").innerHTML = html; }
+  const tab = $("tab-agents");
+  tab.textContent = nWaiting ? `Agents Log (${nWaiting} waiting)` : "Agents Log";
+  tab.classList.toggle("waiting", nWaiting > 0);
+  document.title = nWaiting ? `(${nWaiting}) Beamline Agents` : "Beamline Agents";
+}
+
+function renderSummary(records) {
+  let html;
+  if (snap.errors && snap.errors.agent_log) {
+    html = `<span style="color:var(--bad)">Agent log unavailable: ${esc(snap.errors.agent_log)}</span>`;
+  } else if (selected === ALL) {
+    html = `${Object.keys(records).length} agent session(s) in the AGENT log`;
+  } else {
+    const r = records[selected];
+    const parts = [`<b>${esc(r.agent_name || "?")}</b> <span class="label">${esc(selected)}</span>`, `status: <b>${esc(statusText(r))}</b>`];
+    const budget = r.budget || {};
+    if (budget.time_s) {
+      const end = STEERABLE.includes(r.status) ? snap.time : (r.updated || snap.time);
+      const used = r.opened ? end - r.opened : 0;
+      parts.push(`budget: ${fmtDuration(used)} of ${fmtDuration(budget.time_s)}`);
+    } else if (r.budget) {
+      parts.push(`budget: ${esc(JSON.stringify(r.budget))}`);
+    }
+    html = parts.join(" · ");
+    if (r.goal) html += `<div class="goal"><span class="label">goal:</span> ${esc(r.goal)}</div>`;
+    if (budget.time_s && r.opened) {
+      const end = STEERABLE.includes(r.status) ? snap.time : (r.updated || snap.time);
+      const frac = (end - r.opened) / budget.time_s;
+      html += `<div class="budget" title="time used"><span class="${frac > 1 ? "over" : ""}" style="width:${Math.min(100, frac * 100).toFixed(1)}%"></span></div>`;
+    }
+    if (r.stop_requested) html += `<div><b>stop requested</b>: ${esc(r.stop_requested.text || "")}</div>`;
+    if (r.close_reason) html += `<div><span class="label">closed:</span> ${esc(r.close_reason)}</div>`;
+  }
+  if (rendered.summary !== html) { rendered.summary = html; $("summary").innerHTML = html; }
+}
+
+function renderBanner(records) {
+  const shown = selected === ALL ? records : {[selected]: records[selected]};
+  const list = sortedSessions(shown).filter(([, r]) => waiting(r));
+  const el = $("banner");
+  let html = "";
+  for (const [uid, r] of list) {
+    html += `<div><b>${esc(label(uid, r))} is waiting for your input</b> (asked ${fmtTime(r.awaiting_input.t)})`;
+    html += selected === ALL ? ` <a data-uid="${esc(uid)}">Reply</a><div class="q">${esc(r.awaiting_input.text)}</div>` : ". Reply in the box below.";
+    html += `</div>`;
+  }
+  el.style.display = html ? "block" : "none";
+  if (rendered.banner !== html) { rendered.banner = html; el.innerHTML = html; }
+}
+
+function renderLog(records) {
+  const pairs = collectEntries(records, selected);
+  const openTimes = new Set(Object.entries(records).filter(([, r]) => waiting(r)).map(([u, r]) => `${u}|${r.awaiting_input.t}`));
+  const conv = pairs.filter(([, e]) => CONVERSATION_KINDS.includes(e.kind));
+  const act = pairs.filter(([, e]) => !CONVERSATION_KINDS.includes(e.kind));
+  const showAgent = selected === ALL;
+  setHtml("conversation", conv.length
+    ? conv.map(([lbl, e, u]) => bubble(lbl, e, e.kind === "question" && openTimes.has(`${u}|${e.t}`), showAgent)).join("")
+    : `<div class="empty">No messages yet.</div>`);
+  const head = `<tr><th>Time</th>${showAgent ? "<th>Agent</th>" : ""}<th>Kind</th><th>Text</th><th>Details</th></tr>`;
+  const rows = act.map(([lbl, e]) => {
+    const d = details(e);
+    return `<tr><td class="t">${fmtTime(e.t)}</td>${showAgent ? `<td class="k">${esc(lbl)}</td>` : ""}<td class="k">${esc(e.kind)}</td>` +
+      `<td class="text">${esc(plainText(e.text))}</td><td class="d" title="${esc(d)}">${esc(d)}</td></tr>`;
+  }).join("");
+  setHtml("activity", `<table><thead>${head}</thead><tbody>${rows}</tbody></table>` + (act.length ? "" : `<div class="empty" style="padding:8px">No activity yet.</div>`));
+}
+
+function renderControls(records) {
+  const r = selected === ALL ? null : records[selected];
+  const can = steerable(r);
+  $("message").disabled = !can;
+  $("send").disabled = !can;
+  $("stop").disabled = !can || !!r.stop_requested;
+  $("message").placeholder = can && waiting(r) ? "Reply to the agent's question"
+    : can ? "Message to the selected agent"
+    : r ? `This session is ${r.status}` : "Choose a running agent to send it a message";
+}
+
+function renderBlock(records) {
+  let html = "";
+  const running = snap.running;
+  if (selected === ALL) {
+    html = `<div class="empty">Choose a session to see the plans it has queued.</div>`;
+  } else if (!snap.manager) {
+    html = `<div class="empty">Queue unavailable.</div>`;
+  } else {
+    if (running && running.agent_uid === selected) {
+      html += itemHtml(running, true);
+    }
+    const block = snap.blocks[selected] || [];
+    html += block.map((i) => itemHtml(i, false)).join("");
+    if (!html) html = `<div class="empty">${steerable(records[selected]) ? "Nothing queued in this session's block." : "Session is not running."}</div>`;
+  }
+  if (rendered.block !== html) { rendered.block = html; $("block").innerHTML = html; }
+}
+
+function renderFigures(records) {
+  const figs = [];
+  const seen = new Set();
+  for (const [lbl, e] of collectEntries(records, selected).reverse()) {
+    for (const f of entryFigures(e)) {
+      if (seen.has(f.id)) continue;
+      seen.add(f.id);
+      figs.push({...f, t: e.t, lbl});
+    }
+  }
+  const html = figs.length
+    ? figs.map((f) => `<a class="figure" href="${attUrl(f.id)}" target="_blank" rel="noopener"><img src="${attUrl(f.id)}" alt="${esc(f.alt)}" loading="lazy">` +
+        `<div class="cap">${esc(f.alt || "figure")} · ${fmtTime(f.t)}${selected === ALL ? ` · ${esc(f.lbl)}` : ""}</div></a>`).join("")
+    : `<div class="empty">Figures the agent attaches to its messages will appear here.</div>`;
+  if (rendered.figures !== html) { rendered.figures = html; $("plot-slot").innerHTML = html; }
+}
+
+function itemHtml(i, isRunning) {
+  const kw = i.kwargs ? Object.entries(i.kwargs).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(", ") : "";
+  return `<div class="item${isRunning ? " running" : ""}"><div><span class="nm">${esc(i.name)}</span>` +
+    `${isRunning ? ` <span class="status active">running</span>` : ""}${i.seq != null ? ` <span class="label" style="color:var(--muted)">#${esc(i.seq)}</span>` : ""}</div>` +
+    (kw ? `<div class="kw">${esc(kw)}</div>` : "") + (i.reason ? `<div class="why">${esc(i.reason)}</div>` : "") + `</div>`;
+}
+
+function renderAgents() {
+  const records = snap.sessions || {};
+  if (selected === null) {
+    const run = sortedSessions(records).find(([, r]) => steerable(r));
+    selected = run ? run[0] : ALL;
+  }
+  if (wanted && wanted !== ALL && records[wanted]) selected = wanted;
+  if (selected !== ALL && !records[selected]) selected = ALL;
+  renderSessions(records);
+  renderSummary(records);
+  renderBanner(records);
+  renderLog(records);
+  renderControls(records);
+  renderBlock(records);
+  renderFigures(records);
+}
+
+function select(uid) {
+  wanted = uid;
+  if (uid === selected) return;
+  selected = uid;
+  history.replaceState(null, "", uid === ALL ? location.pathname : `#${encodeURIComponent(uid)}`);
+  follow.conversation = follow.activity = true;
+  rendered.conversation = rendered.activity = null;
+  if (snap) renderAgents();
+}
+
+$("sessions").addEventListener("click", (ev) => { const b = ev.target.closest("[data-uid]"); if (b) select(b.dataset.uid); });
+$("banner").addEventListener("click", (ev) => { const a = ev.target.closest("a[data-uid]"); if (a) select(a.dataset.uid); });
+
+$("steer").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const text = $("message").value.trim();
+  if (!text || selected === ALL) return;
+  try {
+    await post(`/api/agents/${encodeURIComponent(selected)}/message`, {text});
+    $("message").value = "";
+    follow.conversation = true;
+  } catch (e) { toast(`Could not send message: ${e.message}`); }
+});
+
+$("stop").addEventListener("click", async () => {
+  const r = snap && snap.sessions[selected];
+  if (!r || !confirm(`Ask ${label(selected, r)} to stop adding scans and finalize?`)) return;
+  try {
+    await post(`/api/agents/${encodeURIComponent(selected)}/stop`, {text: $("message").value.trim()});
+    $("message").value = "";
+    follow.conversation = true;
+  } catch (e) { toast(`Could not request stop: ${e.message}`); }
+});
+
+// ---------------------------------------------------------------- new agent
+const dialog = $("new-dialog");
+function validateNew() {
+  const alive = snap ? snap.runner_alive : null;
+  const msg = $("runner-msg");
+  if (alive === true) { msg.textContent = "Agent runner: running"; msg.style.color = "var(--ok)"; }
+  else if (alive === false) { msg.textContent = "Agent runner: not running. Start it (pixi run agent-runner in nbs-agents) on a host where claude is logged in."; msg.style.color = "var(--bad)"; }
+  else { msg.textContent = "Agent runner: unknown. Could not read its heartbeat; the agent will only start if the runner is up."; msg.style.color = "var(--warn)"; }
+  $("new-ok").disabled = !$("goal").value.trim() || alive === false;
+}
+$("new-agent").addEventListener("click", () => {
+  $("new-error").textContent = "";
+  validateNew();
+  dialog.showModal();
+  $("goal").focus();
+});
+$("goal").addEventListener("input", validateNew);
+$("new-cancel").addEventListener("click", () => dialog.close());
+$("new-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const body = {goal: $("goal").value, budget: $("budget").value, start: $("start-queue").checked};
+  $("new-ok").disabled = true;
+  try {
+    let out;
+    try {
+      out = await post("/api/agents", body);
+    } catch (e) {
+      if (e.status !== 409 || !e.detail || !e.detail.busy) throw e;
+      const names = e.detail.busy.map((u) => snap.sessions[u] ? label(u, snap.sessions[u]) : shortUid(u)).join(", ");
+      if (!confirm(`${names} is still running. Queue another Claude session after it?`)) return;
+      out = await post("/api/agents", {...body, confirm_busy: true});
+    }
+    dialog.close();
+    $("goal").value = ""; $("budget").value = "";
+    if (out.started) toast("Agent queued and the queue started.");
+    else {
+      const where = out.position === 0 ? "at the head of the queue" : `behind ${out.position} item(s)`;
+      toast(`Queued ${where}. Claude starts when open_agent runs; start the queue when ready.`);
+    }
+  } catch (e) {
+    $("new-error").textContent = `Could not queue the agent: ${e.message}`;
+  } finally {
+    validateNew();
+  }
+});
+
+// ---------------------------------------------------------------- assistant
+function assistantState(r) {
+  if (!r) return ["Assistant: no record today (is the runner started with [assistant] enabled?)", "--warn"];
+  const beat = r.heartbeat;
+  if (["stopped", "closed"].includes(r.status) || beat == null || snap.time - Number(beat) > ASSISTANT_STALE_S) return ["Assistant: not running", "--bad"];
+  if (r.status === "calling") return ["Assistant: thinking…", "--accent"];
+  return ["Assistant: watching", "--ok"];
+}
+function callSummary(r) {
+  if (!r) return "";
+  let text = `${r.calls || 0} call(s) today`;
+  const last = r.last_call || {};
+  if (Object.keys(last).length) {
+    text += ` · last at ${fmtTime(last.t)}`;
+    if (last.reasons && last.reasons.length) text += ` for ${last.reasons.join(", ")}`;
+    if (last.model) text += ` (${last.model})`;
+    if (![undefined, null, 0].includes(last.returncode)) text += `, exit ${last.returncode}`;
+  }
+  if (r.pending) text += ` · ${r.pending} event(s) waiting`;
+  return text;
+}
+const runLink = (uid) => `<a class="run" data-run="${esc(uid)}">${esc(String(uid).slice(0, 8))}</a>`;
+function assistantEntry(e) {
+  if (e.kind === "run") {
+    let line = `<span class="t">${fmtTime(e.t)}</span> ${esc(e.text)}${e.run_uid ? " " + runLink(e.run_uid) : ""}`;
+    for (const a of e.alerts || []) line += `<br>&nbsp;&nbsp;<span class="alert">alert:</span> ${esc(a)}`;
+    for (const f of e.flags || []) line += `<br>&nbsp;&nbsp;<span class="flag">flag:</span> ${esc(f)}`;
+    return `<div class="runline">${line}</div>`;
+  }
+  const [side, bg, tag] = POSTS[e.kind] || ["left", "--b-note", String(e.kind)];
+  const who = side === "right" ? "Operator" : "Assistant";
+  let body = rich(e.text);
+  if (e.run_uids && e.run_uids.length) body += `<div class="hd" style="margin-top:4px">runs: ${e.run_uids.map(runLink).join(", ")}</div>`;
+  return `<div class="row ${side}"><div class="bubble" style="background:var(${bg})"><div class="hd"><b>${who}</b> · ${fmtTime(e.t)}` +
+    `${tag ? ` · <span class="tag">${esc(tag)}</span>` : ""}</div>${body}</div></div>`;
+}
+function renderAssistant() {
+  const r = snap.assistant;
+  const [text, color] = snap.errors && snap.errors.agent_log ? [`Assistant unavailable: ${snap.errors.agent_log}`, "--bad"] : assistantState(r);
+  const st = $("assistant-state");
+  st.textContent = text;
+  st.style.color = `var(${color})`;
+  $("calls").textContent = callSummary(r);
+  const showRuns = $("show-runs").checked;
+  const entries = ((r && r.log) || []).filter((e) => showRuns || e.kind !== "run");
+  setHtml("feed", entries.length ? entries.map(assistantEntry).join("") : `<div class="empty">Nothing from the assistant yet today.</div>`);
+  const ok = !(snap.errors && snap.errors.agent_log);
+  $("question").disabled = !ok; $("ask").disabled = !ok;
+}
+$("show-runs").addEventListener("change", () => snap && renderAssistant());
+$("feed").addEventListener("click", async (ev) => {
+  const a = ev.target.closest("a[data-run]");
+  if (!a) return;
+  const uid = a.dataset.run;
+  try { await navigator.clipboard.writeText(uid); $("ask-status").textContent = `Copied run ${uid} to the clipboard`; }
+  catch { $("ask-status").textContent = `Run ${uid}`; }
+});
+$("ask-row").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const text = $("question").value.trim();
+  if (!text) return;
+  try {
+    await post("/api/assistant/ask", {text});
+    $("question").value = "";
+    follow.feed = true;
+    $("ask-status").textContent = "";
+  } catch (e) { toast(`Could not send the question: ${e.message}`); }
+});
+
+// ---------------------------------------------------------------- tabs, stream
+for (const btn of document.querySelectorAll("nav button")) {
+  btn.addEventListener("click", () => {
+    for (const b of document.querySelectorAll("nav button")) b.classList.toggle("active", b === btn);
+    for (const v of document.querySelectorAll(".view")) v.classList.toggle("active", v.id === btn.dataset.view);
+    for (const id of Object.keys(follow)) { const el = $(id); if (follow[id]) el.scrollTop = el.scrollHeight; }
+  });
+}
+
+function renderTiledLogin() {
+  // The runner is waiting for a Tiled (Entra ID) login to make the agents' read-only key
+  const el = $("tiled-login"), t = snap.tiled_login;
+  el.style.display = t ? "block" : "none";
+  if (t) el.innerHTML = `Tiled needs you to log in so agents can read data: open ` +
+    `<a href="${esc(t.url)}" target="_blank" rel="noopener">${esc(t.url)}</a> and enter <code>${esc(t.code || "")}</code>`;
+}
+
+// ---------------------------------------------------------------- knowledge base
+// Staff review what agents wrote (approve, keep, reject), and write or edit profile notes.
+let kb = null, kbSel = null, kbPending = null;
+const kbKey = (kind, id) => `${kind}:${id}`;
+const KB_ORIGIN = {human: "profile note", agent: "agent note", draft: "draft"};
+const kbOrigin = (n) => n.draft ? "draft" : n.id.startsWith("agent/") ? "agent" : "human";
+
+try { $("kb-who").value = localStorage.getItem("kb-who") || ""; } catch (e) {}
+$("kb-who").addEventListener("change", () => { try { localStorage.setItem("kb-who", $("kb-who").value.trim()); } catch (e) {} });
+$("kb-filter").addEventListener("input", renderKbList);
+
+function kbWho() {
+  const who = $("kb-who").value.trim();
+  if (!who) { $("kb-who").focus(); toast("Type your name first: it is recorded with what you approve or write."); }
+  return who;
+}
+
+async function loadKb() {
+  try {
+    const res = await fetch("/api/kb");
+    if (res.status === 401) return location.reload();
+    kb = await res.json();
+    if (!res.ok) throw new Error(kb.detail || res.statusText);
+  } catch (e) { toast(`Could not read the knowledge base: ${e.message}`); return; }
+  renderKbList();
+  if (kbSel && kbSel.kind !== "new") selectKb(kbSel.kind, kbSel.id, true);
+}
+
+function kbItem(kind, id, title, meta, pending) {
+  const sel = kbSel && kbKey(kbSel.kind, kbSel.id) === kbKey(kind, id) ? " sel" : "";
+  return `<button class="kb-item${sel}${pending ? " pending" : ""}" data-kind="${kind}" data-id="${esc(id)}">` +
+    `<div>${esc(title)}</div><div class="meta">${esc(meta)}</div></button>`;
+}
+
+function renderKbList() {
+  if (!kb) return;
+  const f = $("kb-filter").value.trim().toLowerCase();
+  const hit = (n) => !f || `${n.id} ${n.title} ${n.topic || ""}`.toLowerCase().includes(f);
+  const q = kb.queue;
+  let html = `<div class="kb-group">To review (${q.count})</div>`;
+  for (const n of q.notes.filter(hit)) html += kbItem("review", n.id, n.title, `${KB_ORIGIN[kbOrigin(n)]} by ${n.author || "?"}`, true);
+  for (const a of q.appendices.filter(hit)) html += kbItem("appendix", a.id, a.title, `${a.entries.length} appended ${a.entries.length === 1 ? "entry" : "entries"}`, true);
+  if (!q.count) html += `<div class="kb-group" style="text-transform:none">Nothing waiting.</div>`;
+  html += `<div class="kb-group">All notes (${kb.notes.length})</div>`;
+  for (const n of kb.notes.filter(hit)) html += kbItem("note", n.id, n.title, `${KB_ORIGIN[kbOrigin(n)]}${n.topic ? " · " + n.topic : ""}`);
+  $("kb-list").innerHTML = html;
+}
+$("kb-list").addEventListener("click", (ev) => {
+  const b = ev.target.closest(".kb-item");
+  if (b) selectKb(b.dataset.kind, b.dataset.id);
+});
+$("kb-new").addEventListener("click", () => { kbSel = {kind: "new", id: ""}; renderKbList(); kbForm(null, "new"); });
+
+async function selectKb(kind, id, quiet) {
+  kbSel = {kind, id};
+  renderKbList();
+  try {
+    const res = await fetch(`/api/kb/note?id=${encodeURIComponent(id)}`);
+    const note = await res.json();
+    if (!res.ok) throw new Error(note.detail || res.statusText);
+    if (kind === "appendix") kbAppendix(note);
+    else kbForm(note, kind === "review" ? "review" : kbOrigin(note) === "human" ? "human" : "view");
+  } catch (e) {
+    if (!quiet) toast(`Could not open ${id}: ${e.message}`);
+    $("kb-detail").innerHTML = `<div class="from">That note is gone (approved, rejected or moved).</div>`;
+  }
+}
+
+const listText = (v) => Array.isArray(v) ? v.join(", ") : (v || "");
+
+function kbForm(note, mode) {
+  const m = note ? note.meta || {} : {};
+  const from = !note ? "A new note in the profile's knowledge folder. Agents use it as soon as you save it; commit it with git." :
+    `${KB_ORIGIN[kbOrigin(note)]} <code>${esc(note.id)}</code> by ${esc(m.author || "?")}` +
+    (m.created ? `, ${esc(m.created)}` : "") + (m.approved_by ? `; approved by ${esc(m.approved_by)}` : "") +
+    (m.edited_by ? `; edited by ${esc(m.edited_by)}` : "");
+  const editable = mode !== "view";
+  const ro = editable ? "" : " disabled";
+  let html = `<div class="from">${from}</div>`;
+  if (mode === "review") html += `<p class="from">${note.draft ? "Drafts are not used by agents until approved." :
+    "Agents already use this note, marked as written by an agent."} Approving writes it, with your edits, into the profile's knowledge folder for you to commit.</p>`;
+  html += `<label for="kb-title">Title</label><input type="text" id="kb-title" value="${esc(note ? note.title : "")}"${ro}>` +
+    `<div class="grid">` +
+    ["topic", "devices", "nodes", "tags"].map((k) => `<div><label for="kb-${k}">${k[0].toUpperCase() + k.slice(1)}</label>` +
+      `<input type="text" id="kb-${k}" value="${esc(listText(m[k]))}" placeholder="${k === "topic" ? "hardware, problem, calibration, quirk, procedure" : "comma-separated"}"${ro}></div>`).join("") +
+    `</div><label for="kb-body">Text (Markdown)</label>` +
+    (editable ? `<textarea id="kb-body" rows="14">${esc(note ? note.body : "")}</textarea>` : "") +
+    `<div class="actions">` +
+    (mode === "review" ? `<button id="kb-approve" class="primary">Approve into profile</button>` +
+      (note.draft ? "" : `<button id="kb-keep" title="Leave it as an agent note and take it off the list">Keep as agent note</button>`) +
+      `<button id="kb-reject" class="danger">Reject…</button>` : "") +
+    (mode === "human" || mode === "new" ? `<button id="kb-save" class="primary">Save to profile</button>` : "") +
+    `</div><label>Preview</label><div class="kb-preview md" id="kb-preview"></div>`;
+  if (note && note.appendix) html += `<label>Appended</label><div class="kb-preview md">${rich(note.appendix)}</div>`;
+  $("kb-detail").innerHTML = html;
+  const preview = () => { $("kb-preview").innerHTML = rich(editable ? $("kb-body").value : note.body); };
+  preview();
+  if (editable) $("kb-body").addEventListener("input", preview);
+  const fields = () => ({
+    id: note ? note.id : "", title: $("kb-title").value, body: $("kb-body").value,
+    topic: $("kb-topic").value.trim(), devices: $("kb-devices").value, nodes: $("kb-nodes").value, tags: $("kb-tags").value,
+  });
+  const act = async (url, body, done) => {
+    const by = kbWho();
+    if (!by) return;
+    try { const out = await post(url, {...body, by}); toast(done(out)); }
+    catch (e) { toast(e.message); return; }
+    await loadKb();
+  };
+  const on = (id, fn) => { const el = $(id); if (el) el.addEventListener("click", fn); };
+  on("kb-approve", () => act("/api/kb/approve", fields(), (out) => { kbSel = {kind: "note", id: out.id}; return `Approved as ${out.id}`; }));
+  on("kb-keep", () => act("/api/kb/keep", {id: note.id}, () => { kbSel = null; $("kb-detail").innerHTML = ""; return "Kept as an agent note"; }));
+  on("kb-reject", () => {
+    const reason = prompt("Why reject it? (kept with the rejected note)");
+    if (reason === null) return;
+    act("/api/kb/reject", {id: note.id, reason}, () => { kbSel = null; $("kb-detail").innerHTML = ""; return "Rejected"; });
+  });
+  on("kb-save", () => act("/api/kb/note", fields(), (out) => { kbSel = {kind: "note", id: out.id}; return `Saved ${out.id}`; }));
+}
+
+function kbAppendix(note) {
+  const pending = (kb.queue.appendices.find((a) => a.id === note.id) || {entries: []}).entries.map((e) => e.index);
+  let html = `<div class="from">${KB_ORIGIN[kbOrigin(note)]} <code>${esc(note.id)}</code></div>` +
+    `<h3 style="margin:6px 0">${esc(note.title)}</h3><div class="kb-preview md">${rich(note.body)}</div>` +
+    `<label style="display:block;margin:12px 0 0;font-weight:600">Appended by agents</label>`;
+  for (const e of note.entries) {
+    html += `<div class="kb-entry"${pending.includes(e.index) ? ` style="border-color:var(--warn-border)"` : ""}>` +
+      `<div class="head"><span>${esc(e.author)}, ${esc(e.at)}${pending.includes(e.index) ? " · not reviewed" : ""}</span>` +
+      `<button class="danger" data-remove="${e.index}">Remove…</button></div><div class="md">${rich(e.text)}</div></div>`;
+  }
+  html += `<div class="actions"><button id="kb-seen" class="primary">Mark all reviewed</button></div>` +
+    `<p class="from">To fold an entry into a note, edit the note, then mark the entries reviewed or remove them.</p>`;
+  $("kb-detail").innerHTML = html;
+  const act = async (url, body, done) => {
+    const by = kbWho();
+    if (!by) return;
+    try { await post(url, {...body, by, id: note.id}); toast(done); } catch (e) { toast(e.message); return; }
+    await loadKb();
+  };
+  $("kb-seen").addEventListener("click", () => act("/api/kb/appendix/reviewed", {}, "Marked reviewed"));
+  for (const b of $("kb-detail").querySelectorAll("[data-remove]")) {
+    b.addEventListener("click", () => {
+      const reason = prompt("Why remove this entry? (a copy is kept)");
+      if (reason !== null) act("/api/kb/appendix/remove", {index: Number(b.dataset.remove), reason}, "Entry removed");
+    });
+  }
+}
+
+function renderKbTab() {
+  const n = snap.kb_pending;
+  const tab = $("tab-kb");
+  tab.textContent = n ? `Knowledge (${n} to review)` : "Knowledge";
+  tab.classList.toggle("waiting", !!n);
+  // Refresh the open tab when the queue changes; editing in progress is left alone
+  if (n !== kbPending) {
+    kbPending = n;
+    if ($("kb-view").classList.contains("active") && !(kbSel && ["new", "review", "note"].includes(kbSel.kind) && document.activeElement && $("kb-detail").contains(document.activeElement))) loadKb();
+  }
+}
+$("tab-kb").addEventListener("click", loadKb);
+
+function render() {
+  renderTiledLogin();
+  renderHeader();
+  renderAgents();
+  renderAssistant();
+  renderKbTab();
+}
+
+function connect() {
+  const es = new EventSource("/api/events");
+  es.onopen = () => { $("conn").textContent = "live"; $("conn").style.color = "var(--ok)"; };
+  es.onmessage = (ev) => { snap = JSON.parse(ev.data); render(); };
+  es.onerror = () => { $("conn").textContent = "reconnecting…"; $("conn").style.color = "var(--warn)"; };
+}
+window.onRichReady = () => {
+  setupRich();
+  rendered = {};
+  if (snap) render();
+};
+if (window.richLibs === 3) window.onRichReady();
+connect();
+</script>
+</body>
+</html>
