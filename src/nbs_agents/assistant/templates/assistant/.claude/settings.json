@@ -1,0 +1,44 @@
+{
+  "permissions": {
+    "allow": [
+      "Skill",
+      "Read",
+      "Glob",
+      "Grep",
+      "Edit(./notebook/**)",
+      "Bash(sandbox-python:*)",
+      "Bash(nbs-cli state:*)",
+      "Bash(nbs-cli beam:*)",
+      "Bash(nbs-cli plans:*)",
+      "Bash(nbs-cli devices:*)",
+      "Bash(nbs-cli device:*)",
+      "Bash(nbs-cli diagnose:*)",
+      "Bash(nbs-cli run:*)",
+      "Bash(nbs-cli runs:*)",
+      "Bash(nbs-cli log:*)",
+      "Bash(nbs-cli post:*)",
+      "Bash(nbs-cli attach:*)"
+    ],
+    "deny": [
+      "Bash(nbs-cli open:*)",
+      "Bash(nbs-cli add:*)",
+      "Bash(nbs-cli remove:*)",
+      "Bash(nbs-cli abort:*)",
+      "Bash(nbs-cli finalize:*)",
+      "Bash(nbs-cli note:*)",
+      "Bash(nbs-cli ask:*)",
+      "Bash(nbs-cli tell:*)",
+      "Bash(nbs-cli stop:*)",
+      "Bash(nbs-cli wait:*)",
+      "Bash(nbs-cli --role:*)",
+      "Bash(qserver:*)",
+      "WebFetch",
+      "WebSearch",
+      "Bash(python:*)",
+      "Bash(python3:*)"
+    ]
+  },
+  "env": {
+    "NBS_CLI_ROLE": "assistant"
+  }
+}

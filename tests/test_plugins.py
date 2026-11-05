@@ -180,3 +180,38 @@ def test_sample_layout_comes_from_a_plugin(monkeypatch):
     }))
     assert sample_layout({"s1": {}}) == {"n": 1}
 
+
+def test_skills_get_beamline_addenda(monkeypatch, tmp_path):
+    import importlib.metadata
+
+    from nbs_agents.assistant import resources
+
+    generic = (resources.SKILLS_DIR / "beamline-steering" / "SKILL.md").read_text()
+    monkeypatch.setattr(importlib.metadata, "entry_points", fake_entry_points({}))
+    assert resources.skill_text("beamline-steering") == generic
+    monkeypatch.setattr(importlib.metadata, "entry_points", fake_entry_points({
+        resources.SKILL_ADDENDA_ENTRY_POINT: [("bl", "plugin_targets:ADDENDA")],
+    }))
+    text = resources.skill_text("beamline-steering")
+    assert text.startswith(generic.rstrip()) and text.endswith("Use the red button.\n")
+    assert resources.skill_text("beamline-knowledge").startswith("---\nname: beamline-knowledge")
+
+    # An old symlink to the skill folder is replaced by the combined file
+    old = tmp_path / ".claude" / "skills" / "beamline-steering"
+    old.parent.mkdir(parents=True)
+    old.symlink_to(resources.SKILLS_DIR / "beamline-steering")
+    folder = resources.install_skill("beamline-steering", str(tmp_path))
+    assert not folder.is_symlink() and (folder / "SKILL.md").read_text() == text
+    assert resources.write_prompt("beamline-steering", str(tmp_path)).read_text() == text
+    assert (resources.SKILLS_DIR / "beamline-steering" / "SKILL.md").read_text() == generic
+
+
+def test_code_paths_cover_this_environment():
+    import sys
+    from pathlib import Path
+
+    from nbs_agents.assistant import resources
+
+    found = resources.code_paths()
+    assert any(Path(sys.prefix).resolve().is_relative_to(p) for p in found)
+    assert any(resources.HERE.is_relative_to(p) for p in found)

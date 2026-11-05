@@ -1,0 +1,240 @@
+#!/usr/bin/env bash
+# Start a Claude Code agent that opens an nbs-cli session and waits for
+# operator steering (Agents Log tab, `nbs-cli tell`, `nbs-cli stop`).
+#
+# When NBS_AGENT_UID is set (nbs-agents-runner does this for a session opened
+# with "New agent…" in nbs-gui), the session is already open: the agent attaches
+# to it, nbs-cli acts on it through NBS_AGENT_UID, and NBS_AGENT_GOAL is its goal.
+#
+#   claude-beamline              interactive: watch the transcript in this terminal
+#   claude-beamline --headless   unattended: claude -p, stream-json to stdout
+#   claude-beamline --headless --role assistant
+#                                one read-only beamline-assistant call; the runner
+#                                passes the triggering events in NBS_ASSISTANT_PROMPT
+#
+# Extra arguments are passed to claude. NBS_CLI_CONFIG selects the nbs-cli config
+# (default config/nbs-cli.toml under $NBS_AGENTS_HOME). Run it from the folder you want the agent to
+# work in (plots, scratch files); the assistant runs in its own workdir.
+#
+#   claude-beamline --beamline NAME ...
+#                                use that beamline's files under $NBS_AGENTS_HOME
+#                                (default $NBS_BEAMLINE, which the runner sets, or the
+#                                only one set up)
+#
+# NBS_ENV_DIR names the python environment holding nbs-cli (the runner and the
+# claude-beamline console script set it; default: the one nbs-cli on PATH is in).
+#
+# `--sandbox NAME` (else NBS_CLAUDE_SANDBOX, else [nbs_cli] claude_sandbox, default
+# none) picks the wrapper Claude runs in. `bwclaude` (n2snscripts) runs it through
+# the NSLS-II API gateway, as beamline packages such as sst-assistant set by
+# default; `none` runs it directly. The gateway host and key come from
+# AIFAPIM_HOST and AIFAPIM_API_KEY in the environment (usually loaded from a
+# gpg-encrypted .env before the runner starts). Without them, they are sourced from
+# NBS_GATEWAY_ENV (default the beamline's config/gateway.env), which must be mode 600.
+# NBS_BWCLAUDE names the wrapper if it is not on PATH.
+set -euo pipefail
+
+here="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+
+if [[ -z "${NBS_ENV_DIR:-}" ]]; then
+    nbs_cli="$(command -v nbs-cli || true)"
+    [[ -n "$nbs_cli" ]] || { echo "nbs-cli not found; set NBS_ENV_DIR to its python environment" >&2; exit 1; }
+    NBS_ENV_DIR="$(dirname "$(dirname "$nbs_cli")")"
+fi
+export NBS_ENV_DIR
+python="$NBS_ENV_DIR/bin/python"
+[[ -x "$python" ]] || { echo "no python at $python; check NBS_ENV_DIR" >&2; exit 1; }
+
+headless=0
+role=driver
+sandbox="${NBS_CLAUDE_SANDBOX:-}"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --headless) headless=1; shift ;;
+        --role) role="${2:?--role needs driver or assistant}"; shift 2 ;;
+        --sandbox) sandbox="${2:?--sandbox needs bwclaude or none}"; shift 2 ;;
+        --beamline) export NBS_BEAMLINE="${2:?--beamline needs a name}"; shift 2 ;;
+        # Inside bwclaude: restore the NBS_* settings its clean environment dropped.
+        --env)
+            name="${2%%=*}"
+            [[ "$name" =~ ^NBS_[A-Z0-9_]+$ ]] || { echo "--env takes NBS_NAME=value" >&2; exit 2; }
+            export "$name=${2#*=}"
+            shift 2 ;;
+        *) break ;;
+    esac
+done
+if [[ -z "$sandbox" ]]; then
+    sandbox="$("$python" -c 'from nbs_agents.cli.config import CliConfig
+print(CliConfig.load().claude_sandbox)')"
+fi
+
+case "$sandbox" in
+    ""|none) ;;
+    bwclaude)
+        bwclaude="${NBS_BWCLAUDE:-$(command -v bwclaude || true)}"
+        [[ -x "$bwclaude" ]] || { echo "bwclaude not found; put it on PATH or set NBS_BWCLAUDE" >&2; exit 1; }
+
+        # Default file locations come from nbs_agents.paths ($NBS_AGENTS_HOME).
+        read -r default_keyfile default_config < <("$python" -c 'from nbs_agents.paths import paths
+p = paths(); print(p.gateway_env, p.config_file)')
+        # The read-only Tiled key nbs-agents-runner keeps for agents (never the user's login)
+        tiled_key="$("$python" -c 'from nbs_agents.cli.config import CliConfig
+from nbs_agents.paths import paths
+print(CliConfig.load().tiled_api_key_file or paths().tiled_agent_key)')"
+        # Gateway host and key: the environment first, else a key file. The key is
+        # never printed: only the file's owner and mode are checked.
+        if [[ -z "${AIFAPIM_API_KEY:-}" || -z "${AIFAPIM_HOST:-}" ]]; then
+            keyfile="${NBS_GATEWAY_ENV:-$default_keyfile}"
+            [[ -f "$keyfile" ]] || { echo "set AIFAPIM_HOST and AIFAPIM_API_KEY (or write them to $keyfile)" >&2; exit 1; }
+            [[ -O "$keyfile" ]] || { echo "gateway key file $keyfile is not yours" >&2; exit 1; }
+            [[ "$(stat -c %a "$keyfile")" == 600 ]] || { echo "gateway key file $keyfile must be mode 600" >&2; exit 1; }
+            set -a
+            # shellcheck source=/dev/null
+            source "$keyfile"
+            set +a
+            [[ -n "${AIFAPIM_API_KEY:-}" && -n "${AIFAPIM_HOST:-}" ]] \
+                || { echo "$keyfile must set AIFAPIM_API_KEY and AIFAPIM_HOST" >&2; exit 1; }
+        fi
+
+        # bwclaude hides $HOME: mount the python environment and the source of its
+        # editable installs (scripts, skills), the nbs-cli config and the
+        # attachment store nbs-cli writes figures to.
+        attachments="$("$python" -c 'from nbs_agents.cli.config import CliConfig
+from nbs_agents.assistant.attachments import AttachmentStore
+print(AttachmentStore(CliConfig.load().attachments_dir or None).root)')"
+        mkdir -p "$attachments"
+        # bwclaude mounts every path at its resolved location, so a path through
+        # a symlink is missing inside: hand nbs-cli the resolved paths.
+        attachments="$(readlink -f "$attachments")"
+        export NBS_ATTACHMENTS_DIR="$attachments"
+        mounts=(--rw-path "$attachments")
+        while IFS= read -r code; do
+            mounts+=(--ro-path "$code")
+        done < <("$python" -m nbs_agents.assistant.resources code-paths)
+        # Knowledge base: human notes and the review record read-only, so agents
+        # can only append through nbs-cli and never approve their own notes; the
+        # agent folder holds their notes, drafts and appendices.
+        read -r kb_human kb_agent kb_review < <("$python" -c 'from nbs_agents.cli.config import CliConfig
+from nbs_agents.cli.kb import KnowledgeBase
+c = CliConfig.load(); kb = KnowledgeBase(c.kb_dir, c.kb_agent_dir, c.kb_review_dir)
+print(kb.human_dir or "-", kb.agent_dir, kb.review_dir)')
+        mkdir -p "$kb_agent" "$kb_review"
+        kb_agent="$(readlink -f "$kb_agent")" kb_review="$(readlink -f "$kb_review")"
+        export NBS_KB_AGENT_DIR="$kb_agent" NBS_KB_REVIEW_DIR="$kb_review"
+        mounts+=(--rw-path "$kb_agent" --ro-path "$kb_review")
+        if [[ "$kb_human" != - && -d "$kb_human" ]]; then
+            kb_human="$(readlink -f "$kb_human")"
+            export NBS_KB_DIR="$kb_human"
+            mounts+=(--ro-path "$kb_human")
+        fi
+        # The profile's beam_map.toml names the status PVs nbs-cli reads
+        beam_map_file="$("$python" -c 'import os
+from nbs_agents.cli.config import CliConfig
+print(os.path.expanduser(CliConfig.load().beam_map_file) or "-")')"
+        if [[ "$beam_map_file" != - && -f "$beam_map_file" ]]; then
+            # bwclaude mounts the resolved path, so name that one inside too
+            beam_map_file="$(readlink -f "$beam_map_file")"
+            mounts+=(--ro-path "$beam_map_file")
+            export NBS_BEAM_MAP_FILE="$beam_map_file"
+        fi
+        config="${NBS_CLI_CONFIG:-$default_config}"
+        [[ -f "$config" ]] && config="$(readlink -f "$config")" && mounts+=(--ro-path "$config")
+        # Name it explicitly inside, where $HOME looks different
+        export NBS_CLI_CONFIG="$config"
+        # An encrypted beamline Redis: nbs-cli inside needs its password file
+        redis_secret="$("$python" -c 'import os
+from nbs_agents.cli.config import CliConfig
+from nbs_agents.redisclient import DEFAULT_SECRET_FILE
+c = CliConfig.load()
+print((c.redis_password_file or os.environ.get("REDIS_SECRET_FILE") or DEFAULT_SECRET_FILE) if c.redis_ssl else "-")')"
+        if [[ "$redis_secret" != - ]]; then
+            [[ -r "$redis_secret" ]] || { echo "redis_ssl is on but $redis_secret is not readable" >&2; exit 1; }
+            mounts+=(--ro-path "$redis_secret")
+            export NBS_REDIS_PASSWORD_FILE="$redis_secret"
+        fi
+        # Mount the key's folder, not the file, so the runner's replacements show through
+        mkdir -p -m 700 "$(dirname "$tiled_key")"
+        mounts+=(--ro-path "$(dirname "$tiled_key")")
+        export NBS_TILED_API_KEY_FILE="$tiled_key"
+
+        # ~/.claude/skills is hidden too, so give the driver its skill in the workdir.
+        if [[ "$role" == driver ]]; then
+            "$python" -m nbs_agents.assistant.resources skill beamline-steering
+        fi
+
+        # Already inside the sandbox: the inner run must not start another
+        inner=(--sandbox none --role "$role")
+        [[ $headless == 1 ]] && inner+=(--headless)
+        while IFS= read -r name; do
+            [[ "$name" == NBS_* && "$name" != NBS_CLAUDE_SANDBOX ]] && inner+=(--env "$name=${!name}")
+        done < <(compgen -e)
+        unset NBS_CLAUDE_SANDBOX
+        exec "$bwclaude" "${mounts[@]}" --exec "$here/claude-beamline" "${inner[@]}" "$@"
+        ;;
+    *) echo "unknown --sandbox $sandbox; use bwclaude or none" >&2; exit 2 ;;
+esac
+
+# Put nbs-cli on PATH from the python environment unless one is already there.
+if ! command -v nbs-cli >/dev/null 2>&1; then
+    export PATH="$NBS_ENV_DIR/bin:$PATH"
+fi
+command -v nbs-cli >/dev/null 2>&1 || { echo "nbs-cli not found in $NBS_ENV_DIR/bin" >&2; exit 1; }
+
+# Both roles read and add to the beamline knowledge base (nbs-cli kb). Skills are
+# written into the workdir with any beamline addenda appended.
+"$python" -m nbs_agents.assistant.resources skill beamline-knowledge
+
+system=()
+case "$role" in
+    driver)
+        # Mark this agent as the session's driver, so observers running `nbs-cli state`
+        # see its operator messages without marking them read.
+        export NBS_DRIVER="${NBS_DRIVER:-claude-beamline-$$-$(date +%s)}"
+
+        if [[ -n "${NBS_AGENT_UID:-}" ]]; then
+            prompt="Use the beamline-steering skill. Agent session ${NBS_AGENT_UID} is already open for you"
+            prompt+=" with goal: ${NBS_AGENT_GOAL:-none given}. nbs-cli acts on it through NBS_AGENT_UID;"
+            prompt+=" do not run nbs-cli open. Follow the goal's own instructions on approval: if it grants a"
+            prompt+=" standing go, post your plan as a note and proceed; otherwise post the plan and ask before"
+            prompt+=" queueing anything."
+        else
+            prompt="Use the beamline-steering skill. Open an nbs-cli session and wait for operator steering."
+        fi
+        # Analysis: python only inside sandbox-python (no network, writes only the
+        # workdir); Write and Edit only in the workdir (Edit rules cover Write).
+        # Plain python stays disallowed.
+        export PATH="$here:$PATH"
+        tools=("Bash(nbs-cli:*)" "Read" "Skill" "Bash(sandbox-python:*)"
+               "Edit(./**)" "Glob" "Grep")
+        ;;
+    assistant)
+        # Read-only: nbs-cli refuses every verb that changes the queue or a driver's session.
+        export NBS_CLI_ROLE=assistant
+        unset NBS_AGENT_UID NBS_AGENT_GOAL
+        prompt="${NBS_ASSISTANT_PROMPT:-Follow the beamline assistant instructions in your system prompt. Review the latest runs and post anything the operator should know.}"
+        # The assistant's skill goes into the system prompt rather than being
+        # loaded as a skill: it is then part of the prefix every call shares,
+        # which the API caches, and no turn is spent loading it.
+        system=(--append-system-prompt-file "$("$python" -m nbs_agents.assistant.resources prompt beamline-assistant)")
+        # Analysis only in sandbox-python, as for the driver; plain python is not allowed.
+        export PATH="$here:$PATH"
+        tools=("Read" "Skill" "Glob" "Grep" "Edit(./notebook/**)"
+               "Bash(sandbox-python:*)" "Bash(nbs-cli post:*)")
+        for verb in state beam plans samples devices device diagnose run runs log attach kb; do
+            tools+=("Bash(nbs-cli $verb:*)")
+        done
+        ;;
+    *) echo "unknown --role $role; use driver or assistant" >&2; exit 2 ;;
+esac
+
+# Claude Code's Bash sandbox (enforced by NSLS-II's managed settings) gives each
+# command no network, so nbs-cli could not reach Redis, the QueueServer or Tiled.
+# Run nbs-cli outside it; bwclaude still confines it, and the allow rules above
+# and nbs-cli's role decide what it may do. Only a call that is exactly
+# `nbs-cli ...` matches: a redirect, pipe or `&&` keeps the whole call sandboxed.
+settings='{"sandbox":{"excludedCommands":["nbs-cli *"]}}'
+
+if [[ $headless == 1 ]]; then
+    exec claude -p "$prompt" "${system[@]}" --settings "$settings" --allowedTools "${tools[@]}" --output-format stream-json --verbose "$@"
+fi
+exec claude "${system[@]}" --settings "$settings" --allowedTools "${tools[@]}" "$@" -- "$prompt"
