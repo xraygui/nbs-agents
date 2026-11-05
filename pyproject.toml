@@ -50,6 +50,7 @@ nbs-agents-runner = "nbs_agents.runner:main"
 nbs-agents = "nbs_agents.admin:main"
 # Claude agents and the beamline assistant (the [assistant] extra)
 nbs-cli = "nbs_agents.cli.main:main"
+nbs-agents-web = "nbs_agents.web.__main__:main"
 nbs-agents-assistant = "nbs_agents.assistant.admin:main"
 claude-beamline = "nbs_agents.assistant.resources:claude_beamline"
 
