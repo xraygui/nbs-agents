@@ -122,7 +122,7 @@ def _gateway(path: Path, required: bool) -> tuple[str, str]:
     return OK, f"from {path} ({detail})"
 
 
-def check_rows(config_name: str = "assistant config") -> list[Row]:
+def check_rows(config_name: str = "assistant config", extra_rows=None) -> list[Row]:
     """
     nbs-agents' checks, then the assistant's.
 
@@ -130,6 +130,8 @@ def check_rows(config_name: str = "assistant config") -> list[Row]:
     ----------
     config_name : str, optional
         Row name for a config that fails to load.
+    extra_rows : callable, optional
+        ``extra_rows(config)`` returning a beamline package's own rows, added last.
     """
     from ..cli.config import AssistantConfig, CliConfig
     from .launcher import ClaudeLauncher
@@ -166,12 +168,14 @@ def check_rows(config_name: str = "assistant config") -> list[Row]:
     if assistant.enabled:
         workdir = Path(assistant.workdir).expanduser()
         rows.append((OK if workdir.is_dir() else WARN, "assistant on", f"workdir {workdir}"))
+    if extra_rows is not None:
+        rows.extend(extra_rows(config))
     return rows
 
 
-def check(out=print, config_name: str = "assistant config") -> int:
+def check(out=print, config_name: str = "assistant config", extra_rows=None) -> int:
     """Report nbs-agents' and the assistant's checks; 1 if anything failed."""
-    return report(check_rows(config_name), out)
+    return report(check_rows(config_name, extra_rows), out)
 
 
 def add_assistant_only_argument(parser: argparse.ArgumentParser) -> None:
@@ -216,7 +220,8 @@ def show_timing(logs: list[str], n: int) -> int:
 
 
 def main(argv=None, prog: str = "nbs-agents-assistant", description: Optional[str] = None,
-         settings: str = SETTINGS, tables: str = TABLES, config_name: str = "assistant config") -> int:
+         settings: str = SETTINGS, tables: str = TABLES, config_name: str = "assistant config",
+         extra_rows=None) -> int:
     """
     The admin command line.
 
@@ -230,6 +235,8 @@ def main(argv=None, prog: str = "nbs-agents-assistant", description: Optional[st
         What ``init`` adds to a new config (see ``init``).
     config_name : str, optional
         Row name ``check`` uses for a config that fails to load.
+    extra_rows : callable, optional
+        A beamline package's own ``check`` rows (see ``check_rows``).
     """
     parser = argparse.ArgumentParser(prog=prog, description=description or __doc__.strip().splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -267,4 +274,4 @@ def main(argv=None, prog: str = "nbs-agents-assistant", description: Optional[st
         return core.tiled_login()
     if args.command == "timing":
         return show_timing(args.logs, args.n)
-    return check(config_name=config_name)
+    return check(config_name=config_name, extra_rows=extra_rows)
