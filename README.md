@@ -67,7 +67,7 @@ tiled/        your Tiled login, shared by every beamline (mode 700)
 pixi run nbs-agents init --beamline sst1 --tiled-uri https://... --tiled-path BEAMLINE/raw
 $EDITOR ~/.nbs-agents/sst1/config/nbs-cli.toml     # beamline addresses
 pixi run nbs-agents check                          # files, permissions, services
-pixi run agent-runner
+pixi run agent-runner                              # or assistant-runner; see "Running it" below
 ```
 
 Every command takes `--beamline NAME` (or `$NBS_BEAMLINE`). With only one
@@ -137,6 +137,26 @@ groups:
 
 sst-assistant uses all four, and wraps `nbs_agents.assistant.admin.main` as
 `sst-assistant` with its own config presets.
+
+#### Running it
+
+The pixi tasks are the same in nbs-agents (its default environment has the
+`[assistant]` extra) and in sst-assistant, which runs `sst-assistant` where
+this table says `nbs-agents-assistant`:
+
+| Task | Command | What runs |
+|---|---|---|
+| `pixi run init` | `nbs-agents-assistant init` | nbs-agents' init, then the assistant's settings, token and workdir |
+| `pixi run check` | `nbs-agents-assistant check` | nbs-agents' checks, then the assistant's |
+| `pixi run timing` | `nbs-agents-assistant timing` | where the newest Claude call's time went |
+| `pixi run agent-runner` | `nbs-agents-assistant runner` | the runner with Claude drivers and the assistant |
+| `pixi run agent-web` | `nbs-agents-web` | the web page |
+| `pixi run assistant-runner` | `nbs-agents-assistant runner --assistant-only` | the runner with the assistant only (`NBS_DRIVERS=false`) |
+| `pixi run assistant-web` | `nbs-agents-web --assistant-only` | the web page, assistant only |
+
+Each takes `--beamline NAME`. `nbs-agents-assistant runner` is `nbs-agents-runner` plus the
+`--assistant-only` switch; run the runner through it (or these tasks) rather
+than `nbs-agents-runner` directly.
 
 ### nbs-cli
 

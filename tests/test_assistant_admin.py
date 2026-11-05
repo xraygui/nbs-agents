@@ -110,3 +110,26 @@ def test_commands_take_a_beamline(nbs_agents_home, monkeypatch, capsys):
     assert "several beamlines" in capsys.readouterr().err
     assert admin.main(["paths", "--beamline", "sst2"]) == 0
     assert "sst2" in capsys.readouterr().out
+
+
+TASKS = ("init", "check", "timing", "agent-runner", "agent-web", "assistant-runner", "assistant-web", "test")
+
+
+def test_pixi_tasks_match_sst_assistants(monkeypatch):
+    """agent-* runs drivers and the assistant, assistant-* only the assistant, as in sst-assistant."""
+    import shlex
+    from pathlib import Path
+
+    project = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text())
+    tasks = project["tool"]["pixi"]["tasks"]
+    assert set(TASKS) <= set(tasks)
+    scripts = project["project"]["scripts"]
+    for name in TASKS[:-1]:
+        assert shlex.split(tasks[name])[0] in scripts, name
+    assert tasks["agent-web"] == "nbs-agents-web" and tasks["assistant-web"] == "nbs-agents-web --assistant-only"
+
+    seen = []
+    monkeypatch.setattr(admin, "run_runner", lambda beamline, only: seen.append((beamline, only)) or 0)
+    for name in ("agent-runner", "assistant-runner"):
+        assert admin.main(shlex.split(tasks[name])[1:] + ["--beamline", "testbl"]) == 0
+    assert seen == [("testbl", False), ("testbl", True)]
