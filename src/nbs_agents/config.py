@@ -8,8 +8,14 @@ see ``nbs_agents.paths``; table ``[nbs_cli]``), and ``NBS_<NAME>``
 environment variables. ``[agent_log]`` says where the agent log lives.
 Packages built on nbs-agents subclass ``AgentsConfig`` to add their own
 settings to the same file.
+
+A beamline package can change the built-in defaults through the
+``nbs_agents.config_defaults`` entry point group: each entry is a dict of
+tables, such as ``{"nbs_cli": {"signal": "sc"}, "assistant": {...}}``,
+applied under the file and the environment (see ``plugin_defaults``).
 """
 
+import copy
 import os
 from dataclasses import dataclass, field, fields
 from pathlib import Path
@@ -27,6 +33,30 @@ AGENT_LOG_TABLE = "agent_log"
 # Tables other than [nbs_cli] that packages read on their own
 OTHER_TABLES = {AGENT_LOG_TABLE, "assistant"}
 LIST_SETTINGS = ("allowed_plans", "baseline_keys")
+CONFIG_DEFAULTS_ENTRY_POINT = "nbs_agents.config_defaults"
+
+
+def plugin_defaults(table: str) -> dict[str, Any]:
+    """
+    Default settings for one table from installed beamline packages.
+
+    Parameters
+    ----------
+    table : str
+        Table name, such as ``"nbs_cli"`` or ``"assistant"``.
+
+    Returns
+    -------
+    dict
+        Settings from every ``nbs_agents.config_defaults`` entry point, in
+        name order (a later one wins on a clash).
+    """
+    from importlib.metadata import entry_points
+
+    out: dict[str, Any] = {}
+    for entry in sorted(entry_points(group=CONFIG_DEFAULTS_ENTRY_POINT), key=lambda e: e.name):
+        out.update((entry.load() or {}).get(table) or {})
+    return copy.deepcopy(out)
 
 
 @dataclass
@@ -226,6 +256,7 @@ class AgentsConfig:
         unknown = set(values) - set(known)
         if unknown and cls.strict:
             raise ValueError(f"Unknown nbs-cli settings: {sorted(unknown)}")
+        values = {**plugin_defaults(MAIN_TABLE), **values}
         values = {k: v for k, v in values.items() if k in known}
         values["agent_log"] = AgentLogConfig.from_table(data.get(AGENT_LOG_TABLE))
         return cls(**values)

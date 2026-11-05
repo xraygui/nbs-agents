@@ -123,3 +123,60 @@ def test_bool_settings_from_the_environment(monkeypatch):
     for text, value in (("false", False), ("0", False), ("yes", True), ("On", True)):
         monkeypatch.setenv("NBS_ENABLED", text)
         assert PackageConfig.load().enabled is value
+
+
+def test_config_defaults_sit_under_the_file_and_environment(monkeypatch):
+    import importlib.metadata
+
+    from nbs_agents.cli.config import AssistantConfig, CliConfig
+    from nbs_agents.paths import paths
+
+    monkeypatch.setattr(importlib.metadata, "entry_points", fake_entry_points({
+        "nbs_agents.config_defaults": [("bl", "plugin_targets:DEFAULTS")],
+    }))
+    config = CliConfig.load()
+    assert (config.signal, config.baseline_keys, config.norm) == ("sc", ["ring_current"], "")
+    assert AssistantConfig.load().model == "haiku"
+    config.baseline_keys.append("x")
+    assert CliConfig.load().baseline_keys == ["ring_current"]  # each load gets its own copy
+    paths().config_file.parent.mkdir(parents=True, exist_ok=True)
+    paths().config_file.write_text('[nbs_cli]\nsignal = "pfy"\n[assistant]\nmodel = "opus"\n')
+    monkeypatch.setenv("NBS_BASELINE_KEYS", "es_pressure")
+    config = CliConfig.load()
+    assert (config.signal, config.baseline_keys) == ("pfy", ["es_pressure"])
+    assert AssistantConfig.load().model == "opus"
+    assert AgentsConfig.load().qs_addr  # tables of other classes are ignored
+
+
+def test_reducer_plugins_add_to_every_summary(monkeypatch):
+    import importlib.metadata
+
+    import numpy as np
+
+    from nbs_agents.cli import summaries
+
+    monkeypatch.setattr(importlib.metadata, "entry_points", fake_entry_points({
+        summaries.REDUCERS_ENTRY_POINT: [("bl", "plugin_targets:reducer")],
+    }))
+    summaries.plugin_reducers.cache_clear()
+    try:
+        start, data = {"detectors": ["d"]}, {"d": np.array([1.0, 2.0])}
+        assert summaries.summarize(start, data, summaries.SummaryContext(reference="ref"))["extra"] == "generic"
+        assert "extra" not in summaries.summarize(start, data, summaries.SummaryContext())
+    finally:
+        summaries.plugin_reducers.cache_clear()
+
+
+def test_sample_layout_comes_from_a_plugin(monkeypatch):
+    import importlib.metadata
+
+    from nbs_agents.cli.core import CliError, sample_layout
+
+    monkeypatch.setattr(importlib.metadata, "entry_points", fake_entry_points({}))
+    with pytest.raises(CliError, match="no sample layout"):
+        sample_layout({})
+    monkeypatch.setattr(importlib.metadata, "entry_points", fake_entry_points({
+        "nbs_agents.sample_layout": [("bl", "plugin_targets:layout")],
+    }))
+    assert sample_layout({"s1": {}}) == {"n": 1}
+
