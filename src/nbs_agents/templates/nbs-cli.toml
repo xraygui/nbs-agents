@@ -15,17 +15,10 @@
 # it and keeps a read-only key for agents; see `nbs-agents tiled-login`.
 # tiled_key_lifetime_s = 86400          # life of each agent key
 # A fixed key instead: TILED_API_KEY in the environment (not here).
-# redis_host = "localhost"              # beamline Redis (status dicts, beam map)
-# redis_port = 6379
-# redis_db = 0
-# redis_prefix = ""
-# redis_ssl = false                     # true for NSLS-II's encrypted beamline Redis (TLS, usually
-#                                       # port 6380); password from $REDIS_PASSWORD, else this file:
-# redis_password_file = ""              # default $REDIS_SECRET_FILE or /etc/bluesky/redis.secret
 
 [agent_log]
-# The agent log's own Redis, started by nbs-agents-runner on 127.0.0.1.
-# Remove `port` to share the beamline Redis instead.
-port = 60740
-serve = true
-# data_dir defaults to state/agent-log under $NBS_AGENTS_HOME.
+# The agent log's own Redis. By default nbs-agents-runner serves it on 127.0.0.1;
+# set host/port/serve = false for one that runs elsewhere.
+# port = 60740
+# serve = true
+# data_dir = ""                         # default state/agent-log under $NBS_AGENTS_HOME

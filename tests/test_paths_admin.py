@@ -85,7 +85,7 @@ def test_init_lets_packages_add_settings_and_tables(nbs_agents_home):
     data = tomllib.loads(paths().config_file.read_text())
     assert data["nbs_cli"]["claude_command"] == "claude-beamline"
     assert data["assistant"] == {"enabled": False}
-    assert data["agent_log"]["port"] == 60740
+    assert data["agent_log"] == {}  # its own Redis by default
 
 
 def test_check_reports_files_and_unreachable_services(nbs_agents_home, monkeypatch):
@@ -93,13 +93,13 @@ def test_check_reports_files_and_unreachable_services(nbs_agents_home, monkeypat
     admin.init(out=lambda line: None)
     p = paths()
     p.config_file.write_text(
-        '[nbs_cli]\nqs_addr = "tcp://127.0.0.1:1"\nredis_port = 1\ntiled_uri = "http://127.0.0.1:1"\n'
+        '[nbs_cli]\nqs_addr = "tcp://127.0.0.1:1"\ntiled_uri = "http://127.0.0.1:1"\n'
     )
     lines = []
     assert admin.check(out=lines.append) == 1
     text = "\n".join(lines)
     assert "  ok  config" in text
-    assert "FAIL  beamline Redis" in text and "FAIL  Tiled" in text
+    assert "FAIL  QueueServer" in text and "FAIL  Tiled" in text and "beamline Redis" not in text
 
     # Packages extend the rows before reporting
     rows = admin.check_rows() + [(admin.OK, "extra", "from a package")]

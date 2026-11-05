@@ -30,8 +30,8 @@ from nbs_agents.constants import (
     OPEN_AGENT_PLAN,
     QUEUE_STOP_INSTRUCTION,
 )
+from ..beamline_info import DEVICES, SAMPLES, BeamlineInfo, load_beamline_info
 from .config import CliConfig
-from .estimate import estimate_item
 from .summaries import SummaryContext, summarize
 
 LOGGER = logging.getLogger(__name__)
@@ -151,7 +151,7 @@ def sample_layout(samples: dict[str, Any]) -> dict[str, Any]:
     Parameters
     ----------
     samples : dict
-        ``GLOBAL_SAMPLES``.
+        The loaded samples (``BeamlineInfo.samples``).
 
     Returns
     -------
@@ -202,17 +202,18 @@ def read_status_pv(pv: Any, timeout: float) -> dict[str, Any]:
         return out
     return {"value": pv.get(as_string=True, timeout=timeout)}
 
-# What nbs-cli reports instead of a bare null when nbs-bl publishes no beam map
+# What nbs-cli reports instead of a bare null when the beamline has no beam map
 NO_BEAM_MAP = {
     "beam_map": False,
     "expected": None,
-    "reason": "no beam map published: the BEAM_MAP status dict is missing or empty, so beam status is unknown",
+    "reason": "no beam map at this beamline, so beam status is unknown",
 }
 
 
 class Beamline:
     """
-    Client for one beamline: QueueServer, Tiled, Redis and the document stream.
+    Client for one beamline: QueueServer, Tiled, the document stream and the
+    agent log, plus whatever the beamline's ``BeamlineInfo`` provider knows.
 
     Parameters
     ----------
@@ -224,7 +225,7 @@ class Beamline:
         self.config = config or CliConfig.load()
         self._manager = None
         self._tiled = None
-        self._redis = None
+        self._info = None
         self._agent_log = None
 
     # ------------------------------------------------------------------ clients
@@ -257,24 +258,21 @@ class Beamline:
         return self._tiled
 
     @property
-    def redis(self):
-        """Redis client for status dicts and the agent log."""
-        if self._redis is None:
-            from nbs_agents.redisclient import connect_settings
-
-            # RESP2 for old servers, and TLS with a password for an encrypted beamline Redis
-            self._redis = connect_settings(self.config.redis_settings, socket_timeout=5)
-        return self._redis
+    def info(self) -> BeamlineInfo:
+        """What the beamline package's provider knows (``nbs_agents.beamline_info``)."""
+        if self._info is None:
+            self._info = load_beamline_info(self)
+        return self._info
 
     @property
     def agent_log(self) -> AgentLog:
-        """Agent-log records, in the beamline Redis or the ``[agent_log]`` one."""
+        """Agent-log records, in the ``[agent_log]`` Redis."""
         if self._agent_log is None:
-            settings = self.config.agent_log_settings
-            if self.config.agent_log.dedicated:
-                self._agent_log = AgentLog.from_settings(settings)
-            else:
-                self._agent_log = AgentLog(self.redis, settings["prefix"])
+            try:
+                settings = self.config.agent_log_settings
+            except ValueError as exc:
+                raise CliError(str(exc)) from exc
+            self._agent_log = AgentLog.from_settings(settings)
         return self._agent_log
 
     def close(self) -> None:
@@ -282,73 +280,11 @@ class Beamline:
         if self._manager is not None:
             self._manager.close()
             self._manager = None
+        if self._info is not None:
+            self._info.close()
+            self._info = None
 
     # ------------------------------------------------------------ beamline info
-
-    def status_dict(self, name: str) -> dict[str, Any]:
-        """
-        Read an nbs-bl ``RedisStatusDict`` such as ``PLAN_TIME_DICT``.
-
-        Parameters
-        ----------
-        name : str
-            Status dict name.
-
-        Returns
-        -------
-        dict
-            Contents, decoded from JSON.
-        """
-        import json
-
-        prefix = f"{self.config.redis_prefix}{name}"
-        out = {}
-        for key in self.redis.scan_iter(match=f"{prefix}*"):
-            key = key.decode()
-            raw = self.redis.get(key)
-            if raw is None:
-                continue
-            try:
-                out[key[len(prefix):]] = json.loads(raw)
-            except ValueError:
-                out[key[len(prefix):]] = raw.decode(errors="replace")
-        return out
-
-    def request_update(self, key: str, timeout: float = 10) -> Any:
-        """
-        Fetch an nbs-bl status value through the RE worker.
-
-        Parameters
-        ----------
-        key : str
-            Status key, for example ``"GLOBAL_SAMPLES"``.
-        timeout : float, optional
-            Seconds to wait for the background task.
-
-        Returns
-        -------
-        object
-            The status value.
-        """
-        return self._call_function("request_update", key, timeout=timeout)
-
-    def _call_function(self, name: str, *args: Any, timeout: float = 10) -> Any:
-        """Run an nbs-bl function in the RE worker's background and return its value."""
-        from bluesky_queueserver_api import BFunc
-
-        what = f"{name}({', '.join(repr(a) for a in args)})"
-        response = _check(
-            self.manager.function_execute(
-                BFunc(name, *args), run_in_background=True, user_group=self.config.qs_user_group
-            ),
-            what,
-        )
-        self.manager.wait_for_completed_task(response["task_uid"], timeout=timeout)
-        reply = self.manager.task_result(response["task_uid"])
-        result = reply.get("result", {})
-        if reply.get("status") != "completed" or not result.get("success", False):
-            raise CliError(f"{what} failed: {result.get('msg', reply)}")
-        return result.get("return_value")
 
     def samples(self, full: bool = False) -> dict[str, Any]:
         """
@@ -364,13 +300,19 @@ class Beamline:
         dict
             Samples keyed by sample id.
         """
-        samples = self.request_update("GLOBAL_SAMPLES") or {}
+        samples = self._samples()
         if full:
             return samples
         return {
             sid: {k: info.get(k) for k in ("name", "description") if info.get(k) not in (None, "")}
             for sid, info in samples.items()
         }
+
+    def _samples(self) -> dict[str, Any]:
+        samples = self.info.samples()
+        if samples is None:
+            raise CliError("samples are not available at this beamline")
+        return samples
 
     def sample_layout(self) -> dict[str, Any]:
         """
@@ -379,9 +321,9 @@ class Beamline:
         Returns
         -------
         dict
-            Layout of ``GLOBAL_SAMPLES``.
+            Layout of the loaded samples.
         """
-        return sample_layout(self.request_update("GLOBAL_SAMPLES") or {})
+        return sample_layout(self._samples())
 
     def plans_allowed(self) -> dict[str, Any]:
         """
@@ -407,7 +349,7 @@ class Beamline:
         Returns
         -------
         dict
-            Plan description with an estimate rule if one exists.
+            Plan description, with what the beamline adds (such as a time rule).
         """
         plans = self.plans_allowed()
         if name not in plans:
@@ -424,12 +366,7 @@ class Beamline:
                 entry["type"] = annotation
             params.append(entry)
         out = {"name": name, "description": plan.get("description", ""), "parameters": params}
-        rule = self.status_dict("PLAN_TIME_DICT").get(name)
-        if rule:
-            out["time_estimate_rule"] = rule
-        xas = self.status_dict("XAS_PLANS").get(name)
-        if xas:
-            out["xas"] = xas
+        out.update(self.info.plan_extras(name))
         return out
 
     def plans_overview(self) -> dict[str, Any]:
@@ -446,7 +383,7 @@ class Beamline:
             allowed = [p for p in allowed if p in self.config.allowed_plans]
         xas = {
             k: {kk: v.get(kk) for kk in ("name", "edge", "element") if v.get(kk)}
-            for k, v in self.status_dict("XAS_PLANS").items()
+            for k, v in self.info.xas_plans().items()
         }
         return {"allowed": allowed, "xas": xas}
 
@@ -475,7 +412,7 @@ class Beamline:
         response = _check(
             self.manager.devices_allowed(user_group=self.config.qs_user_group), "devices_allowed"
         )
-        info_by_name = self.status_dict("DEVICE_INFO")
+        info_by_name = self.info.device_info()
         node_by_name = self._map_device_nodes()
         out = {}
         for name, info in sorted(response.get("devices_allowed", {}).items()):
@@ -498,8 +435,8 @@ class Beamline:
         return out
 
     def _map_device_nodes(self) -> dict[str, str]:
-        """Device name to node, from the ``devices`` lists in ``BEAM_MAP``."""
-        nodes = self.status_dict("BEAM_MAP").get("nodes") or {}
+        """Device name to node, from the ``devices`` lists in the beam map."""
+        nodes = (self.info.beam_map() or {}).get("nodes") or {}
         return {dev: name for name, entry in nodes.items() for dev in entry.get("devices", [])}
 
     def device(self, names: list[str]) -> dict[str, Any]:
@@ -507,8 +444,7 @@ class Beamline:
         Static description of devices: class, beam map node, groups, roles,
         description, axes and so on. No live values.
 
-        Read from the ``DEVICE_INFO`` status dict that nbs-bl publishes at
-        startup, or from ``device_info`` in the RE worker if it is empty.
+        From the beamline's ``BeamlineInfo`` provider.
 
         Parameters
         ----------
@@ -520,9 +456,9 @@ class Beamline:
         dict
             ``{name: info}``; an unknown name maps to ``{"error": "unknown device"}``.
         """
-        info = self.status_dict("DEVICE_INFO")
-        if not info:
-            info = self._call_function("device_info", list(names)) or {}
+        if DEVICES not in self.info.capabilities:
+            raise CliError("device information is not available at this beamline")
+        info = self.info.device_info(list(names))
         return {name: info.get(name) or {"error": "unknown device"} for name in names}
 
     # -------------------------------------------------------------------- queue
@@ -538,7 +474,7 @@ class Beamline:
         """
         return _check(self.manager.queue_get(), "queue_get")
 
-    def estimate(self, item: dict[str, Any], plan_time_dict: Optional[dict] = None) -> Optional[float]:
+    def estimate(self, item: dict[str, Any], estimator: Any = None) -> Optional[float]:
         """
         Estimate a queue item's duration in seconds.
 
@@ -546,17 +482,17 @@ class Beamline:
         ----------
         item : dict
             Queue item.
-        plan_time_dict : dict, optional
-            Cached ``PLAN_TIME_DICT``.
+        estimator : callable, optional
+            The provider's ``estimator()``, fetched once for many items.
 
         Returns
         -------
         float or None
-            Estimate, if the plan has a rule.
+            Estimate, if the beamline has one for the plan.
         """
-        if plan_time_dict is None:
-            plan_time_dict = self.status_dict("PLAN_TIME_DICT")
-        return estimate_item(item, plan_time_dict)
+        if estimator is None:
+            estimator = self.info.estimator()
+        return estimator(item) if estimator else None
 
     # ----------------------------------------------------------------- sessions
 
@@ -639,13 +575,13 @@ class Beamline:
         out["block_at_head"] = not others_before
         return out
 
-    def _session_view(self, record: dict[str, Any], items: list, ptd: dict, running: dict) -> tuple:
+    def _session_view(self, record: dict[str, Any], items: list, estimator: Any, running: dict) -> tuple:
         uid = record["agent_uid"]
         split = self.split_queue(items, uid)
-        block = [compact_item(i, self.estimate(i, ptd)) for i in split["block"]]
+        block = [compact_item(i, self.estimate(i, estimator)) for i in split["block"]]
         queued_s = sum(b.get("est_s") or 0 for b in block)
         if running and (running.get("meta") or {}).get(AGENT_UID_KEY) == uid:
-            queued_s += self.estimate(running, ptd) or 0
+            queued_s += self.estimate(running, estimator) or 0
         view = {
             "agent_uid": uid,
             "agent_name": record.get("agent_name"),
@@ -672,7 +608,7 @@ class Beamline:
     # --------------------------------------------------------------------- runs
 
     def _summary_context(self) -> SummaryContext:
-        return SummaryContext(self.config.signal, self.config.norm, self.status_dict("XAS_PLANS"),
+        return SummaryContext(self.config.signal, self.config.norm, self.info.xas_plans(),
                               reference=self.config.reference)
 
     def get_run(self, ref: Any):
@@ -1010,7 +946,7 @@ class Beamline:
     def beam(self, full: bool = False) -> Optional[dict[str, Any]]:
         """
         Whether beam is expected at this beamline's endstation, from the
-        ``BEAM_MAP`` status dict that nbs-bl keeps from the map IOC.
+        beamline's beam map (``BeamlineInfo.beam_map``).
 
         Parameters
         ----------
@@ -1022,9 +958,9 @@ class Beamline:
         -------
         dict or None
             ``endstation``, ``expected``, ``reason`` and ``updated`` (plus
-            ``nodes`` with ``full``), or None if no beam map is published.
+            ``nodes`` with ``full``), or None if the beamline has no beam map.
         """
-        data = self.status_dict("BEAM_MAP")
+        data = self.info.beam_map()
         if not data:
             return None
         out = {
@@ -1057,14 +993,14 @@ class Beamline:
             ``desc``, ``blocking``, ``path_clear``, ``beam_expected``,
             ``reason`` and ``devices`` (``name``, ``desc``, ``roles``).
         """
-        data = self.status_dict("BEAM_MAP")
+        data = self.info.beam_map()
         if not data:
-            raise CliError("no beam map published")
+            raise CliError("beam diagnosis is not available at this beamline (it has no beam map)")
         nodes = data.get("nodes") or {}
         endstation = data.get("endstation")
         if endstation not in nodes:
             raise CliError("the beam map has no endstation")
-        info_by_name = self.status_dict("DEVICE_INFO")
+        info_by_name = self.info.device_info()
         by_node: dict[str, list] = {}
         for dev, info in info_by_name.items():
             if isinstance(info, dict) and info.get("node") and not info.get("alias_of"):
@@ -1099,6 +1035,16 @@ class Beamline:
             "path": path,
         }
 
+    def capabilities(self) -> list[str]:
+        """
+        What this beamline can answer beyond the queue, runs and agent log:
+        the provider's capabilities, plus ``status_pvs`` with a beam map file.
+        """
+        out = set(self.info.capabilities)
+        if self.config.beam_map_file:
+            out.add("status_pvs")
+        return sorted(out)
+
     def state(self, full: bool = False, agent_uid: Optional[str] = None, n_runs: int = 5) -> dict[str, Any]:
         """
         One JSON snapshot of the beamline.
@@ -1122,9 +1068,9 @@ class Beamline:
         queue = self.queue()
         items = queue.get("items", [])
         running = queue.get("running_item") or {}
-        ptd = self.status_dict("PLAN_TIME_DICT")
+        estimator = self.info.estimator()
 
-        out: dict[str, Any] = {"time": _iso(time.time())}
+        out: dict[str, Any] = {"time": _iso(time.time()), "capabilities": self.capabilities()}
         out["manager"] = {
             "state": status.get("manager_state"),
             "re_state": status.get("re_state"),
@@ -1134,7 +1080,7 @@ class Beamline:
         }
 
         if running:
-            run_view = compact_item(running, self.estimate(running, ptd))
+            run_view = compact_item(running, self.estimate(running, estimator))
             try:
                 latest = self.tiled.values()[-1:-2:-1]
                 latest = next(iter(latest), None)
@@ -1156,7 +1102,7 @@ class Beamline:
             errors["agent"] = str(exc)
         uid = record["agent_uid"] if record else None
         if record:
-            view, split = self._session_view(record, items, ptd, running)
+            view, split = self._session_view(record, items, estimator, running)
             if full:
                 view["log"] = record.get("log", [])
                 view.pop("log_tail")
@@ -1168,7 +1114,7 @@ class Beamline:
             out["agent"] = None
         out["queue_other"] = {"before": split["before"], "after": split["after"]}
         if full:
-            out["queue"] = [compact_item(i, self.estimate(i, ptd)) for i in items]
+            out["queue"] = [compact_item(i, self.estimate(i, estimator)) for i in items]
 
         try:
             out["beam"] = self.beam() or dict(NO_BEAM_MAP)
@@ -1180,10 +1126,11 @@ class Beamline:
                 out["status"] = status
         except Exception as exc:
             errors["status"] = str(exc)
-        try:
-            out["samples"] = self.samples(full=full)
-        except Exception as exc:
-            errors["samples"] = str(exc)
+        if SAMPLES in self.info.capabilities:
+            try:
+                out["samples"] = self.samples(full=full)
+            except Exception as exc:
+                errors["samples"] = str(exc)
         try:
             out["plans"] = self.plans_overview()
         except Exception as exc:
@@ -1609,15 +1556,15 @@ class Beamline:
         if unknown and not has_var_kw:
             raise CliError(f"unknown parameters for {plan}: {unknown}; allowed: {sorted(names)}")
 
-        ptd = self.status_dict("PLAN_TIME_DICT")
+        estimator = self.info.estimator()
         item_dict = {"item_type": "plan", "name": plan, "args": list(args), "kwargs": dict(kwargs)}
-        est = self.estimate(item_dict, ptd)
+        est = self.estimate(item_dict, estimator)
 
         items = self.queue().get("items", [])
         split = self.split_queue(items, uid)
         if split["close_index"] is None:
             raise CliError(f"close_agent for session {uid} is not in the queue")
-        queued_s = sum(self.estimate(i, ptd) or 0 for i in split["block"])
+        queued_s = sum(self.estimate(i, estimator) or 0 for i in split["block"])
         budget = dict(record.get("budget") or {})
         used_s = time.time() - record.get("opened", time.time())
         if budget.get("time_s"):
@@ -1635,9 +1582,7 @@ class Beamline:
             "item": compact_item(item_dict | {"meta": {AGENT_REASON_KEY: reason, AGENT_SEQUENCE_KEY: sequence}}, est),
             "budget": budget,
         }
-        # nbs-bl's moving sample setup adds sample_position; without it sample= only labels
-        moves_sample = "sample_position" in names
-        warning = None if moves_sample else self._sample_warning(kwargs.get("sample"), split["block"])
+        warning = self.info.add_warning(plan, dict(kwargs), names, split["block"])
         if warning:
             out["warning"] = warning
         if dry_run:
@@ -1660,32 +1605,6 @@ class Beamline:
         if inbox:
             out["operator"] = inbox
         return out
-
-    def _sample_warning(self, sample: Optional[str], block: list[dict[str, Any]]) -> Optional[str]:
-        """
-        Warn when a plan's ``sample`` argument is not the sample in the beam.
-
-        Without motorized samples, ``sample=`` only labels the run; it does not
-        move the manipulator. No warning when a move_sample to it is already
-        pending.
-        """
-        if not sample:
-            return None
-        for item in block:
-            if item.get("name") == "move_sample":
-                target = (item.get("args") or [None])[0] or (item.get("kwargs") or {}).get("sample_id")
-                if target == sample:
-                    return None
-        try:
-            selected = (self.request_update("GLOBAL_SELECTED") or {}).get("sample_id")
-        except Exception:
-            return None
-        if selected == sample:
-            return None
-        return (
-            f"sample={sample!r} only labels the run; the sample in the beam is {selected!r}. "
-            f"Queue move_sample {sample} first if you meant to measure it."
-        )
 
     def remove(self, item_uid: str, reason: str, agent_uid: Optional[str] = None) -> dict[str, Any]:
         """

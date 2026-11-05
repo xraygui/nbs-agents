@@ -149,7 +149,7 @@ class AssistantAgentTests(unittest.TestCase):
         self.clock = Clock()
         self.log = AgentLog(FakeRedis(), prefix="bl-")
         self.beamline = MagicMock()
-        self.beamline.status_dict.return_value = {}
+        self.beamline.info.xas_plans.return_value = {}
         self.beamline.beam.return_value = {"expected": True}
         self.beamline.manager.status.return_value = {"manager_state": "executing_queue"}
         self.launcher = FakeLauncher()

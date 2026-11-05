@@ -142,17 +142,14 @@ print(os.path.expanduser(CliConfig.load().beam_map_file) or "-")')"
         [[ -f "$config" ]] && config="$(readlink -f "$config")" && mounts+=(--ro-path "$config")
         # Name it explicitly inside, where $HOME looks different
         export NBS_CLI_CONFIG="$config"
-        # An encrypted beamline Redis: nbs-cli inside needs its password file
-        redis_secret="$("$python" -c 'import os
-from nbs_agents.cli.config import CliConfig
-from nbs_agents.redisclient import DEFAULT_SECRET_FILE
-c = CliConfig.load()
-print((c.redis_password_file or os.environ.get("REDIS_SECRET_FILE") or DEFAULT_SECRET_FILE) if c.redis_ssl else "-")')"
-        if [[ "$redis_secret" != - ]]; then
-            [[ -r "$redis_secret" ]] || { echo "redis_ssl is on but $redis_secret is not readable" >&2; exit 1; }
-            mounts+=(--ro-path "$redis_secret")
-            export NBS_REDIS_PASSWORD_FILE="$redis_secret"
-        fi
+        # Files the beamline package's nbs-cli needs inside (nbs_agents.sandbox_paths),
+        # such as a beamline Redis password; each named to nbs-cli by a variable
+        while IFS=$'\t' read -r path var; do
+            [[ -n "$path" ]] || continue
+            [[ -r "$path" ]] || { echo "$path is not readable (needed inside bwclaude for $var)" >&2; exit 1; }
+            mounts+=(--ro-path "$path")
+            export "$var=$path"
+        done < <("$python" -m nbs_agents.assistant.resources sandbox-paths)
         # Mount the key's folder, not the file, so the runner's replacements show through
         mkdir -p -m 700 "$(dirname "$tiled_key")"
         mounts+=(--ro-path "$(dirname "$tiled_key")")

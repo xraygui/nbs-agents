@@ -620,7 +620,6 @@ def error_text(exc: BaseException, config: Any = None) -> str:
         try:
             if config.agent_log.dedicated:
                 services.append(("the agent log, served by the runner", config.agent_log_settings))
-            services.append(("the beamline Redis", config.redis_settings))
         except Exception:
             pass
         for name, settings in services:

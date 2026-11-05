@@ -466,9 +466,9 @@ class AssistantAgent(BaseAgent):
         now = self.clock()
         if self._xas_plans is None or now - self._xas_plans_t > STATUS_REFRESH_S:
             try:
-                self._xas_plans = self.beamline.status_dict("XAS_PLANS")
+                self._xas_plans = self.beamline.info.xas_plans()
             except Exception:
-                LOGGER.exception("Could not read XAS_PLANS")
+                LOGGER.exception("Could not read the XAS plans")
                 self._xas_plans = self._xas_plans or {}
             self._xas_plans_t = now
         return SummaryContext(self.signal, self.norm, self._xas_plans, reference=self.reference)

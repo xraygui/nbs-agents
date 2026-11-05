@@ -1,16 +1,18 @@
 """
 A Redis of its own for the agent log.
 
-The agent log used to share the beamline Redis. With an ``[agent_log]`` port
-in the nbs-cli config it lives in a separate Redis instead, which
-nbs-agents-runner can start (``serve = true``) as a child ``redis-server`` on
-127.0.0.1, or which runs elsewhere, such as beside an agent container.
+The agent log lives in a Redis of its own (``[agent_log]`` port in the
+nbs-cli config), which nbs-agents-runner can start (``serve = true``) as a
+child ``redis-server`` on 127.0.0.1, or which runs elsewhere, such as beside
+an agent container.
 Durable logs are meant to go to Tiled later; this store only needs to last a
 beamtime, so it keeps a snapshot in ``data_dir`` and nothing more.
 
 nbs-gui usually runs under a beamline operator account without an nbs-cli
-config, so the runner publishes the agent log's address in the beamline Redis
-under ``{prefix}NBS_AGENT_LOG_LOCATION``, and the Qt tabs look there first.
+config. Where nbs-gui reads a beamline Redis, a beamline package's runner
+plugin (sst-assistant's) publishes the agent log's address there under
+``{prefix}NBS_AGENT_LOG_LOCATION`` with ``publish_location``, and the Qt tabs
+look there first (``read_location``).
 """
 
 import json

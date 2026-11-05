@@ -207,7 +207,7 @@ def check_rows(config=None) -> list[Row]:
     list of tuple
         ``(state, name, detail)`` rows; ``state`` is ``OK``, ``WARN`` or ``FAIL``.
     """
-    from .config import AgentsConfig
+    from .config import NO_AGENT_LOG, AgentsConfig
 
     p = paths()
     rows: list[Row] = [(OK, "beamline", f"{p.beamline} ({p.root})")]
@@ -234,12 +234,13 @@ def check_rows(config=None) -> list[Row]:
         server = shutil.which(config.agent_log.redis_server.split()[0])
         rows.append((OK if server else FAIL, "redis-server", server or f"{config.agent_log.redis_server} not found"))
     rows.append(row("QueueServer", probe(lambda: _queueserver(config.qs_addr))))
-    rows.append(row("beamline Redis", probe(lambda: _redis_ping(config.redis_settings))))
     if config.agent_log.dedicated:
         state, detail = probe(lambda: _redis_ping(config.agent_log_settings))
         if state == FAIL and config.agent_log.serve:
             state, detail = WARN, "not running (nbs-agents-runner starts it)"
         rows.append((state, "agent-log Redis", detail))
+    else:
+        rows.append((FAIL, "agent-log Redis", NO_AGENT_LOG))
     rows.append(row("Tiled", probe(lambda: _tiled(config.tiled_uri))))
     if not config.tiled_path:
         rows.append((WARN, "tiled_path", "not set: runs are read from the server's root catalog"))

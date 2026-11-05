@@ -10,6 +10,12 @@ combined skills into the agent's working folder with this module:
     python -m nbs_agents.assistant.resources skill NAME     # .claude/skills/NAME/SKILL.md
     python -m nbs_agents.assistant.resources prompt NAME    # .claude/NAME.md, path printed
     python -m nbs_agents.assistant.resources code-paths     # folders the agent's python needs
+    python -m nbs_agents.assistant.resources sandbox-paths  # files beamline packages need, PATH<TAB>VAR
+
+A beamline package names files its nbs-cli needs inside the bwclaude sandbox
+through the ``nbs_agents.sandbox_paths`` group: each entry is a callable
+``paths(config)`` returning ``(path, variable)`` pairs; the file is mounted
+read-only and the ``NBS_*`` variable set to its path.
 
 The ``claude-beamline`` console script runs the bundled script with
 ``NBS_ENV_DIR`` set to this python environment.
@@ -27,6 +33,7 @@ SCRIPTS_DIR = HERE / "scripts"
 SKILLS_DIR = HERE / "skills"
 WORKDIR_TEMPLATE = HERE / "templates" / "assistant"
 SKILL_ADDENDA_ENTRY_POINT = "nbs_agents.skill_addenda"
+SANDBOX_PATHS_ENTRY_POINT = "nbs_agents.sandbox_paths"
 
 
 def addenda_dirs() -> list[Path]:
@@ -127,6 +134,27 @@ def code_paths() -> list[Path]:
     return out
 
 
+def sandbox_paths(config=None) -> list[tuple[str, str]]:
+    """
+    Files beamline packages need inside the sandbox, as ``(path, variable)`` pairs.
+
+    Parameters
+    ----------
+    config : CliConfig, optional
+        Settings; loaded if omitted.
+    """
+    from importlib.metadata import entry_points
+
+    if config is None:
+        from ..cli.config import CliConfig
+
+        config = CliConfig.load()
+    out = []
+    for entry in sorted(entry_points(group=SANDBOX_PATHS_ENTRY_POINT), key=lambda e: e.name):
+        out.extend((str(path), str(var)) for path, var in entry.load()(config) or [])
+    return out
+
+
 def claude_beamline() -> None:
     """The ``claude-beamline`` console script: run the bundled script with this environment."""
     os.environ.setdefault("NBS_ENV_DIR", sys.prefix)
@@ -140,6 +168,9 @@ def main(argv=None) -> int:
         install_skill(args[1])
     elif args[:1] == ["prompt"] and len(args) == 2:
         print(write_prompt(args[1]).resolve())
+    elif args == ["sandbox-paths"]:
+        for path, var in sandbox_paths():
+            print(f"{path}\t{var}")
     elif args == ["code-paths"]:
         for path in code_paths():
             print(path)

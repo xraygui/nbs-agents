@@ -49,3 +49,37 @@ class FakeRedis:
 
     def pipeline(self):
         return FakePipeline(self.store)
+
+
+from nbs_agents.beamline_info import BEAM_MAP, DEVICES, ESTIMATES, SAMPLES, XAS_PLANS, BeamlineInfo  # noqa: E402
+
+
+class StaticInfo(BeamlineInfo):
+    """A beamline-info provider with fixed answers; capabilities follow what it is given."""
+
+    name = "static"
+
+    def __init__(self, beam_map=None, device_info=None, samples=None, estimate=None, xas_plans=None, warning=None):
+        super().__init__(None)
+        self._beam_map, self._device_info, self._samples = beam_map, device_info, samples
+        self._estimate, self._xas_plans, self._warning = estimate, xas_plans, warning
+        given = {BEAM_MAP: beam_map, DEVICES: device_info, SAMPLES: samples, ESTIMATES: estimate, XAS_PLANS: xas_plans}
+        self.capabilities = frozenset(name for name, value in given.items() if value is not None)
+
+    def beam_map(self):
+        return dict(self._beam_map) if self._beam_map else None
+
+    def device_info(self, names=None):
+        return dict(self._device_info or {})
+
+    def samples(self):
+        return self._samples
+
+    def estimator(self):
+        return self._estimate
+
+    def xas_plans(self):
+        return dict(self._xas_plans or {})
+
+    def add_warning(self, plan, kwargs, parameters, block):
+        return self._warning
