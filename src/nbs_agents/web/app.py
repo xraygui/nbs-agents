@@ -488,6 +488,10 @@ def create_app(
             }
         return await run_in_threadpool(read)
 
+    @app.get("/api/kb/search")
+    async def kb_search(q: str = "", n: int = 50):
+        return await run_in_threadpool(state.kb_call, "search", q, n=n)
+
     @app.get("/api/kb/note")
     async def kb_note(id: str):
         def read():

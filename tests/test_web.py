@@ -250,3 +250,14 @@ def test_staff_review_knowledge_base(tmp_path):
     assert client.get("/api/kb").json()["queue"]["count"] == 0
     # Writes from other pages are refused like every other write
     assert client.post("/api/kb/note", json={"by": "x", "title": "t", "body": "b"}).status_code == 403
+
+
+def test_knowledge_base_search(tmp_path):
+    kb = KnowledgeBase(tmp_path / "knowledge", tmp_path / "agent", tmp_path / "review")
+    kb.write_note("Ana", "Gate valves", "Open the gate valves after pumping down.")
+    kb.write_note("Ana", "Beam dumps", "The ring current reads 0.")
+    client = client_for(FakeBeamline(), kb=kb)
+    hits = client.get("/api/kb/search", params={"q": "valve"}).json()
+    assert [h["id"] for h in hits] == ["gate-valves"]
+    assert "pumping" in hits[0]["snippet"]
+    assert len(client.get("/api/kb/search", params={"q": ""}).json()) == 2

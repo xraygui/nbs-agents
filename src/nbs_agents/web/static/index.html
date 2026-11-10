@@ -192,7 +192,12 @@ dialog .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top
 .kb-entry { border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; margin: 8px 0; background: var(--panel); }
 .kb-entry .head { display: flex; gap: 8px; align-items: center; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
 .kb-entry .head span { flex: 1; }
-#kb-who { width: 160px; }
+#kb-who { width: 110px; }
+#kb-detail .kb-title { font-size: 20px; margin: 0 0 4px; }
+#kb-detail .kb-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+#kb-detail .kb-body { font-size: 15px; line-height: 1.55; max-width: 52em; }
+#kb-detail .kb-sub { font-size: 13px; color: var(--muted); margin: 18px 0 6px; }
+input[type=search] { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; width: 100%; }
 @media (max-width: 720px) { #kb-list { max-height: 260px; } }
 #tiled-login { display: none; padding: 8px 16px; background: var(--warn-bg); border-bottom: 1px solid var(--warn-border); }
 #tiled-login code { font-weight: 600; }
@@ -259,11 +264,10 @@ dialog .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top
   </section>
   <section id="kb-view" class="view">
     <div class="col">
-      <div class="col-head"><h2>Knowledge base</h2><button id="kb-new" class="primary">New note…</button></div>
-      <div class="col-head" style="gap:6px">
+      <div class="col-head"><h2>Notes</h2>
         <input type="text" id="kb-who" placeholder="Your name" title="Recorded as the reviewer or author of notes you approve or write; remembered in this browser">
-        <input type="text" id="kb-filter" placeholder="Filter notes">
-      </div>
+        <button id="kb-new" class="primary" title="Write a new note into the profile">New…</button></div>
+      <div class="col-head"><input type="search" id="kb-filter" placeholder="Search notes (words, devices, topics)"></div>
       <div id="kb-list" class="scroll"></div>
     </div>
     <div class="col">
@@ -835,7 +839,27 @@ const kbOrigin = (n) => n.draft ? "draft" : n.id.startsWith("agent/") ? "agent" 
 
 try { $("kb-who").value = localStorage.getItem("kb-who") || ""; } catch (e) {}
 $("kb-who").addEventListener("change", () => { try { localStorage.setItem("kb-who", $("kb-who").value.trim()); } catch (e) {} });
-$("kb-filter").addEventListener("input", renderKbList);
+// Search runs nbs-cli's full-text search (the same ranking agents get) after a short pause in typing
+let kbHits = null, kbSearchSeq = 0;
+$("kb-filter").addEventListener("input", () => {
+  clearTimeout(kbSearch.timer);
+  kbSearch.timer = setTimeout(kbSearch, 250);
+});
+async function kbSearch() {
+  const q = $("kb-filter").value.trim(), seq = ++kbSearchSeq;
+  let hits = null;
+  if (q) {
+    try {
+      const res = await fetch(`/api/kb/search?q=${encodeURIComponent(q)}`);
+      if (res.status === 401) return location.reload();
+      hits = await res.json();
+      if (!res.ok) throw new Error(hits.detail || res.statusText);
+    } catch (e) { toast(`Search failed: ${e.message}`); return; }
+  }
+  if (seq !== kbSearchSeq) return;
+  kbHits = hits;
+  renderKbList();
+}
 
 function kbWho() {
   const who = $("kb-who").value.trim();
@@ -850,6 +874,7 @@ async function loadKb() {
     kb = await res.json();
     if (!res.ok) throw new Error(kb.detail || res.statusText);
   } catch (e) { toast(`Could not read the knowledge base: ${e.message}`); return; }
+  if ($("kb-filter").value.trim()) await kbSearch();
   renderKbList();
   if (kbSel && kbSel.kind !== "new") selectKb(kbSel.kind, kbSel.id, true);
 }
@@ -862,15 +887,23 @@ function kbItem(kind, id, title, meta, pending) {
 
 function renderKbList() {
   if (!kb) return;
-  const f = $("kb-filter").value.trim().toLowerCase();
-  const hit = (n) => !f || `${n.id} ${n.title} ${n.topic || ""}`.toLowerCase().includes(f);
+  // The review lists are short: match their titles; the notes list shows search hits, best first
+  const words = $("kb-filter").value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const hit = (n) => words.every((w) => `${n.id} ${n.title} ${n.topic || ""}`.toLowerCase().includes(w));
   const q = kb.queue;
   let html = `<div class="kb-group">To review (${q.count})</div>`;
   for (const n of q.notes.filter(hit)) html += kbItem("review", n.id, n.title, `${KB_ORIGIN[kbOrigin(n)]} by ${n.author || "?"}`, true);
   for (const a of q.appendices.filter(hit)) html += kbItem("appendix", a.id, a.title, `${a.entries.length} appended ${a.entries.length === 1 ? "entry" : "entries"}`, true);
   if (!q.count) html += `<div class="kb-group" style="text-transform:none">Nothing waiting.</div>`;
-  html += `<div class="kb-group">All notes (${kb.notes.length})</div>`;
-  for (const n of kb.notes.filter(hit)) html += kbItem("note", n.id, n.title, `${KB_ORIGIN[kbOrigin(n)]}${n.topic ? " · " + n.topic : ""}`);
+  if (kbHits) {
+    html += `<div class="kb-group">Matches (${kbHits.length})</div>`;
+    // Snippets are raw Markdown: drop the markup characters for the one-line preview
+    for (const n of kbHits) html += kbItem("note", n.id, n.title, (n.snippet || KB_ORIGIN[kbOrigin(n)]).replace(/[#*`_>]+/g, ""));
+    if (!kbHits.length) html += `<div class="kb-group" style="text-transform:none">No notes match.</div>`;
+  } else {
+    html += `<div class="kb-group">All notes (${kb.notes.length})</div>`;
+    for (const n of kb.notes) html += kbItem("note", n.id, n.title, `${KB_ORIGIN[kbOrigin(n)]}${n.topic ? " · " + n.topic : ""}`);
+  }
   $("kb-list").innerHTML = html;
 }
 $("kb-list").addEventListener("click", (ev) => {
@@ -887,7 +920,7 @@ async function selectKb(kind, id, quiet) {
     const note = await res.json();
     if (!res.ok) throw new Error(note.detail || res.statusText);
     if (kind === "appendix") kbAppendix(note);
-    else kbForm(note, kind === "review" ? "review" : kbOrigin(note) === "human" ? "human" : "view");
+    else kbView(note, kind === "review");
   } catch (e) {
     if (!quiet) toast(`Could not open ${id}: ${e.message}`);
     $("kb-detail").innerHTML = `<div class="from">That note is gone (approved, rejected or moved).</div>`;
@@ -896,54 +929,86 @@ async function selectKb(kind, id, quiet) {
 
 const listText = (v) => Array.isArray(v) ? v.join(", ") : (v || "");
 
-function kbForm(note, mode) {
-  const m = note ? note.meta || {} : {};
-  const from = !note ? "A new note in the profile's knowledge folder. Agents use it as soon as you save it; commit it with git." :
-    `${KB_ORIGIN[kbOrigin(note)]} <code>${esc(note.id)}</code> by ${esc(m.author || "?")}` +
+function kbFrom(note) {
+  const m = note.meta || {};
+  return `${KB_ORIGIN[kbOrigin(note)]} <code>${esc(note.id)}</code> by ${esc(m.author || "?")}` +
     (m.created ? `, ${esc(m.created)}` : "") + (m.approved_by ? `; approved by ${esc(m.approved_by)}` : "") +
     (m.edited_by ? `; edited by ${esc(m.edited_by)}` : "");
-  const editable = mode !== "view";
-  const ro = editable ? "" : " disabled";
+}
+
+// Run a review or write action as the named staff member, then reload the lists
+async function kbAct(url, body, done) {
+  const by = kbWho();
+  if (!by) return;
+  try { const out = await post(url, {...body, by}); toast(done(out)); }
+  catch (e) { toast(e.message); return; }
+  await loadKb();
+}
+function kbOn(id, fn) { const el = $(id); if (el) el.addEventListener("click", fn); }
+function kbReviewButtons(note) {
+  kbOn("kb-keep", () => kbAct("/api/kb/keep", {id: note.id}, () => { kbSel = null; $("kb-detail").innerHTML = ""; return "Kept as an agent note"; }));
+  kbOn("kb-reject", () => {
+    const reason = prompt("Why reject it? (kept with the rejected note)");
+    if (reason === null) return;
+    kbAct("/api/kb/reject", {id: note.id, reason}, () => { kbSel = null; $("kb-detail").innerHTML = ""; return "Rejected"; });
+  });
+}
+
+// Reading view: the formatted note, with Edit (profile notes) or the review actions
+function kbView(note, review) {
+  const m = note.meta || {};
+  const chips = ["topic", "devices", "nodes", "tags"].filter((k) => listText(m[k]))
+    .map((k) => `<span class="pill"><span class="sub">${k}</span> ${esc(listText(m[k]))}</span>`).join(" ");
+  const editable = review || kbOrigin(note) === "human";
+  let html = `<h2 class="kb-title">${esc(note.title)}</h2><div class="from">${kbFrom(note)}</div>` +
+    (chips ? `<div class="kb-chips">${chips}</div>` : "");
+  if (review) html += `<p class="from">${note.draft ? "Drafts are not used by agents until approved." :
+    "Agents already use this note, marked as written by an agent."} Approving writes it into the profile's knowledge folder for you to commit.</p>`;
+  html += `<div class="actions">` +
+    (review ? `<button id="kb-approve" class="primary">Approve into profile</button>` +
+      `<button id="kb-edit">Edit before approving</button>` +
+      (note.draft ? "" : `<button id="kb-keep" title="Leave it as an agent note and take it off the list">Keep as agent note</button>`) +
+      `<button id="kb-reject" class="danger">Reject…</button>` :
+      editable ? `<button id="kb-edit">Edit</button>` : "") +
+    `</div><div class="md kb-body">${rich(note.body)}</div>`;
+  if (note.appendix) html += `<h3 class="kb-sub">Appended</h3><div class="kb-preview md">${rich(note.appendix)}</div>`;
+  $("kb-detail").innerHTML = html;
+  $("kb-detail").scrollTop = 0;
+  kbOn("kb-edit", () => kbForm(note, review ? "review" : "human"));
+  kbOn("kb-approve", () => kbAct("/api/kb/approve", {id: note.id}, (out) => { kbSel = {kind: "note", id: out.id}; return `Approved as ${out.id}`; }));
+  kbReviewButtons(note);
+}
+
+function kbForm(note, mode) {
+  // Editing: a new note, a profile note, or a review item before approving it
+  const m = note ? note.meta || {} : {};
+  const from = !note ? "A new note in the profile's knowledge folder. Agents use it as soon as you save it; commit it with git." : kbFrom(note);
   let html = `<div class="from">${from}</div>`;
   if (mode === "review") html += `<p class="from">${note.draft ? "Drafts are not used by agents until approved." :
     "Agents already use this note, marked as written by an agent."} Approving writes it, with your edits, into the profile's knowledge folder for you to commit.</p>`;
-  html += `<label for="kb-title">Title</label><input type="text" id="kb-title" value="${esc(note ? note.title : "")}"${ro}>` +
+  html += `<label for="kb-title">Title</label><input type="text" id="kb-title" value="${esc(note ? note.title : "")}">` +
     `<div class="grid">` +
     ["topic", "devices", "nodes", "tags"].map((k) => `<div><label for="kb-${k}">${k[0].toUpperCase() + k.slice(1)}</label>` +
-      `<input type="text" id="kb-${k}" value="${esc(listText(m[k]))}" placeholder="${k === "topic" ? "hardware, problem, calibration, quirk, procedure" : "comma-separated"}"${ro}></div>`).join("") +
+      `<input type="text" id="kb-${k}" value="${esc(listText(m[k]))}" placeholder="${k === "topic" ? "hardware, problem, calibration, quirk, procedure" : "comma-separated"}"></div>`).join("") +
     `</div><label for="kb-body">Text (Markdown)</label>` +
-    (editable ? `<textarea id="kb-body" rows="14">${esc(note ? note.body : "")}</textarea>` : "") +
+    `<textarea id="kb-body" rows="14">${esc(note ? note.body : "")}</textarea>` +
     `<div class="actions">` +
-    (mode === "review" ? `<button id="kb-approve" class="primary">Approve into profile</button>` +
-      (note.draft ? "" : `<button id="kb-keep" title="Leave it as an agent note and take it off the list">Keep as agent note</button>`) +
-      `<button id="kb-reject" class="danger">Reject…</button>` : "") +
+    (mode === "review" ? `<button id="kb-approve" class="primary">Approve with these edits</button>` : "") +
     (mode === "human" || mode === "new" ? `<button id="kb-save" class="primary">Save to profile</button>` : "") +
+    `<button id="kb-cancel">Cancel</button>` +
     `</div><label>Preview</label><div class="kb-preview md" id="kb-preview"></div>`;
   if (note && note.appendix) html += `<label>Appended</label><div class="kb-preview md">${rich(note.appendix)}</div>`;
   $("kb-detail").innerHTML = html;
-  const preview = () => { $("kb-preview").innerHTML = rich(editable ? $("kb-body").value : note.body); };
+  const preview = () => { $("kb-preview").innerHTML = rich($("kb-body").value); };
   preview();
-  if (editable) $("kb-body").addEventListener("input", preview);
+  $("kb-body").addEventListener("input", preview);
   const fields = () => ({
     id: note ? note.id : "", title: $("kb-title").value, body: $("kb-body").value,
     topic: $("kb-topic").value.trim(), devices: $("kb-devices").value, nodes: $("kb-nodes").value, tags: $("kb-tags").value,
   });
-  const act = async (url, body, done) => {
-    const by = kbWho();
-    if (!by) return;
-    try { const out = await post(url, {...body, by}); toast(done(out)); }
-    catch (e) { toast(e.message); return; }
-    await loadKb();
-  };
-  const on = (id, fn) => { const el = $(id); if (el) el.addEventListener("click", fn); };
-  on("kb-approve", () => act("/api/kb/approve", fields(), (out) => { kbSel = {kind: "note", id: out.id}; return `Approved as ${out.id}`; }));
-  on("kb-keep", () => act("/api/kb/keep", {id: note.id}, () => { kbSel = null; $("kb-detail").innerHTML = ""; return "Kept as an agent note"; }));
-  on("kb-reject", () => {
-    const reason = prompt("Why reject it? (kept with the rejected note)");
-    if (reason === null) return;
-    act("/api/kb/reject", {id: note.id, reason}, () => { kbSel = null; $("kb-detail").innerHTML = ""; return "Rejected"; });
-  });
-  on("kb-save", () => act("/api/kb/note", fields(), (out) => { kbSel = {kind: "note", id: out.id}; return `Saved ${out.id}`; }));
+  kbOn("kb-approve", () => kbAct("/api/kb/approve", fields(), (out) => { kbSel = {kind: "note", id: out.id}; return `Approved as ${out.id}`; }));
+  kbOn("kb-save", () => kbAct("/api/kb/note", fields(), (out) => { kbSel = {kind: "note", id: out.id}; return `Saved ${out.id}`; }));
+  kbOn("kb-cancel", () => note ? kbView(note, mode === "review") : (kbSel = null, renderKbList(), $("kb-detail").innerHTML = ""));
 }
 
 function kbAppendix(note) {
