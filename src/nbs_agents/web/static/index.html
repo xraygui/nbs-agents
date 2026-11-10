@@ -91,7 +91,9 @@ main { flex: 1; min-height: 0; display: flex; }
 #banner .q { white-space: pre-wrap; margin-top: 2px; }
 #banner a { color: var(--accent); cursor: pointer; margin-left: 6px; }
 
-.split { flex: 1; min-height: 0; display: grid; grid-template-rows: minmax(0, 3fr) auto minmax(0, 2fr); }
+.split { flex: 1; min-height: 0; display: grid; grid-template-rows: minmax(0, 1fr) auto var(--activity-h, 40%); }
+.split.activity-hidden { grid-template-rows: minmax(0, 1fr) auto auto; }
+.split.activity-hidden #activity { display: none; }
 #conversation, #feed { padding: 10px 14px; }
 .row { display: flex; margin: 6px 0; }
 .row.right { justify-content: flex-end; }
@@ -119,7 +121,9 @@ main { flex: 1; min-height: 0; display: flex; }
 
 #steer { display: flex; gap: 6px; padding: 8px 14px; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
 #activity-wrap { display: flex; flex-direction: column; min-height: 0; }
-#activity-wrap .col-head { border-bottom: none; padding-bottom: 4px; }
+#activity-wrap .col-head { border-bottom: none; padding-bottom: 4px; cursor: row-resize; user-select: none; touch-action: none; }
+#activity-wrap .col-head button { cursor: pointer; padding: 2px 10px; font-size: 12px; }
+.split.activity-hidden #activity-wrap .col-head { cursor: default; padding-bottom: 10px; }
 table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
 th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
 th { position: sticky; top: 0; background: var(--panel); color: var(--muted); font-weight: 600; z-index: 1; }
@@ -234,7 +238,8 @@ input[type=search] { background: var(--panel); border: 1px solid var(--border); 
           <button type="button" id="stop" class="danger" title="Ask the agent to stop adding scans and finalize">Request stop</button>
         </form>
         <div id="activity-wrap">
-          <div class="col-head"><h2>Activity <span style="text-transform:none;letter-spacing:0">(sessions, queued plans, runs)</span></h2></div>
+          <div class="col-head" id="activity-head" title="Drag to resize the activity table"><h2>Activity <span style="text-transform:none;letter-spacing:0">(sessions, queued plans, runs)</span></h2>
+            <button type="button" id="activity-toggle" title="Hide the activity table to give the conversation the room">Hide</button></div>
           <div id="activity" class="scroll"></div>
         </div>
       </div>
@@ -811,6 +816,49 @@ $("ask-row").addEventListener("submit", async (ev) => {
     follow.feed = true;
     $("ask-status").textContent = "";
   } catch (e) { toast(`Could not send the question: ${e.message}`); }
+});
+
+// ---------------------------------------------------------------- activity panel size
+// Drag the Activity header to resize it, or hide it; both are remembered in this browser
+function setActivityLayout(height, hidden) {
+  const split = $("activity-wrap").parentElement;
+  if (height != null) split.style.setProperty("--activity-h", `${height}px`);
+  split.classList.toggle("activity-hidden", hidden);
+  $("activity-toggle").textContent = hidden ? "Show" : "Hide";
+  $("activity-head").title = hidden ? "" : "Drag to resize the activity table";
+}
+function saveActivityLayout() {
+  try {
+    const split = $("activity-wrap").parentElement;
+    localStorage.setItem("activity-layout", JSON.stringify({
+      height: parseFloat(split.style.getPropertyValue("--activity-h")) || null,
+      hidden: split.classList.contains("activity-hidden"),
+    }));
+  } catch (e) {}
+}
+try {
+  const saved = JSON.parse(localStorage.getItem("activity-layout") || "{}");
+  setActivityLayout(saved.height || null, !!saved.hidden);
+} catch (e) {}
+$("activity-toggle").addEventListener("click", () => {
+  setActivityLayout(null, !$("activity-wrap").parentElement.classList.contains("activity-hidden"));
+  saveActivityLayout();
+});
+$("activity-head").addEventListener("pointerdown", (ev) => {
+  const split = $("activity-wrap").parentElement;
+  if (ev.target.closest("button") || split.classList.contains("activity-hidden")) return;
+  const head = $("activity-head");
+  head.setPointerCapture(ev.pointerId);
+  const box = split.getBoundingClientRect(), steer = $("steer").offsetHeight;
+  const move = (e) => {
+    // The table keeps at least its header and a row; the conversation keeps at least 80px
+    const h = Math.min(Math.max(box.bottom - e.clientY, 70), box.height - steer - 80);
+    setActivityLayout(h, false);
+  };
+  const up = () => { head.removeEventListener("pointermove", move); saveActivityLayout(); };
+  head.addEventListener("pointermove", move);
+  head.addEventListener("pointerup", up, {once: true});
+  head.addEventListener("pointercancel", up, {once: true});
 });
 
 // ---------------------------------------------------------------- tabs, stream
