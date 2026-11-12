@@ -1,6 +1,6 @@
 ---
 name: beamline-knowledge
-description: Search, read and add to the beamline knowledge base through nbs-cli kb. Use when you need facts about the beamline's hardware, known problems, calibration routines or quirks that devices and diagnose don't give, before guessing about the hardware, when you learn something a later agent or operator should know, and when staff want to write knowledge down with your help (interview them, then save a draft for review). Human notes are append-only for agents.
+description: Search, read and add to the beamline knowledge base through nbs-cli kb. Use when you need facts about the beamline's hardware, known problems, calibration routines or quirks that devices and diagnose don't give, before guessing about the hardware, when you learn something a later agent or operator should know, and when staff want to write knowledge down with your help (interview them, then save a draft for review), and for engineering reference scans (nbs-cli ref): past runs that show a part of the beamline working, to compare with now, and staff requests to draft one. Human notes are append-only for agents.
 ---
 
 # Beamline knowledge base
@@ -108,4 +108,55 @@ approve in the web page's Knowledge tab. It is not used until then.
 
 Don't save staff knowledge as a live agent note, and don't append it to a human
 note: it goes through review as a draft.
+
+## References: past scans that show the beamline working
+
+The reference library (`nbs-cli ref`) lists past runs that staff chose as
+references: "M3 pitch rocking curve after the realignment", "i0 vs exit slit
+width". Each entry gives the run's catalog, Tiled URI, path and uid, a
+description written by people, and a snapshot taken when the entry was made:
+the start document (plan, motors and their scanned range, detectors), every
+baseline reading at the start of the run, and the run summary.
+
+A reference shows a past working state, never the current one. Use it to
+compare: run the same kind of scan now, or look at a recent run, and set the two
+side by side. Never report a reference's values (positions, flux, ring current)
+as how the beamline is now. Check the live state first, as with notes.
+
+| Command | Gives |
+|---|---|
+| `nbs-cli ref search WORDS [--device D] [--node N] [--tag T] [--all]` | Entries matching the words, best first. |
+| `nbs-cli ref list [--device D] [--node N] [--tag T] [--all] [--drafts]` | Current entries passing the filters (`--all` adds superseded and retired ones; `--drafts` lists drafts waiting for review instead). |
+| `nbs-cli ref show ID` | The entry, its snapshot, and under `scan` whether the run still resolves in Tiled. |
+| `nbs-cli ref verify` | Every entry whose run no longer resolves. |
+| `nbs-cli ref create RUN --title T (--text "..." \| --file F) [--catalog NAME] [--devices a,b] [--nodes n] [--tags t] [--aliases a,b] [--request ID]` | Writes a draft (`draft/...`) for staff to review. RUN is a uid, uid prefix, scan ID, or -1. `--catalog` names another catalog the run is in (default: the beamline's own). Devices default to the run's motors and detectors. |
+
+`nbs-cli device NAME` and `nbs-cli diagnose` list current references under
+`references`, next to `notes`. A superseded entry names the entry that replaced
+it under `superseded_by`; use the newer one.
+
+You only ever write drafts. Staff approve, edit or reject them in the web page's
+References tab.
+
+### A staff request for a draft
+
+Staff ask from the References tab. The request reaches you as a question
+starting "Reference scan request req-...", naming a catalog, a run and what the
+scan is a reference for.
+
+1. If the run is in the default catalog, look at it: `nbs-cli run RUN` (add
+   `--plot notebook/plots/ref.png` if a picture helps you describe it).
+   `nbs-cli run` cannot reach another catalog: there, work from what staff wrote.
+2. Write the description to `notebook/ref-draft.md`: what the scan shows, the
+   features that matter (peak position, width, edge, levels), and what it is a
+   reference for, in staff's words. Put anything you inferred, and everything
+   you could not look at, under a heading `Unconfirmed`.
+3. Save the draft with `nbs-cli ref create RUN --catalog NAME --request req-...
+   --title "..." --file notebook/ref-draft.md`, with `--devices` and `--nodes`
+   by their exact names from `devices` and `diagnose`. A draft cannot be
+   changed after this, so get the description right first; staff edit it on
+   approval.
+4. Post an `answer` with the draft's ID and say it waits for review in the
+   References tab. If `ref create` fails (no such run, the catalog cannot be
+   read), answer with the error instead.
 

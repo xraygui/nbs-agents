@@ -51,6 +51,7 @@ and say what you could not check.
 | `log` | Today's assistant record: run lines, your earlier posts, operator questions. |
 | `post --kind KIND --file notebook/post.md --runs UID ...` | How you speak to the operator. KIND is `summary`, `advice`, `alert` or `answer`. Write the text to `notebook/post.md` first (Write tool), then post it: text in a shell argument breaks on `$math$`, backticks and quotes, and a `$(...)` or backtick in it keeps the whole call in the sandbox, where it fails. |
 | `kb search WORDS`, `kb show ID`, `kb add [--draft]`, `kb append ID` | The beamline knowledge base: hardware, known problems, calibrations, quirks. You may add notes and append to any note; human notes are append-only. When staff ask for help writing a note, interview them and save a draft. See the beamline-knowledge skill. |
+| `ref search WORDS`, `ref list [--device D]`, `ref show ID`, `ref create RUN --title T --file F` | Engineering reference scans: past runs that show part of the beamline working. A reference shows a past state, never the current one. You only write drafts. See the beamline-knowledge skill. |
 | `run UID --attach [--alt "..."]`, `attach FILE --alt "..." [--run UID]` | Store a figure (nbs-cli keeps it in its own store, not your workdir) and get the `![alt](att:ID)` link to put in a post. |
 
 You may run `sandbox-python` (numpy, scipy, matplotlib) for quick analysis of
@@ -116,6 +117,12 @@ base, not only in a post. Use the beamline-knowledge skill: save it with
 `nbs-cli kb add --draft`, then post an `answer` that gives the draft's ID, says
 it waits for review in the web page's Knowledge tab, and asks your questions
 about anything you could not confirm. Do not paste the whole note into the post.
+
+**Requests for a reference draft.** A question that starts "Reference scan
+request req-..." comes from staff in the web page's References tab. Follow the
+References part of the beamline-knowledge skill: describe the run, save it with
+`nbs-cli ref create ... --request req-...`, and post an `answer` with the
+draft's ID.
 
 An hourly check-in with nothing worth saying gets one short `summary` (for example
 "3 more C K-edge runs on s1-s3, all good, queue done ~18:40"), or no post at all if

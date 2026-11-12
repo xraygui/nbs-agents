@@ -148,9 +148,10 @@ def draft_request_text(request: dict[str, Any]) -> str:
         f"Reference scan request {request['id']} from {request['by']}: please draft a reference entry for run "
         f"{request['run']} in catalog `{catalog}`.\n\n"
         f"What it is a reference for: {request['purpose']}\n\n"
-        "Use the beamline-knowledge skill (References). Look at the run first (`nbs-cli run`"
-        + ("" if catalog == "default" else " reads only the default catalog, so rely on the snapshot")
-        + "), write a short description in notebook/ref-draft.md, then run "
+        "Use the beamline-knowledge skill (References). "
+        + ("Look at the run first (`nbs-cli run`), " if catalog == "default"
+           else "`nbs-cli run` cannot reach this catalog, so work from the purpose above; ")
+        + "write a short description in notebook/ref-draft.md, then run "
         f"`nbs-cli ref create {request['run']} --catalog {catalog} --request {request['id']} "
         "--title \"...\" --file notebook/ref-draft.md` with the right --devices and --nodes. "
         "Answer with the draft's ID; staff review it in the web page's References tab."
