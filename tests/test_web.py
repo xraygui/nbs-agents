@@ -15,6 +15,7 @@ from fakes import FakeRedis  # noqa: E402
 from nbs_agents.agentlog import AgentLog, assistant_uid  # noqa: E402
 from nbs_agents.cli.core import Beamline  # noqa: E402
 from nbs_agents.cli.kb import KnowledgeBase  # noqa: E402
+from nbs_agents.cli.refs import ReferenceLibrary  # noqa: E402
 from nbs_agents.web import create_app  # noqa: E402
 
 ORIGIN = {"Origin": "http://testserver"}
@@ -42,8 +43,8 @@ class FakeBeamline:
         return self.beam_value
 
 
-def client_for(bl, attachments=None, kb=None):
-    app = create_app(bl, allowed_hosts=("testserver",), attachments=attachments, kb=kb)
+def client_for(bl, attachments=None, kb=None, refs=None):
+    app = create_app(bl, allowed_hosts=("testserver",), attachments=attachments, kb=kb, refs=refs)
     return TestClient(app, base_url="http://testserver")
 
 
@@ -261,3 +262,81 @@ def test_knowledge_base_search(tmp_path):
     assert [h["id"] for h in hits] == ["gate-valves"]
     assert "pumping" in hits[0]["snippet"]
     assert len(client.get("/api/kb/search", params={"q": ""}).json()) == 2
+
+
+def ref_draft(refs, title="M3 pitch", uid="4f1c0a7e-0000", scan_id=81234, request=""):
+    run = {"uid": uid, "scan_id": scan_id, "catalog": "default", "tiled_uri": "https://t", "tiled_path": "bl/raw"}
+    return refs.create(title, "Rocking curve.", "assistant", run, {"baseline": {"ring_current": 400.0}},
+                       request=request, devices=["m3_pitch"])
+
+
+def test_staff_review_reference_scans(tmp_path):
+    refs = ReferenceLibrary(tmp_path / "references", tmp_path / "agent", tmp_path / "review")
+    ref_draft(refs)
+    ref_draft(refs, title="Bad one", uid="dead")
+    bl = FakeBeamline()
+    bl.config.tiled_uri, bl.config.tiled_path = "https://t", "bl/raw"
+    client = client_for(bl, refs=refs)
+    assert client.get("/api/snapshot").json()["ref_pending"] == 2
+    overview = client.get("/api/refs").json()
+    assert [d["id"] for d in overview["queue"]["drafts"]] == ["draft/bad-one", "draft/m3-pitch"]
+    assert overview["catalogs"]["default"] == {"uri": "https://t", "path": "bl/raw"}
+    entry = client.get("/api/refs/entry", params={"id": "draft/m3-pitch"}).json()
+    assert entry["snapshot"]["baseline"] == {"ring_current": 400.0}
+    r = client.post("/api/refs/approve", json={"id": "draft/m3-pitch", "by": " "}, headers=ORIGIN)
+    assert r.status_code == 400
+    r = client.post("/api/refs/approve", json={"id": "draft/m3-pitch", "by": "Ana", "body": "Staff text.",
+                                               "tags": "alignment, m3"}, headers=ORIGIN)
+    assert r.status_code == 200 and r.json()["id"] == "m3-pitch"
+    assert refs.get("m3-pitch").meta["tags"] == ["alignment", "m3"]
+    assert (tmp_path / "references" / "m3-pitch.snapshot.json").is_file()
+    r = client.post("/api/refs/reject", json={"id": "draft/bad-one", "by": "Ana", "reason": "no"}, headers=ORIGIN)
+    assert r.status_code == 200
+    assert client.get("/api/snapshot").json()["ref_pending"] == 0
+    # A newer scan supersedes the entry
+    ref_draft(refs, title="M3 pitch after bake", uid="beef", scan_id=90000)
+    r = client.post("/api/refs/approve", json={"id": "draft/m3-pitch-after-bake", "by": "Ana",
+                                               "supersedes": "m3-pitch"}, headers=ORIGIN)
+    assert r.status_code == 200
+    assert refs.get("m3-pitch").meta["superseded_by"] == "m3-pitch-after-bake"
+    hits = client.get("/api/refs/search", params={"q": "pitch"}).json()
+    assert {h["id"]: h["status"] for h in hits} == {"m3-pitch": "superseded", "m3-pitch-after-bake": "current"}
+    r = client.post("/api/refs/status", json={"id": "m3-pitch", "by": "Ana", "status": "retired"}, headers=ORIGIN)
+    assert r.json()["status"] == "retired"
+    r = client.post("/api/refs/entry", json={"id": "m3-pitch-after-bake", "by": "Ben", "title": "M3 pitch (baked)"},
+                    headers=ORIGIN)
+    assert r.json()["title"] == "M3 pitch (baked)"
+    assert client.post("/api/refs/reject", json={"id": "draft/x", "by": "x"}).status_code == 403
+
+
+def test_request_reference_draft_asks_the_assistant(tmp_path):
+    refs = ReferenceLibrary(tmp_path / "references", tmp_path / "agent", tmp_path / "review")
+    bl = FakeBeamline()
+    bl.config.tiled_uri, bl.config.tiled_path = "https://t", "bl/raw"
+    bl.config.ref_catalogs = {"eng": {"uri": "https://t", "path": "eng/raw"}}
+    client = client_for(bl, refs=refs)
+    r = client.post("/api/refs/request", json={"by": "Ana", "catalog": "nope", "run": "81234", "purpose": "x"},
+                    headers=ORIGIN)
+    assert r.status_code == 400 and "default, eng" in r.json()["detail"]
+    r = client.post("/api/refs/request", json={"by": "Ana", "catalog": "eng", "run": "81234",
+                                               "purpose": "M3 alignment reference"}, headers=ORIGIN)
+    assert r.status_code == 200
+    request = r.json()
+    entry = bl.agent_log.get(assistant_uid())["log"][-1]
+    assert entry["kind"] == "operator" and entry["source"] == "web"
+    assert request["id"] in entry["text"]
+    assert f"nbs-cli ref create 81234 --catalog eng --request {request['id']}" in entry["text"]
+    assert "M3 alignment reference" in entry["text"]
+    assert client.get("/api/snapshot").json()["ref_pending"] == 1
+    assert [q["id"] for q in client.get("/api/refs").json()["queue"]["requests"]] == [request["id"]]
+    # The assistant's draft answers it
+    run = {"uid": "4f1c", "scan_id": 81234, "catalog": "eng", "tiled_uri": "https://t", "tiled_path": "eng/raw"}
+    refs.create("M3 pitch", "Rocking curve.", "assistant", run, {}, request=request["id"])
+    assert client.get("/api/refs").json()["queue"]["requests"] == []
+    # Cancelling one that was never answered
+    r = client.post("/api/refs/request", json={"by": "Ana", "run": "5", "purpose": "y"}, headers=ORIGIN)
+    other = r.json()["id"]
+    r = client.post("/api/refs/request/cancel", json={"id": other, "by": "Ana"}, headers=ORIGIN)
+    assert r.status_code == 200
+    assert client.get("/api/refs").json()["queue"]["requests"] == []
+

@@ -12,6 +12,13 @@ base (approve, edit and approve, keep, reject) and write or edit human notes.
 Approved and written notes go into ``kb_dir`` (the profile's knowledge folder)
 for staff to commit. Agents get ``kb_dir`` and the review record read-only.
 
+The References tab does the same for engineering reference scans
+(``nbs_agents.cli.refs``): staff approve, edit or reject the drafts agents
+write, mark entries superseded or retired, and ask the beamline assistant to
+draft an entry for a run. The request goes to the assistant as an operator
+question, like ``nbs-cli ask-assistant``, and stays listed until a draft for it
+appears.
+
 Writes go to the same places the Qt tabs write: operator entries in the agent
 log, and ``submit_agent_block`` on the QueueServer for a new agent.
 
@@ -38,6 +45,7 @@ from ..assistant.attachments import AttachmentStore
 from ..assistant.auth import check_token
 from ..cli.core import compact_item
 from ..cli.kb import KBError, KnowledgeBase
+from ..cli.refs import ReferenceLibrary, RefError, catalogs, resolve_refs
 from nbs_agents.constants import AGENT_UID_KEY
 from ..assistant.launcher import claude_launch_parameters
 from nbs_agents.queue import submit_agent_block
@@ -94,11 +102,59 @@ class RejectBody(StaffBody):
     index: Optional[int] = None
 
 
-def _lists(body: StaffNoteBody) -> dict[str, Optional[list[str]]]:
+class RefBody(StaffBody):
+    title: Optional[str] = None
+    body: Optional[str] = None
+    devices: Optional[str] = None
+    nodes: Optional[str] = None
+    tags: Optional[str] = None
+    aliases: Optional[str] = None
+    supersedes: str = ""
+
+
+class RefStatusBody(StaffBody):
+    status: str
+    superseded_by: str = ""
+
+
+class RefRequestBody(BaseModel):
+    by: str
+    catalog: str = "default"
+    run: str
+    purpose: str
+
+
+def _lists(body: BaseModel, keys=("devices", "nodes", "tags")) -> dict[str, Optional[list[str]]]:
     return {
         key: None if getattr(body, key) is None else [v.strip() for v in getattr(body, key).split(",") if v.strip()]
-        for key in ("devices", "nodes", "tags")
+        for key in keys
     }
+
+
+REF_KEYS = ("devices", "nodes", "tags", "aliases")
+
+
+def draft_request_text(request: dict[str, Any]) -> str:
+    """
+    The operator question that asks the assistant to draft a reference entry.
+
+    Parameters
+    ----------
+    request : dict
+        From ``ReferenceLibrary.add_request``.
+    """
+    catalog = request["catalog"]
+    return (
+        f"Reference scan request {request['id']} from {request['by']}: please draft a reference entry for run "
+        f"{request['run']} in catalog `{catalog}`.\n\n"
+        f"What it is a reference for: {request['purpose']}\n\n"
+        "Use the beamline-knowledge skill (References). Look at the run first (`nbs-cli run`"
+        + ("" if catalog == "default" else " reads only the default catalog, so rely on the snapshot")
+        + "), write a short description in notebook/ref-draft.md, then run "
+        f"`nbs-cli ref create {request['run']} --catalog {catalog} --request {request['id']} "
+        "--title \"...\" --file notebook/ref-draft.md` with the right --devices and --nodes. "
+        "Answer with the draft's ID; staff review it in the web page's References tab."
+    )
 
 
 class WebState:
@@ -111,13 +167,18 @@ class WebState:
         nbs-cli client; its agent log, manager and ``beam()`` are used.
     kb : KnowledgeBase, optional
         Knowledge base; from the beamline's config if omitted.
+    refs : ReferenceLibrary, optional
+        Reference scan library; from the beamline's config if omitted.
     """
 
-    def __init__(self, beamline: Any, kb: Optional[KnowledgeBase] = None) -> None:
+    def __init__(self, beamline: Any, kb: Optional[KnowledgeBase] = None,
+                 refs: Optional[ReferenceLibrary] = None) -> None:
         self.beamline = beamline
         config = beamline.config
         self.kb = kb or KnowledgeBase(getattr(config, "kb_dir", ""), getattr(config, "kb_agent_dir", ""),
                                       getattr(config, "kb_review_dir", ""))
+        self.refs = refs or ReferenceLibrary(getattr(config, "ref_dir", ""), getattr(config, "ref_agent_dir", ""),
+                                             getattr(config, "ref_review_dir", ""))
         self._queue_error: Optional[str] = None
         self._queue_retry_at = 0.0
 
@@ -142,7 +203,8 @@ class WebState:
             ``runner_alive``, ``tiled_login`` (a pending login link), ``beam``,
             ``manager``, ``running``, ``blocks``
             (each steerable session's queued items), ``read_only``,
-            ``kb_pending`` (knowledge-base items waiting for review) and
+            ``kb_pending`` (knowledge-base items waiting for review),
+            ``ref_pending`` (reference drafts and open draft requests) and
             ``errors``.
         """
         errors: dict[str, str] = {}
@@ -160,11 +222,16 @@ class WebState:
             "read_only": bool(getattr(self.beamline.config, "read_only", False)),
             "drivers": bool(getattr(self.beamline.config, "drivers", True)),
             "kb_pending": None,
+            "ref_pending": None,
         }
         try:
             out["kb_pending"] = self.kb.review_queue()["count"]
         except Exception as exc:
             errors["kb"] = str(exc)
+        try:
+            out["ref_pending"] = self.refs.review_queue()["count"]
+        except Exception as exc:
+            errors["refs"] = str(exc)
         try:
             records = self.log.records()
         except Exception as exc:
@@ -258,6 +325,37 @@ class WebState:
         except KBError as exc:
             raise HTTPException(400, str(exc))
 
+    def ref_call(self, method: str, *args: Any, **kwargs: Any) -> Any:
+        """Run a reference-library method, turning its refusals into HTTP 400."""
+        try:
+            return getattr(self.refs, method)(*args, **kwargs)
+        except RefError as exc:
+            raise HTTPException(400, str(exc))
+
+    def request_ref_draft(self, by: str, catalog: str, run: str, purpose: str) -> dict[str, Any]:
+        """
+        Record a staff request for a reference draft and ask the assistant for it.
+
+        The question goes into today's assistant record, as ``ask_assistant``
+        and ``nbs-cli ask-assistant`` do, and the runner's assistant answers it.
+
+        Returns
+        -------
+        dict
+            The request, with the assistant entry under ``message``.
+        """
+        known = catalogs(self.beamline.config)
+        if catalog not in known:
+            raise HTTPException(400, f"no catalog {catalog!r}; have {', '.join(known)}")
+        request = self.ref_call("add_request", by, catalog, run, purpose)
+        try:
+            request["message"] = self.ask_assistant(draft_request_text(request))
+        except Exception as exc:
+            # Keep the record honest: a request the assistant never got is not pending
+            self.refs.cancel_request(request["id"], request["by"])
+            raise HTTPException(502, f"could not reach the assistant: {exc}")
+        return request
+
     def new_agent(self, goal: str, budget: str = "", start: bool = True, confirm_busy: bool = False) -> dict:
         """
         Queue a Claude agent session that nbs-agents-runner will launch.
@@ -322,6 +420,7 @@ def create_app(
     attachments: Optional[AttachmentStore] = None,
     token: Optional[str] = None,
     kb: Optional[KnowledgeBase] = None,
+    refs: Optional[ReferenceLibrary] = None,
 ) -> FastAPI:
     """
     Build the web app.
@@ -343,13 +442,15 @@ def create_app(
         or bearer header); without one the page is open to anyone who can reach it.
     kb : KnowledgeBase, optional
         Knowledge base for the Knowledge tab; from the beamline's config if omitted.
+    refs : ReferenceLibrary, optional
+        Reference library for the References tab; from the beamline's config if omitted.
 
     Returns
     -------
     FastAPI
         The app.
     """
-    state = WebState(beamline, kb)
+    state = WebState(beamline, kb, refs)
     store = attachments or AttachmentStore()
     hosts = set(allowed_hosts or LOCAL_HOSTS)
     app = FastAPI(title="nbs-agents web", docs_url=None, redoc_url=None)
@@ -527,5 +628,57 @@ def create_app(
         if body.index is None:
             raise HTTPException(400, "which entry? give index")
         return await write(state.kb_call, "remove_entry", body.id, body.index, body.by, body.reason)
+
+    # Reference scans. IDs contain "/", so they travel in the body or query.
+
+    @app.get("/api/refs")
+    async def refs_overview():
+        def read():
+            return {
+                "queue": state.ref_call("review_queue"),
+                "entries": [e.summary() for e in state.ref_call("entries")],
+                "catalogs": catalogs(beamline.config),
+            }
+        return await run_in_threadpool(read)
+
+    @app.get("/api/refs/search")
+    async def refs_search(q: str = "", n: int = 50, all: bool = True):
+        return await run_in_threadpool(state.ref_call, "search", q, n=n, all_statuses=all)
+
+    @app.get("/api/refs/entry")
+    async def refs_entry(id: str):
+        return await run_in_threadpool(lambda: state.ref_call("get", id).full())
+
+    @app.get("/api/refs/resolve")
+    async def refs_resolve(id: str):
+        def check():
+            return resolve_refs(beamline.config, [state.ref_call("get", id)])[0]
+        return await run_in_threadpool(check)
+
+    @app.post("/api/refs/approve")
+    async def refs_approve(body: RefBody):
+        return await write(state.ref_call, "approve", body.id, body.by, title=body.title, body=body.body,
+                           supersedes=body.supersedes, **_lists(body, REF_KEYS))
+
+    @app.post("/api/refs/entry")
+    async def refs_edit(body: RefBody):
+        return await write(state.ref_call, "edit", body.id, body.by, title=body.title, body=body.body,
+                           **_lists(body, REF_KEYS))
+
+    @app.post("/api/refs/reject")
+    async def refs_reject(body: RejectBody):
+        return await write(state.ref_call, "reject", body.id, body.by, body.reason)
+
+    @app.post("/api/refs/status")
+    async def refs_status(body: RefStatusBody):
+        return await write(state.ref_call, "set_status", body.id, body.by, body.status, body.superseded_by)
+
+    @app.post("/api/refs/request")
+    async def refs_request(body: RefRequestBody):
+        return await write(state.request_ref_draft, body.by, body.catalog, body.run, body.purpose)
+
+    @app.post("/api/refs/request/cancel")
+    async def refs_request_cancel(body: StaffBody):
+        return await write(state.ref_call, "cancel_request", body.id, body.by)
 
     return app
