@@ -10,6 +10,7 @@ read-only: only the read verbs and ``post`` work.
 
 import argparse
 import ast
+import copy
 import json
 import os
 import re
@@ -20,9 +21,10 @@ from typing import Any
 import numpy as np
 
 from nbs_agents.agentlog import ASSISTANT_POST_KINDS, assistant_uid
-from .config import ASSISTANT_ROLE, ROLES, CliConfig
+from .config import ASSISTANT_ROLE, DEFAULT_CATALOG, ROLES, CliConfig
 from .core import NO_BEAM_MAP, Beamline, CliError, refuse_read_only
 from .kb import KBError, KnowledgeBase
+from .refs import ReferenceLibrary, RefError, catalogs, open_catalog, resolve_refs, run_location, take_snapshot
 from nbs_agents.paths import BeamlineError, add_beamline_argument, use_beamline
 
 
@@ -309,6 +311,33 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--title")
     q = kb.add_parser("append", parents=[common, content], help="append an attributed section to any note")
     q.add_argument("id")
+
+    p = sub.add_parser("ref", parents=[common],
+                       help="engineering reference scans: past runs that show part of the beamline working")
+    ref = p.add_subparsers(dest="ref_command", required=True)
+    rfilters = argparse.ArgumentParser(add_help=False)
+    rfilters.add_argument("--device", help="only references tagged with this device")
+    rfilters.add_argument("--node", help="only references tagged with this beam-map node")
+    rfilters.add_argument("--tag", help="only references with this tag")
+    rfilters.add_argument("--all", action="store_true", help="superseded and retired references too")
+    q = ref.add_parser("list", parents=[common, rfilters], help="current references passing the filters")
+    q.add_argument("--drafts", action="store_true", help="drafts waiting for staff review instead")
+    q = ref.add_parser("search", parents=[common, rfilters], help="references matching the words, best first")
+    q.add_argument("words", nargs="*", help="words to look for")
+    q.add_argument("-n", type=int, default=10, help="most hits (default 10)")
+    q = ref.add_parser("show", parents=[common], help="a reference, its snapshot, and whether its scan still resolves")
+    q.add_argument("id")
+    ref.add_parser("verify", parents=[common], help="check that every reference's scan still resolves in Tiled")
+    q = ref.add_parser("create", parents=[common, content],
+                       help="draft a reference from a run, for staff to review (agents only write drafts)")
+    q.add_argument("run", help="uid, uid prefix, scan id, or -1 for the latest run")
+    q.add_argument("--title", required=True)
+    q.add_argument("--catalog", default=DEFAULT_CATALOG,
+                   help="catalog the run is in: default, or a [references.catalogs] name")
+    for key in ("devices", "nodes", "tags", "aliases"):
+        q.add_argument(f"--{key}", help=f"comma-separated {key}" + (
+            " (default: the run's motors and detectors)" if key == "devices" else ""))
+    q.add_argument("--request", default="", help="ID of the staff request this draft answers")
     return parser
 
 
@@ -346,8 +375,8 @@ def trim_index(index: dict[str, Any], only: list[str] | None, names: bool) -> di
     return out
 
 
-def kb_text(args: argparse.Namespace, required: bool = True) -> str | None:
-    """The ``--text`` or ``--file`` content of a ``kb`` write."""
+def kb_text(args: argparse.Namespace, required: bool = True, what: str = "note text") -> str | None:
+    """The ``--text`` or ``--file`` content of a ``kb`` or ``ref`` write."""
     if args.text is not None and args.file:
         raise CliError("give --text or --file, not both")
     if args.file:
@@ -357,7 +386,7 @@ def kb_text(args: argparse.Namespace, required: bool = True) -> str | None:
         except OSError as exc:
             raise CliError(f"cannot read --file {args.file}: {exc.strerror}") from exc
     if args.text is None and required:
-        raise CliError("give the note text with --text or --file")
+        raise CliError(f"give the {what} with --text or --file")
     return args.text
 
 
@@ -420,26 +449,110 @@ def run_kb(kb: KnowledgeBase, config: CliConfig, args: argparse.Namespace) -> An
     raise CliError(f"unknown kb command {cmd}")
 
 
-def add_note_refs(kb: KnowledgeBase, cmd: str, result: Any) -> Any:
-    """Attach the IDs of tagged notes to ``device`` and ``diagnose`` output."""
-    try:
-        if cmd == "device" and isinstance(result, dict):
-            for name, info in result.items():
-                refs = kb.refs(device=name)
-                if refs and isinstance(info, dict):
-                    info["notes"] = refs
-        elif cmd == "diagnose" and isinstance(result, dict):
-            for entry in result.get("path", []):
-                refs = kb.refs(node=entry.get("node"))
-                if refs:
-                    entry["notes"] = refs
-                for dev in entry.get("devices", []):
-                    refs = kb.refs(device=dev.get("name"))
-                    if refs:
-                        dev["notes"] = refs
-    except KBError:
-        pass  # a broken note must not hide the beamline view
+def add_note_refs(kb: KnowledgeBase, cmd: str, result: Any, refs: ReferenceLibrary | None = None) -> Any:
+    """Attach the IDs of tagged notes (``notes``) and current reference scans
+    (``references``) to ``device`` and ``diagnose`` output."""
+    sources = [("notes", kb)] + ([("references", refs)] if refs is not None else [])
+    for key, source in sources:
+        try:
+            if cmd == "device" and isinstance(result, dict):
+                for name, info in result.items():
+                    found = source.refs(device=name)
+                    if found and isinstance(info, dict):
+                        info[key] = found
+            elif cmd == "diagnose" and isinstance(result, dict):
+                for entry in result.get("path", []):
+                    found = source.refs(node=entry.get("node"))
+                    if found:
+                        entry[key] = found
+                    for dev in entry.get("devices", []):
+                        found = source.refs(device=dev.get("name"))
+                        if found:
+                            dev[key] = found
+        except (KBError, RefError, OSError):
+            pass  # a broken note or reference must not hide the beamline view
     return result
+
+
+def run_in_catalog(bl: Beamline, config: CliConfig, name: str) -> tuple[Beamline, dict[str, str]]:
+    """
+    A beamline client reading runs from the named catalog.
+
+    Returns
+    -------
+    tuple of (Beamline, dict)
+        ``bl`` itself for ``default``, otherwise a copy whose ``tiled`` is the
+        other catalog; and the catalog's ``uri`` and ``path``.
+    """
+    found = catalogs(config)
+    if name not in found:
+        raise CliError(f"no catalog {name!r}; have {', '.join(found)} ([references.catalogs] in nbs-cli.toml)")
+    if name == DEFAULT_CATALOG:
+        return bl, found[name]
+    view = copy.copy(bl)
+    view._tiled = open_catalog(config, found[name]["uri"], found[name]["path"])
+    return view, found[name]
+
+
+def run_ref(lib: ReferenceLibrary, config: CliConfig, args: argparse.Namespace, beamline) -> Any:
+    """
+    Execute a ``ref`` subcommand. Only ``create``, ``show`` and ``verify`` read Tiled.
+
+    Parameters
+    ----------
+    lib : ReferenceLibrary
+        Reference folders.
+    config : CliConfig
+        Settings: the writer's role, and the catalogs.
+    args : argparse.Namespace
+        Parsed arguments.
+    beamline : callable
+        Returns the ``Beamline`` client, made on first use.
+
+    Returns
+    -------
+    object
+        JSON-serializable result.
+    """
+    cmd = args.ref_command
+    if lib.human_dir is not None and not lib.human_dir.is_dir():
+        print(f"nbs-cli: warning: ref_dir {lib.human_dir} is not a folder here; only drafts are listed",
+              file=sys.stderr)
+    try:
+        if cmd in ("list", "search"):
+            filters = {"device": args.device, "node": args.node, "tag": args.tag, "all_statuses": args.all}
+            if cmd == "list":
+                return [e.summary() for e in lib.select(lib.drafts() if args.drafts else None, **filters)]
+            return lib.search(" ".join(args.words), n=args.n, **filters)
+        if cmd == "show":
+            entry = lib.get(args.id)
+            out = entry.full()
+            check = resolve_refs(config, [entry])[0]
+            check.pop("id")
+            out["scan"] = check
+            return out
+        if cmd == "verify":
+            entries = lib.entries() + lib.drafts()
+            checked = resolve_refs(config, entries)
+            titles = {e.id: e.title for e in entries}
+            bad = [dict(c, title=titles[c["id"]]) for c in checked if not c.get("resolves")]
+            return {"checked": len(checked), "resolve": len(checked) - len(bad), "problems": bad}
+        if cmd == "create":
+            uid = args.agent_uid or os.environ.get("NBS_AGENT_UID") or None
+            text = kb_text(args, what="description")
+            view, where = run_in_catalog(beamline(), config, args.catalog)
+            run = view.get_run(args.run)
+            location = run_location(args.catalog, where, run)
+            snapshot = take_snapshot(view, run)
+            lists = {key: split_list(getattr(args, key)) for key in ("devices", "nodes", "tags", "aliases")}
+            if not lists["devices"]:
+                start = snapshot["start"]
+                lists["devices"] = list(dict.fromkeys((start.get("motors") or []) + (start.get("detectors") or [])))
+            return lib.create(args.title, text, kb_author(config, uid), location, snapshot,
+                              request=args.request, **lists)
+    except (KBError, RefError) as exc:
+        raise CliError(str(exc)) from exc
+    raise CliError(f"unknown ref command {cmd}")
 
 
 def run_command(bl: Beamline, args: argparse.Namespace) -> Any:
@@ -667,11 +780,19 @@ def main(argv: list[str] | None = None) -> int:
                 raise CliError("this client is set to the read-only assistant role; --role cannot lift it")
             config.role = args.cli_role
         kb = KnowledgeBase(config.kb_dir, config.kb_agent_dir, config.kb_review_dir)
+        refs = ReferenceLibrary(config.ref_dir, config.ref_agent_dir, config.ref_review_dir)
         if args.command == "kb":
             result = run_kb(kb, config, args)
+        elif args.command == "ref":
+            def beamline() -> Beamline:
+                nonlocal bl
+                if bl is None:
+                    bl = Beamline(config)
+                return bl
+            result = run_ref(refs, config, args, beamline)
         else:
             bl = Beamline(config)
-            result = add_note_refs(kb, args.command, run_command(bl, args))
+            result = add_note_refs(kb, args.command, run_command(bl, args), refs)
         if result is None:
             # Success never prints a bare null, which reads like a silent failure
             result = {"result": None, "note": f"{args.command} succeeded with nothing to report"}
