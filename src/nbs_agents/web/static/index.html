@@ -52,7 +52,7 @@ header h1 { font-size: 15px; margin: 0 8px 0 0; font-weight: 600; }
 .pill .sub { color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
 #conn { margin-left: auto; color: var(--muted); font-size: 12px; }
 
-nav { display: flex; gap: 4px; padding: 0 16px; background: var(--panel); border-bottom: 1px solid var(--border); }
+nav { display: flex; gap: 4px; overflow-x: auto; padding: 0 16px; background: var(--panel); border-bottom: 1px solid var(--border); }
 nav button { border: none; border-bottom: 2px solid transparent; border-radius: 0; padding: 8px 12px; background: none; }
 nav button.active { border-bottom-color: var(--accent); font-weight: 600; }
 nav button.waiting { color: var(--warn); font-weight: 600; }
@@ -179,30 +179,36 @@ dialog .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top
   #right { display: flex; }
   header, nav { padding-left: 16px; padding-right: 16px; }
 }
-#kb-view { grid-template-columns: 300px minmax(0, 1fr); }
-#kb-list { flex: 1; }
+#kb-view, #ref-view { grid-template-columns: 300px minmax(0, 1fr); }
+#kb-list, #ref-list { flex: 1; }
 .kb-group { padding: 8px 12px 4px; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
 .kb-item { display: block; width: 100%; text-align: left; border: none; border-bottom: 1px solid var(--border); border-radius: 0; padding: 6px 12px; background: none; white-space: normal; }
 .kb-item.sel { background: var(--accent-soft); }
 .kb-item .meta { font-size: 12px; color: var(--muted); }
 .kb-item.pending { box-shadow: inset 3px 0 0 var(--warn-border); }
-#kb-detail { padding: 12px 16px; }
-#kb-detail .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0 12px; }
-#kb-detail label { display: block; margin: 10px 0 4px; font-weight: 600; font-size: 13px; }
-#kb-detail textarea { font-family: var(--mono); font-size: 13px; }
-#kb-detail .actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
-#kb-detail .from { color: var(--muted); font-size: 13px; }
+#kb-detail, #ref-detail { padding: 12px 16px; }
+#kb-detail .grid, #ref-detail .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0 12px; }
+#kb-detail label, #ref-detail label { display: block; margin: 10px 0 4px; font-weight: 600; font-size: 13px; }
+#kb-detail textarea, #ref-detail textarea { font-family: var(--mono); font-size: 13px; }
+#kb-detail .actions, #ref-detail .actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+#kb-detail .from, #ref-detail .from { color: var(--muted); font-size: 13px; }
 .kb-preview { border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; background: var(--panel); }
 .kb-entry { border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; margin: 8px 0; background: var(--panel); }
 .kb-entry .head { display: flex; gap: 8px; align-items: center; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
 .kb-entry .head span { flex: 1; }
-#kb-who { width: 110px; }
-#kb-detail .kb-title { font-size: 20px; margin: 0 0 4px; }
-#kb-detail .kb-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
-#kb-detail .kb-body { font-size: 15px; line-height: 1.55; max-width: 52em; }
-#kb-detail .kb-sub { font-size: 13px; color: var(--muted); margin: 18px 0 6px; }
+#kb-who, #ref-who { width: 110px; }
+#kb-detail .kb-title, #ref-detail .kb-title { font-size: 20px; margin: 0 0 4px; }
+#kb-detail .kb-chips, #ref-detail .kb-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+#kb-detail .kb-body, #ref-detail .kb-body { font-size: 15px; line-height: 1.55; max-width: 52em; }
+#kb-detail .kb-sub, #ref-detail .kb-sub { font-size: 13px; color: var(--muted); margin: 18px 0 6px; }
 input[type=search] { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; width: 100%; }
-@media (max-width: 720px) { #kb-list { max-height: 260px; } }
+@media (max-width: 720px) { #kb-list, #ref-list { max-height: 260px; } }
+select { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font: inherit; color: inherit; }
+.ref-table { width: auto; min-width: 50%; margin: 4px 0 8px; }
+.ref-table th { text-align: left; font-weight: 600; color: var(--muted); padding: 2px 12px 2px 0; vertical-align: top; white-space: nowrap; }
+.ref-table td { padding: 2px 12px 2px 0; font-family: var(--mono); font-size: 12.5px; word-break: break-all; }
+.ref-past { background: var(--warn-bg); border: 1px solid var(--warn-border); border-radius: 6px; padding: 6px 10px; margin: 8px 0; font-size: 13px; }
+#ref-detail pre { font-family: var(--mono); font-size: 12px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 8px; overflow-x: auto; }
 #tiled-login { display: none; padding: 8px 16px; background: var(--warn-bg); border-bottom: 1px solid var(--warn-border); }
 #tiled-login code { font-weight: 600; }
 </style>
@@ -220,6 +226,7 @@ input[type=search] { background: var(--panel); border: 1px solid var(--border); 
   <button id="tab-agents" class="active" data-view="agents-view">Agents Log</button>
   <button id="tab-assistant" data-view="assistant-view">Assistant</button>
   <button id="tab-kb" data-view="kb-view">Knowledge</button>
+  <button id="tab-refs" data-view="ref-view">References</button>
 </nav>
 <main>
   <section id="agents-view" class="view active">
@@ -277,6 +284,18 @@ input[type=search] { background: var(--panel); border: 1px solid var(--border); 
     </div>
     <div class="col">
       <div id="kb-detail" class="scroll" style="flex:1"></div>
+    </div>
+  </section>
+  <section id="ref-view" class="view">
+    <div class="col">
+      <div class="col-head"><h2>References</h2>
+        <input type="text" id="ref-who" placeholder="Your name" title="Recorded as who approved, edited or requested; remembered in this browser">
+        <button id="ref-request" class="primary" title="Ask the beamline assistant to draft a reference entry for a run">Request…</button></div>
+      <div class="col-head"><input type="search" id="ref-filter" placeholder="Search references (words, devices, plans)"></div>
+      <div id="ref-list" class="scroll"></div>
+    </div>
+    <div class="col">
+      <div id="ref-detail" class="scroll" style="flex:1"></div>
     </div>
   </section>
 </main>
@@ -1101,12 +1120,278 @@ function renderKbTab() {
 }
 $("tab-kb").addEventListener("click", loadKb);
 
+// ---------------------------------------------------------------- reference scans
+// Staff review agents' drafts (approve, edit, reject), mark entries superseded or
+// retired, and ask the assistant to draft an entry for a run.
+let refs = null, refSel = null, refPending = null, refHits = null, refSearchSeq = 0;
+const REF_LISTS = ["devices", "nodes", "tags", "aliases"];
+const REF_RUN = [["catalog", "Catalog"], ["scan_id", "Scan ID"], ["uid", "UID"], ["tiled_uri", "Tiled URI"],
+  ["tiled_path", "Tiled path"], ["taken", "Taken"], ["plan", "Plan"]];
+
+try { $("ref-who").value = localStorage.getItem("kb-who") || ""; } catch (e) {}
+$("ref-who").addEventListener("change", () => {
+  try { localStorage.setItem("kb-who", $("ref-who").value.trim()); } catch (e) {}
+  $("kb-who").value = $("ref-who").value.trim();
+});
+$("kb-who").addEventListener("change", () => { $("ref-who").value = $("kb-who").value.trim(); });
+function refWho() {
+  const who = $("ref-who").value.trim();
+  if (!who) { $("ref-who").focus(); toast("Type your name first: it is recorded with what you approve, edit or request."); }
+  return who;
+}
+
+$("ref-filter").addEventListener("input", () => {
+  clearTimeout(refSearch.timer);
+  refSearch.timer = setTimeout(refSearch, 250);
+});
+async function refSearch() {
+  const q = $("ref-filter").value.trim(), seq = ++refSearchSeq;
+  let hits = null;
+  if (q) {
+    try {
+      const res = await fetch(`/api/refs/search?q=${encodeURIComponent(q)}`);
+      if (res.status === 401) return location.reload();
+      hits = await res.json();
+      if (!res.ok) throw new Error(hits.detail || res.statusText);
+    } catch (e) { toast(`Search failed: ${e.message}`); return; }
+  }
+  if (seq !== refSearchSeq) return;
+  refHits = hits;
+  renderRefList();
+}
+
+async function loadRefs() {
+  try {
+    const res = await fetch("/api/refs");
+    if (res.status === 401) return location.reload();
+    refs = await res.json();
+    if (!res.ok) throw new Error(refs.detail || res.statusText);
+  } catch (e) { toast(`Could not read the reference library: ${e.message}`); return; }
+  if ($("ref-filter").value.trim()) await refSearch();
+  renderRefList();
+  if (refSel && refSel.kind === "entry") selectRef(refSel.id, true);
+  else if (refSel && refSel.kind === "request") refRequestView(refSel.id);
+}
+
+function refItem(kind, id, title, meta, pending) {
+  const sel = refSel && refSel.kind === kind && refSel.id === id ? " sel" : "";
+  return `<button class="kb-item${sel}${pending ? " pending" : ""}" data-kind="${kind}" data-id="${esc(id)}">` +
+    `<div>${esc(title)}</div><div class="meta">${esc(meta)}</div></button>`;
+}
+const refMeta = (e) => [["current", "draft"].includes(e.status) ? "" : e.status, e.scan_id != null ? `scan ${e.scan_id}` : "",
+  e.catalog && e.catalog !== "default" ? e.catalog : "", e.plan || ""].filter(Boolean).join(" · ");
+
+function renderRefList() {
+  if (!refs) return;
+  const q = refs.queue;
+  let html = `<div class="kb-group">To review (${q.count})</div>`;
+  for (const r of q.requests) html += refItem("request", r.id, `Requested: ${r.purpose}`, `${r.catalog} run ${r.run} · by ${r.by}, ${r.at} · waiting for the assistant`, true);
+  for (const d of q.drafts) html += refItem("entry", d.id, d.title, `draft by ${d.created_by || "?"} · ${refMeta(d)}`, true);
+  if (!q.count) html += `<div class="kb-group" style="text-transform:none">Nothing waiting.</div>`;
+  if (refHits) {
+    html += `<div class="kb-group">Matches (${refHits.length})</div>`;
+    for (const e of refHits) html += refItem("entry", e.id, e.title, (e.snippet || refMeta(e)).replace(/[#*`_>]+/g, ""));
+    if (!refHits.length) html += `<div class="kb-group" style="text-transform:none">No references match.</div>`;
+  } else {
+    const current = refs.entries.filter((e) => e.status === "current"), past = refs.entries.filter((e) => e.status !== "current");
+    html += `<div class="kb-group">Current (${current.length})</div>`;
+    for (const e of current) html += refItem("entry", e.id, e.title, refMeta(e));
+    if (past.length) {
+      html += `<div class="kb-group">Superseded or retired (${past.length})</div>`;
+      for (const e of past) html += refItem("entry", e.id, e.title, refMeta(e));
+    }
+  }
+  $("ref-list").innerHTML = html;
+}
+$("ref-list").addEventListener("click", (ev) => {
+  const b = ev.target.closest(".kb-item");
+  if (!b) return;
+  if (b.dataset.kind === "request") refRequestView(b.dataset.id);
+  else selectRef(b.dataset.id);
+});
+$("ref-request").addEventListener("click", refRequestForm);
+
+async function selectRef(id, quiet) {
+  refSel = {kind: "entry", id};
+  renderRefList();
+  try {
+    const res = await fetch(`/api/refs/entry?id=${encodeURIComponent(id)}`);
+    const entry = await res.json();
+    if (!res.ok) throw new Error(entry.detail || res.statusText);
+    refView(entry);
+  } catch (e) {
+    if (!quiet) toast(`Could not open ${id}: ${e.message}`);
+    $("ref-detail").innerHTML = `<div class="from">That reference is gone (approved, rejected or moved).</div>`;
+  }
+}
+
+async function refAct(url, body, done) {
+  const by = refWho();
+  if (!by) return;
+  try { const out = await post(url, {...body, by}); toast(done(out)); }
+  catch (e) { toast(e.message); return; }
+  await loadRefs();
+}
+
+function refFrom(e) {
+  const m = e.meta || {};
+  return `${e.status === "draft" ? "draft" : "reference"} <code>${esc(e.id)}</code> by ${esc(m.created_by || "?")}` +
+    (m.created ? `, ${esc(m.created)}` : "") + (m.approved_by ? `; approved by ${esc(m.approved_by)}` : "") +
+    (m.edited_by ? `; edited by ${esc(m.edited_by)}` : "") + (m.request ? `; answers request ${esc(m.request)}` : "");
+}
+
+function refTable(obj) {
+  const rows = Object.entries(obj || {}).map(([k, v]) =>
+    `<tr><th>${esc(k)}</th><td>${esc(typeof v === "object" && v !== null ? JSON.stringify(v) : v)}</td></tr>`).join("");
+  return rows ? `<table class="ref-table"><tbody>${rows}</tbody></table>` : `<div class="from">None recorded.</div>`;
+}
+
+// Reading view: where the run is, the description, the snapshot, and the actions
+function refView(e) {
+  const m = e.meta || {}, draft = e.status === "draft";
+  const chips = REF_LISTS.filter((k) => listText(m[k]))
+    .map((k) => `<span class="pill"><span class="sub">${k}</span> ${esc(listText(m[k]))}</span>`).join(" ");
+  const status = e.status === "superseded" ? `Superseded by <a href="#" data-ref="${esc(m.superseded_by)}">${esc(m.superseded_by)}</a>.` :
+    e.status === "retired" ? "Retired: kept for the record, not offered to agents." : "";
+  let html = `<h2 class="kb-title">${esc(e.title)}</h2><div class="from">${refFrom(e)}</div>` +
+    (chips ? `<div class="kb-chips">${chips}</div>` : "") +
+    (status ? `<div class="ref-past">${status}</div>` : "");
+  if (draft) html += `<p class="from">Drafts are not offered to agents until approved. Approving writes the entry and its snapshot into the profile's references folder for you to commit.</p>`;
+  html += `<div class="actions">` + (draft ?
+    `<button id="ref-approve" class="primary">Approve into profile</button><button id="ref-edit">Edit before approving</button>` +
+    `<button id="ref-reject" class="danger">Reject…</button>` :
+    `<button id="ref-edit">Edit</button>` +
+    (e.status !== "superseded" ? `<button id="ref-supersede">Superseded by…</button>` : "") +
+    (e.status !== "retired" ? `<button id="ref-retire" class="danger">Retire</button>` : "") +
+    (e.status !== "current" ? `<button id="ref-current">Mark current</button>` : "")) +
+    `<button id="ref-check" title="Look the run up in Tiled at the saved URI and path">Check scan</button><span id="ref-check-out" class="from"></span></div>`;
+  html += `<h3 class="kb-sub">Run</h3>${refTable(Object.fromEntries(REF_RUN.filter(([k]) => m[k] != null && m[k] !== "").map(([k, l]) => [l, m[k]])))}`;
+  html += `<h3 class="kb-sub">What it shows</h3><div class="md kb-body">${rich(e.body)}</div>`;
+  const snap = e.snapshot;
+  html += `<h3 class="kb-sub">Snapshot when the entry was made (a past state, not the current one)</h3>`;
+  if (!snap) html += `<div class="from">No snapshot.</div>`;
+  else if (snap.error) html += `<div class="from">${esc(snap.error)}</div>`;
+  else {
+    html += `<label>Start document</label>${refTable(snap.start)}`;
+    html += `<label>Baseline at the start (${Object.keys(snap.baseline || {}).length} readings)</label>` +
+      `<input type="search" id="ref-base-filter" placeholder="Filter baseline readings">` +
+      `<div id="ref-base">${refTable(snap.baseline)}</div>`;
+    html += `<label>Run summary</label><pre>${esc(JSON.stringify(snap.summary || {}, null, 1))}</pre>`;
+  }
+  $("ref-detail").innerHTML = html;
+  $("ref-detail").scrollTop = 0;
+  const on = (id, fn) => { const el = $(id); if (el) el.addEventListener("click", fn); };
+  on("ref-approve", () => refAct("/api/refs/approve", {id: e.id}, (out) => { refSel = {kind: "entry", id: out.id}; return `Approved as ${out.id}`; }));
+  on("ref-edit", () => refForm(e));
+  on("ref-reject", () => {
+    const reason = prompt("Why reject it? (kept with the rejected draft)");
+    if (reason !== null) refAct("/api/refs/reject", {id: e.id, reason}, () => { refSel = null; $("ref-detail").innerHTML = ""; return "Rejected"; });
+  });
+  on("ref-supersede", () => {
+    const others = refs.entries.filter((x) => x.id !== e.id && x.status === "current").map((x) => x.id);
+    const by = prompt(`ID of the entry that replaces this one${others.length ? ` (current: ${others.join(", ")})` : ""}`);
+    if (by) refAct("/api/refs/status", {id: e.id, status: "superseded", superseded_by: by.trim()}, () => "Marked superseded");
+  });
+  on("ref-retire", () => { if (confirm("Retire this reference? It stays in the profile but agents are no longer offered it.")) refAct("/api/refs/status", {id: e.id, status: "retired"}, () => "Retired"); });
+  on("ref-current", () => refAct("/api/refs/status", {id: e.id, status: "current"}, () => "Marked current"));
+  on("ref-check", async () => {
+    $("ref-check-out").textContent = "checking…";
+    try {
+      const res = await fetch(`/api/refs/resolve?id=${encodeURIComponent(e.id)}`);
+      const out = await res.json();
+      if (!res.ok) throw new Error(out.detail || res.statusText);
+      $("ref-check-out").textContent = out.resolves ? "The run is in Tiled." + (out.note ? " " + out.note : "") : (out.error || "not found");
+    } catch (err) { $("ref-check-out").textContent = err.message; }
+  });
+  const filter = $("ref-base-filter");
+  if (filter) filter.addEventListener("input", () => {
+    const w = filter.value.trim().toLowerCase();
+    $("ref-base").innerHTML = refTable(Object.fromEntries(Object.entries(snap.baseline || {}).filter(([k]) => k.toLowerCase().includes(w))));
+  });
+  for (const a of $("ref-detail").querySelectorAll("a[data-ref]")) a.addEventListener("click", (ev) => { ev.preventDefault(); selectRef(a.dataset.ref); });
+}
+
+// Editing a draft before approving it, or an approved entry. Where the run is never changes.
+function refForm(e) {
+  const m = e.meta || {}, draft = e.status === "draft";
+  const current = refs.entries.filter((x) => x.status === "current");
+  let html = `<div class="from">${refFrom(e)}</div>` +
+    `<label for="ref-title">Title</label><input type="text" id="ref-title" value="${esc(e.title)}">` +
+    `<div class="grid">` + REF_LISTS.map((k) => `<div><label for="ref-${k}">${k[0].toUpperCase() + k.slice(1)}</label>` +
+      `<input type="text" id="ref-${k}" value="${esc(listText(m[k]))}" placeholder="comma-separated"></div>`).join("") + `</div>`;
+  if (draft && current.length) html += `<label for="ref-supersedes">Supersedes</label><select id="ref-supersedes"><option value="">nothing</option>` +
+    current.map((x) => `<option value="${esc(x.id)}">${esc(x.title)} (${esc(x.id)})</option>`).join("") + `</select>`;
+  html += `<label for="ref-body">What it shows (Markdown)</label><textarea id="ref-body" rows="12">${esc(e.body)}</textarea>` +
+    `<div class="actions">` + (draft ? `<button id="ref-save" class="primary">Approve with these edits</button>` : `<button id="ref-save" class="primary">Save to profile</button>`) +
+    `<button id="ref-cancel">Cancel</button></div><label>Preview</label><div class="kb-preview md" id="ref-preview"></div>`;
+  $("ref-detail").innerHTML = html;
+  const preview = () => { $("ref-preview").innerHTML = rich($("ref-body").value); };
+  preview();
+  $("ref-body").addEventListener("input", preview);
+  $("ref-save").addEventListener("click", () => {
+    const fields = {id: e.id, title: $("ref-title").value, body: $("ref-body").value};
+    for (const k of REF_LISTS) fields[k] = $(`ref-${k}`).value;
+    if (draft) {
+      fields.supersedes = $("ref-supersedes") ? $("ref-supersedes").value : "";
+      refAct("/api/refs/approve", fields, (out) => { refSel = {kind: "entry", id: out.id}; return `Approved as ${out.id}`; });
+    } else refAct("/api/refs/entry", fields, (out) => { refSel = {kind: "entry", id: out.id}; return `Saved ${out.id}`; });
+  });
+  $("ref-cancel").addEventListener("click", () => refView(e));
+}
+
+// Ask the assistant to draft an entry: it gets the request as a question, like ask-assistant
+function refRequestForm() {
+  refSel = {kind: "new", id: ""};
+  renderRefList();
+  const cats = Object.entries((refs && refs.catalogs) || {default: {}});
+  $("ref-detail").innerHTML = `<h2 class="kb-title">Request a reference draft</h2>` +
+    `<p class="from">The beamline assistant looks the run up, writes a description and saves a draft here for you to review. ` +
+    `The request stays listed until its draft appears.</p>` +
+    `<label for="rq-catalog">Catalog</label><select id="rq-catalog">` +
+    cats.map(([n, c]) => `<option value="${esc(n)}">${esc(n)}${c.uri ? ` (${esc(c.uri)} ${esc(c.path || "")})` : ""}</option>`).join("") + `</select>` +
+    `<label for="rq-run">Run: UID, UID prefix or scan ID</label><input type="text" id="rq-run">` +
+    `<label for="rq-purpose">What the scan is a reference for</label>` +
+    `<textarea id="rq-purpose" rows="4" placeholder="e.g. M3 pitch rocking curve after the October realignment: the shape and peak position to compare against"></textarea>` +
+    `<div class="actions"><button id="rq-send" class="primary">Send to the assistant</button><button id="rq-cancel">Cancel</button></div>`;
+  $("rq-send").addEventListener("click", () => refAct("/api/refs/request",
+    {catalog: $("rq-catalog").value, run: $("rq-run").value.trim(), purpose: $("rq-purpose").value},
+    (out) => { refSel = {kind: "request", id: out.id}; return `Sent to the assistant as ${out.id}`; }));
+  $("rq-cancel").addEventListener("click", () => { refSel = null; renderRefList(); $("ref-detail").innerHTML = ""; });
+}
+
+function refRequestView(id) {
+  const r = refs && refs.queue.requests.find((x) => x.id === id);
+  refSel = {kind: "request", id};
+  renderRefList();
+  if (!r) { $("ref-detail").innerHTML = `<div class="from">Request ${esc(id)} is answered or cancelled.</div>`; return; }
+  $("ref-detail").innerHTML = `<h2 class="kb-title">${esc(r.purpose)}</h2>` +
+    `<div class="from">request <code>${esc(r.id)}</code> by ${esc(r.by)}, ${esc(r.at)}</div>` +
+    refTable({Catalog: r.catalog, Run: r.run}) +
+    `<p class="from">Sent to the beamline assistant. Its draft appears under To review; its answer is in the Assistant tab.</p>` +
+    `<div class="actions"><button id="rq-drop" class="danger">Cancel request</button></div>`;
+  $("rq-drop").addEventListener("click", () => refAct("/api/refs/request/cancel", {id}, () => { refSel = null; $("ref-detail").innerHTML = ""; return "Request cancelled"; }));
+}
+
+function renderRefTab() {
+  const n = snap.ref_pending;
+  const tab = $("tab-refs");
+  tab.textContent = n ? `References (${n} to review)` : "References";
+  tab.classList.toggle("waiting", !!n);
+  if (n !== refPending) {
+    refPending = n;
+    if ($("ref-view").classList.contains("active") && !(document.activeElement && $("ref-detail").contains(document.activeElement))) loadRefs();
+  }
+}
+$("tab-refs").addEventListener("click", loadRefs);
+
+
 function render() {
   renderTiledLogin();
   renderHeader();
   renderAgents();
   renderAssistant();
   renderKbTab();
+  renderRefTab();
 }
 
 function connect() {
