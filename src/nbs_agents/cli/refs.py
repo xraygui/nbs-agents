@@ -732,7 +732,10 @@ def open_catalog(config: Any, uri: str, path: str, interactive: bool = False):
         from tiled.client import from_context
         from tiled.client.context import Context
 
-        use_cache_dir()
+        try:
+            use_cache_dir()
+        except OSError:  # the agent sandbox may not let it make the login cache; anonymous reads need none
+            pass
         context, _ = Context.from_any_uri(uri)
         auth = context.server_info.authentication
         if not context.authenticated and auth.providers:
