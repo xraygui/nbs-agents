@@ -208,7 +208,7 @@ case "$role" in
     assistant)
         # Read-only: nbs-cli refuses every verb that changes the queue or a driver's session.
         export NBS_CLI_ROLE=assistant
-        unset NBS_AGENT_UID NBS_AGENT_GOAL
+        unset NBS_AGENT_UID NBS_AGENT_GOAL NBS_AGENT_OWNER
         prompt="${NBS_ASSISTANT_PROMPT:-Follow the beamline assistant instructions in your system prompt. Review the latest runs and post anything the operator should know.}"
         # The assistant's skill goes into the system prompt rather than being
         # loaded as a skill: it is then part of the prefix every call shares,

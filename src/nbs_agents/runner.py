@@ -25,7 +25,8 @@ from .agentlog import AgentLog
 from .agentlog_store import AgentLogServer
 from .catalog import ZMQCatalog
 from .config import NO_AGENT_LOG, AgentsConfig
-from .supervisor import AgentSupervisor
+from .runner_lock import RunnerLockedError, acquire
+from .supervisor import AgentSupervisor, runner_identity
 from .tiled_auth import AgentKeyKeeper
 
 LOGGER = logging.getLogger(__name__)
@@ -107,11 +108,16 @@ def main(argv=None) -> int:
     by ``--beamline`` (see ``nbs_agents.paths``). The agent log needs its own
     Redis (``[agent_log] port``); with ``serve = true`` the runner starts it.
     Plugins (``nbs_agents.runner`` entry points) add their observers.
+
+    Only one runner serves a beamline folder: the runner holds an ``flock`` on
+    ``state/runner.lock`` (``nbs_agents.runner_lock``) and a second one exits.
+    On start it adopts the sessions a previous runner left open
+    (``AgentSupervisor.adopt_open_sessions``).
     """
     import argparse
     import sys
 
-    from .paths import BeamlineError, add_beamline_argument, use_beamline
+    from .paths import BeamlineError, add_beamline_argument, paths, use_beamline
 
     parser = argparse.ArgumentParser(prog="nbs-agents-runner", description="Run beamline agents.")
     add_beamline_argument(parser)
@@ -126,6 +132,13 @@ def main(argv=None) -> int:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    owner = runner_identity()
+    try:
+        # Held until this process exits; the kernel releases it however it exits
+        lock = acquire(paths().runner_lock, owner)  # noqa: F841
+    except RunnerLockedError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     config = AgentsConfig.load()
     if not config.agent_log.dedicated:
         print(f"error: {NO_AGENT_LOG}", file=sys.stderr)
@@ -155,7 +168,11 @@ def main(argv=None) -> int:
     keeper = AgentKeyKeeper(config, on_link=agent_log.set_tiled_login if agent_log is not None else None)
     keeper.start()
     observers = load_plugins(Runtime(config, manager, catalog, agent_log))
-    AgentSupervisor(manager, catalog, agent_log=agent_log, observers=observers)
+    supervisor = AgentSupervisor(manager, catalog, agent_log=agent_log, observers=observers, owner=owner)
+    try:
+        supervisor.adopt_open_sessions()
+    except Exception:
+        LOGGER.exception("Could not adopt the sessions open before this runner started")
     if agent_log is not None:
         _start_heartbeat(agent_log)
     LOGGER.info("Agent runner listening for Bluesky documents at %s", config.zmq_addr)

@@ -169,6 +169,23 @@ class BeamlineVerbTests(unittest.TestCase):
         self.assertEqual(out["item"]["item_uid"], "new")
         self.assertEqual(bl.agent_log.get("u1")["log"][-1]["kind"], "add")
 
+    def test_only_the_owning_runner_s_agent_changes_the_block(self):
+        bl, manager = self.make()
+        owner = {"id": "runner-a", "host": "grettir", "pid": 7, "started": 0}
+        manager.queue_get.return_value["items"][3]["meta"] = {"agent_owner": owner}
+        with patch.dict(os.environ, {"NBS_AGENT_OWNER": "runner-b"}):
+            with self.assertRaises(CliError) as ctx:
+                bl.add("c_xas", [], {"dwell": 1}, "duplicate")
+            self.assertIn("runner on grettir (pid 7", str(ctx.exception))
+            with self.assertRaises(CliError):
+                bl.remove("a1", "duplicate")
+        manager.item_add.assert_not_called()
+        manager.item_remove.assert_not_called()
+        with patch.dict(os.environ, {"NBS_AGENT_OWNER": "runner-a"}):
+            bl.add("c_xas", [], {"dwell": 1}, "owner")
+        bl.add("c_xas", [], {"dwell": 1}, "by hand, no runner")
+        self.assertEqual(manager.item_add.call_count, 2)
+
     def test_add_respects_budget(self):
         bl, manager = self.make(budget={"time_s": 10})
         bl._info = StaticInfo(estimate=lambda item: 60.0)

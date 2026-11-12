@@ -835,6 +835,9 @@ class AgentLogTab(QWidget):
             parts.append(f"status: {html.escape(session_status(record))}")
             if record.get("budget"):
                 parts.append(f"budget: {html.escape(str(record['budget']))}")
+            runner = record.get("runner") or {}
+            if runner.get("host"):
+                parts.append(f"runner: {html.escape(str(runner['host']))} pid {html.escape(str(runner.get('pid', '?')))}")
             line = " &middot; ".join(parts)
             if record.get("goal"):
                 line += f"<br>goal: {html.escape(str(record['goal']))}"

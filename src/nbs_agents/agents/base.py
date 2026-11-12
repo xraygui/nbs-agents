@@ -38,6 +38,11 @@ class BaseAgent:
         Shared agent-log store. Without one, ``log`` only writes to Python logging.
     """
 
+    # Whether a restarted runner can take this agent over from its agent-log
+    # record (``AgentSupervisor.adopt_open_sessions``); agents that keep state in
+    # memory cannot
+    RESUMABLE = False
+
     def __init__(
         self,
         agent_uid: str,

@@ -51,12 +51,14 @@ class FakeLauncher:
         self.fail = fail
         self.on_exit = None
         self.launched = []
+        self.envs = []
         self.terminated = []
 
-    def launch(self, agent_uid, goal, driver):
+    def launch(self, agent_uid, goal, driver, env=None):
         if self.fail:
             raise self.fail
         self.launched.append((agent_uid, goal, driver))
+        self.envs.append(env)
         process = SimpleNamespace(pid=4242)
         return LaunchedAgent(agent_uid, process, ["claude-beamline", "--headless"], "/w", "/logs/c.log")
 
@@ -86,6 +88,25 @@ class ClaudeLaunchTests(unittest.TestCase):
         self.assertEqual(launcher.on_exit, self.hook._on_exit)
         supervisor.shutdown()
 
+    def test_launch_carries_the_owning_runner(self):
+        launcher = FakeLauncher()
+        supervisor = self.make(launcher)
+        supervisor._activate_agent(_open_run({"goal": "g", "launch": True}))
+        self.assertEqual(launcher.envs, [{"NBS_AGENT_OWNER": supervisor.owner["id"]}])
+        self.assertEqual(self.log.get("uid-12345678")["runner"], supervisor.owner)
+        supervisor.shutdown()
+
+    def test_no_launch_for_a_block_another_runner_owns(self):
+        launcher = FakeLauncher()
+        supervisor = self.make(launcher)
+        other = {"id": "other-runner", "host": "elsewhere", "pid": 1, "started": 0}
+        supervisor.manager.item_get.return_value["item"]["meta"] = {"agent_owner": other}
+        supervisor._activate_agent(_open_run({"goal": "g", "launch": True}))
+        self.assertEqual(launcher.launched, [])
+        self.assertNotIn("uid-12345678", supervisor.active_agents)
+        supervisor.manager.item_update.assert_not_called()
+        supervisor.shutdown()
+
     def test_no_launch_without_flag_or_for_other_agents(self):
         launcher = FakeLauncher()
         supervisor = self.make(launcher)
@@ -106,6 +127,49 @@ class ClaudeLaunchTests(unittest.TestCase):
         self.hook._on_exit(launched, -15)
         entry = self.log.get("uid-12345678")["log"][-1]
         self.assertEqual((entry["kind"], entry["exit_status"]), ("launch", -15))
+        supervisor.shutdown()
+
+    def test_close_after_a_runner_restart_closes_the_session(self):
+        supervisor = self.make(FakeLauncher())
+        self.log.open("uid-orphan", "claude", goal="g")
+        close = ZMQRun({"uid": "run-2", "plan_name": "close_agent", AGENT_UID_KEY: "uid-orphan"})
+        supervisor._deactivate_agent_from_close(close)
+        record = self.log.get("uid-orphan")
+        self.assertEqual(record["status"], "closed")
+        self.assertIn("restart", record["close_reason"])
+        supervisor.shutdown()
+
+    def test_restarted_runner_adopts_a_queued_session_and_relaunches(self):
+        launcher = FakeLauncher()
+        supervisor = self.make(launcher)
+        self.log.open("uid-12345678", "claude", goal="g", parameters={"goal": "g", "launch": True})
+        old = {"id": "old", "host": "elsewhere", "pid": 1, "started": 0}
+        self.log.update("uid-12345678", launch={"pid": 999999}, runner=old)
+        close = supervisor.manager.queue_get.return_value["items"][1]
+        close["args"] = ["uid-12345678"]
+        supervisor.manager.item_get.return_value["item"]["meta"] = {"agent_owner": old}
+        self.assertEqual(supervisor.adopt_open_sessions(), ["uid-12345678"])
+        self.assertIn("uid-12345678", supervisor.active_agents)
+        self.assertEqual(launcher.launched[0][0], "uid-12345678")
+        self.assertEqual(launcher.envs, [{"NBS_AGENT_OWNER": supervisor.owner["id"]}])
+        updated = supervisor.manager.item_update.call_args.args[0]
+        self.assertEqual(updated["meta"]["agent_owner"]["id"], supervisor.owner["id"])
+        record = self.log.get("uid-12345678")
+        self.assertEqual(record["runner"], supervisor.owner)
+        self.assertIn("adopt", [e["kind"] for e in record["log"]])
+        supervisor.shutdown()
+
+    def test_restarted_runner_closes_sessions_it_cannot_take_over(self):
+        launcher = FakeLauncher()
+        supervisor = self.make(launcher)
+        self.log.open("uid-gone", "claude", goal="g", parameters={"launch": True})
+        self.log.open("uid-repeat", "repeat", goal="g")
+        supervisor.manager.queue_get.return_value["items"][1]["args"] = ["uid-repeat"]
+        self.assertEqual(supervisor.adopt_open_sessions(), [])
+        self.assertEqual(self.log.get("uid-gone")["status"], "closed")
+        self.assertIn("no longer queued", self.log.get("uid-gone")["close_reason"])
+        self.assertIn("cannot resume", self.log.get("uid-repeat")["close_reason"])
+        self.assertEqual(launcher.launched, [])
         supervisor.shutdown()
 
     def test_unexpected_exit_while_active_is_an_error(self):
@@ -159,6 +223,23 @@ class ClaudeLauncherTests(unittest.TestCase):
             **kw,
         )
         return launcher
+
+    def test_stop_leftover_stops_only_that_session_s_claude(self):
+        import subprocess
+
+        def spawn(uid):
+            env = dict(os.environ, NBS_AGENT_UID=uid)
+            return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], env=env, start_new_session=True)
+
+        ours, other = spawn("uid-1"), spawn("uid-2")
+        self.addCleanup(other.kill)
+        self.addCleanup(ours.kill)
+        launcher = self.launcher(stop_timeout_s=1)
+        self.assertFalse(launcher.stop_leftover(other.pid, "uid-1"))
+        self.assertTrue(launcher.stop_leftover(ours.pid, "uid-1"))
+        self.assertIsNotNone(ours.wait(timeout=5))
+        self.assertIsNone(other.poll())
+        self.assertFalse(launcher.stop_leftover(99999999, "uid-1"))
 
     def wait_for_exit(self, n=1, timeout=10):
         deadline = time.time() + timeout

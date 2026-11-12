@@ -25,12 +25,14 @@ from nbs_agents.agentlog import (
 from ..assistant.attachments import AttachmentStore
 from nbs_agents.constants import (
     AGENT_NAME_KEY,
+    AGENT_OWNER_ENV,
     AGENT_SEQUENCE_KEY,
     AGENT_UID_KEY,
     CLOSE_AGENT_PLAN,
     OPEN_AGENT_PLAN,
     QUEUE_STOP_INSTRUCTION,
 )
+from ..queue import close_agent_owner, describe_owner
 from ..beamline_info import DEVICES, METADATA, SAMPLES, BeamlineInfo, load_beamline_info
 from .config import CliConfig
 from .summaries import SummaryContext, summarize
@@ -584,10 +586,11 @@ class Beamline:
                 if item.get("name") == CLOSE_AGENT_PLAN and _close_agent_uid(item) == agent_uid:
                     close_index = i
                     break
-        out: dict[str, Any] = {"close_index": close_index, "block": [], "queue_stop": None}
+        out: dict[str, Any] = {"close_index": close_index, "block": [], "queue_stop": None, "owner": None}
         if close_index is None:
             out["before"], out["after"] = len(items), 0
             return out
+        out["owner"] = close_agent_owner(items[close_index])
         stop_index = None
         if close_index > 0:
             prev = items[close_index - 1]
@@ -608,6 +611,35 @@ class Beamline:
         out["block_at_head"] = not others_before
         return out
 
+    @staticmethod
+    def check_owner(split: dict[str, Any], agent_uid: str) -> None:
+        """
+        Refuse an agent launched by one runner changing a block another runner owns.
+
+        A Claude that nbs-agents-runner launches carries its runner's id in
+        ``$NBS_AGENT_OWNER``; the runner that claimed the block stamped its own
+        on the block's ``close_agent``. Without either, nothing is checked.
+
+        Parameters
+        ----------
+        split : dict
+            ``split_queue`` of the queue for ``agent_uid``.
+        agent_uid : str
+            Session UID.
+
+        Raises
+        ------
+        CliError
+            If both are set and differ.
+        """
+        token = os.environ.get(AGENT_OWNER_ENV)
+        owner = split.get("owner")
+        if token and owner and owner["id"] != token:
+            raise CliError(
+                f"session {agent_uid}'s block belongs to the {describe_owner(owner)}; this agent was launched "
+                "by another runner and must not change it. Stop here: two runners are serving this beamline"
+            )
+
     def _session_view(self, record: dict[str, Any], items: list, estimator: Any, running: dict) -> tuple:
         uid = record["agent_uid"]
         split = self.split_queue(items, uid)
@@ -624,6 +656,7 @@ class Beamline:
             "block": block,
             "stop_in_place": split["queue_stop"] is not None,
             "close_in_queue": split["close_index"] is not None,
+            "owner": split["owner"],
         }
         budget = dict(record.get("budget") or {})
         if record.get("opened"):
@@ -1605,6 +1638,7 @@ class Beamline:
         split = self.split_queue(items, uid)
         if split["close_index"] is None:
             raise CliError(f"close_agent for session {uid} is not in the queue")
+        self.check_owner(split, uid)
         queued_s = sum(self.estimate(i, estimator) or 0 for i in split["block"])
         budget = dict(record.get("budget") or {})
         used_s = time.time() - record.get("opened", time.time())
@@ -1671,7 +1705,9 @@ class Beamline:
         record = self._require_session(agent_uid)
         uid = record["agent_uid"]
         items = self.queue().get("items", [])
-        block = self.split_queue(items, uid)["block"]
+        split = self.split_queue(items, uid)
+        self.check_owner(split, uid)
+        block = split["block"]
         matches = [i for i in block if i.get("item_uid", "").startswith(item_uid)]
         if not matches:
             raise CliError(f"no pending item {item_uid!r} in this session's block")
@@ -1720,11 +1756,13 @@ class Beamline:
             raise CliError("--reason is required")
         record = self._require_session(agent_uid)
         uid = record["agent_uid"]
-        running = self.queue().get("running_item") or {}
+        queue = self.queue()
+        running = queue.get("running_item") or {}
         if not running:
             raise CliError("nothing is running")
         if (running.get("meta") or {}).get(AGENT_UID_KEY) != uid:
             raise CliError("the running plan is not part of this session; ask the operator")
+        self.check_owner(self.split_queue(queue.get("items", []), uid), uid)
 
         def wait_for(check):
             deadline = time.time() + timeout
@@ -1911,6 +1949,7 @@ class Beamline:
         uid = record["agent_uid"]
         items = self.queue().get("items", [])
         split = self.split_queue(items, uid)
+        self.check_owner(split, uid)
         dropped = []
         if drop_pending:
             for item in split["block"]:

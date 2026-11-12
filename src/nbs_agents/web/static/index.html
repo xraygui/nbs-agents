@@ -554,6 +554,7 @@ function renderSummary(records) {
     } else if (r.budget) {
       parts.push(`budget: ${esc(JSON.stringify(r.budget))}`);
     }
+    if (r.runner && r.runner.host) parts.push(`runner: ${esc(r.runner.host)} pid ${esc(r.runner.pid ?? "?")}`);
     html = parts.join(" · ");
     if (r.goal) html += `<div class="goal"><span class="label">goal:</span> ${esc(r.goal)}</div>`;
     if (budget.time_s && r.opened) {

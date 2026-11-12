@@ -12,6 +12,7 @@ def nbs_agents_home(tmp_path, monkeypatch):
     monkeypatch.setenv(BEAMLINE_ENV, "testbl")
     monkeypatch.delenv("TILED_CACHE_DIR", raising=False)
     monkeypatch.delenv("NBS_CLAUDE_SANDBOX", raising=False)
+    monkeypatch.delenv("NBS_AGENT_OWNER", raising=False)
     for name in ("NBS_CLI_CONFIG", "NBS_ATTACHMENTS_DIR", "NBS_KB_AGENT_DIR", "NBS_GATEWAY_ENV", "NBS_ENV_DIR"):
         monkeypatch.delenv(name, raising=False)
     return home
@@ -29,3 +30,11 @@ def nbs_agents_token(nbs_agents_home, monkeypatch):
 def beamline_dir(nbs_agents_home):
     """The test beamline's folder."""
     return nbs_agents_home / "testbl"
+
+
+@pytest.fixture(autouse=True)
+def no_claim_settle(monkeypatch):
+    """Claim agent blocks without waiting to read the close_agent back."""
+    from nbs_agents.supervisor import AgentSupervisor
+
+    monkeypatch.setattr(AgentSupervisor, "CLAIM_SETTLE_S", 0)

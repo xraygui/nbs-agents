@@ -5,7 +5,9 @@ nbs-agents-runner uses this when an operator opens a Claude session from
 nbs-gui with ``launch: true``. The child runs ``claude_command --headless``
 in its own process group with ``NBS_AGENT_UID``, ``NBS_AGENT_GOAL`` and
 ``NBS_DRIVER`` set, so it drives the session that is already open instead of
-opening another, and ``NBS_ENV_DIR`` naming this python environment.
+opening another, ``NBS_AGENT_OWNER`` naming the runner that owns the session's
+block (nbs-cli refuses to change a block another runner owns), and
+``NBS_ENV_DIR`` naming this python environment.
 """
 
 import logging
@@ -13,6 +15,7 @@ import os
 import shlex
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -21,6 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
+from ..constants import AGENT_OWNER_ENV
 from .resources import SCRIPTS_DIR
 
 LOGGER = logging.getLogger(__name__)
@@ -306,6 +310,47 @@ class ClaudeLauncher:
         timer.start()
         return True
 
+    def stop_leftover(self, pid: int, agent_uid: str) -> bool:
+        """
+        Stop a Claude an earlier runner launched for a session and left running.
+
+        Only a process whose environment names this session (``NBS_AGENT_UID``)
+        is stopped, so a reused pid is left alone. Its process group gets
+        SIGTERM, then SIGKILL after ``stop_timeout_s``; this waits for it.
+
+        Parameters
+        ----------
+        pid : int
+            The pid recorded on the session when it was launched.
+        agent_uid : str
+            Session UID.
+
+        Returns
+        -------
+        bool
+            True if a leftover Claude was found and signalled.
+        """
+        try:
+            environ = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+        except OSError:
+            return False
+        if f"NBS_AGENT_UID={agent_uid}".encode() not in environ:
+            return False
+        LOGGER.warning("Stopping leftover Claude for %s (pid %s) from an earlier runner", agent_uid, pid)
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(pid, sig)
+            except (ProcessLookupError, PermissionError):
+                return True
+            deadline = time.time() + self.stop_timeout_s
+            while time.time() < deadline:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    return True
+                time.sleep(0.2)
+        return True
+
 
 def _signal_group(process: subprocess.Popen, sig: int) -> None:
     """Signal a child's process group, or just the child if that fails."""
@@ -358,7 +403,9 @@ class ClaudeLaunchHook:
             # Record the driver first, so the child marks operator messages read from its first call
             if self.agent_log is not None:
                 self.agent_log.update(agent.agent_uid, driver=driver)
-            launched = self.launcher.launch(agent.agent_uid, (agent.parameters or {}).get("goal"), driver)
+            owner = getattr(agent, "owner", None) or {}
+            env = {AGENT_OWNER_ENV: owner["id"]} if owner.get("id") else None
+            launched = self.launcher.launch(agent.agent_uid, (agent.parameters or {}).get("goal"), driver, env=env)
         except Exception as exc:
             LOGGER.exception("Could not launch Claude for %s", agent.agent_uid)
             agent.log("error", f"could not launch Claude: {exc}")
@@ -375,6 +422,25 @@ class ClaudeLaunchHook:
             except Exception:
                 LOGGER.exception("Failed to record launch for %s", agent.agent_uid)
         agent.log("launch", f"started Claude (pid {launched.pid})", pid=launched.pid, log_path=launched.log_path)
+
+    def on_agent_adopted(self, agent, record: dict) -> None:
+        """
+        Relaunch Claude for a session a restarted runner adopted.
+
+        A Claude the earlier runner launched on this machine may still be
+        running; it is stopped first, so the session never has two drivers.
+        """
+        if agent.agent_name != CLAUDE_AGENT or not (agent.parameters or {}).get("launch"):
+            return
+        pid = (record.get("launch") or {}).get("pid")
+        host = (record.get("runner") or {}).get("host")
+        if self.launcher is not None and pid and host in (None, socket.gethostname()):
+            try:
+                if self.launcher.stop_leftover(int(pid), agent.agent_uid):
+                    agent.log("launch", f"stopped the earlier runner's Claude (pid {pid})", pid=pid)
+            except Exception:
+                LOGGER.exception("Could not stop the leftover Claude for %s", agent.agent_uid)
+        self.on_agent_opened(agent)
 
     def on_agent_closed(self, agent) -> None:
         """Stop the session's Claude, if this hook started one."""

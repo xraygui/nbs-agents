@@ -15,6 +15,9 @@ class ExternalAgent(BaseAgent):
     class only checks the sentinels at start.
     """
 
+    # It keeps no state of its own, so a restarted runner can take it over
+    RESUMABLE = True
+
     def start(self) -> None:
         """
         Check that the sentinel pair is in place.

@@ -57,6 +57,9 @@ class Paths:
         nbs-cli settings, the gateway key file and the web login token.
     agent_log_dir : Path
         Snapshot folder of the agent log's own Redis.
+    runner_lock : Path
+        The file nbs-agents-runner holds an ``flock`` on, so only one runner
+        serves the beamline from this folder.
     tiled_cache : Path
         Tiled's login token cache (``TILED_CACHE_DIR`` for nbs-agents), shared
         by every beamline.
@@ -77,6 +80,7 @@ class Paths:
     gateway_env: Path
     token: Path
     agent_log_dir: Path
+    runner_lock: Path
     tiled_cache: Path
     tiled_agent_key: Path
     attachments: Path
@@ -174,6 +178,7 @@ def paths(beamline: Optional[str] = None) -> Paths:
         gateway_env=config / "gateway.env",
         token=config / "token",
         agent_log_dir=root / "state" / "agent-log",
+        runner_lock=root / "state" / "runner.lock",
         tiled_cache=top / "tiled",
         tiled_agent_key=root / "state" / "tiled-agent" / "api-key.json",
         attachments=root / "data" / "attachments",

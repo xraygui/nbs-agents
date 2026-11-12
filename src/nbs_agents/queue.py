@@ -8,6 +8,7 @@ from bluesky_queueserver_api.zmq import REManagerAPI
 
 from .constants import (
     AGENT_NAME_KEY,
+    AGENT_OWNER_KEY,
     AGENT_PARAMETERS_KEY,
     AGENT_SEQUENCE_KEY,
     AGENT_UID_KEY,
@@ -383,6 +384,91 @@ def update_close_agent_uid(
     if not update_response.get("success", False):
         raise RuntimeError(update_response.get("msg", "item_update failed"))
     return update_response
+
+
+def close_agent_owner(item: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """
+    The runner that owns an agent block, from its ``close_agent`` item.
+
+    Parameters
+    ----------
+    item : dict
+        ``close_agent`` queue item.
+
+    Returns
+    -------
+    dict or None
+        ``id``, ``host``, ``pid`` and ``started`` of the owning runner, or None
+        if no runner has claimed the block (or one older than owners did).
+    """
+    owner = (item.get("meta") or {}).get(AGENT_OWNER_KEY)
+    return owner if isinstance(owner, dict) and owner.get("id") else None
+
+
+def describe_owner(owner: dict[str, Any]) -> str:
+    """A runner's owner stamp, for messages: ``runner on HOST (pid N, started ...)``."""
+    started = owner.get("started")
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(started)) if started else "?"
+    return f"runner on {owner.get('host', '?')} (pid {owner.get('pid', '?')}, started {when})"
+
+
+def claim_close_agent(
+    manager: Any,
+    close_item_uid: str,
+    agent_uid: str,
+    owner: dict[str, Any],
+    settle_s: float = 0.5,
+    force: bool = False,
+) -> Optional[dict[str, Any]]:
+    """
+    Claim an agent block for one runner, on its ``close_agent`` item.
+
+    Sets the item's ``agent_uid`` argument and stamps ``owner`` in its meta,
+    unless another runner already owns it. The QueueServer has no
+    compare-and-set, so two runners can both write; each reads the item back
+    after ``settle_s`` and the last writer wins.
+
+    Parameters
+    ----------
+    manager : REManagerAPI
+        QueueServer API client.
+    close_item_uid : str
+        Queue item UID for the close sentinel.
+    agent_uid : str
+        Agent UID from the ``open_agent`` run.
+    owner : dict
+        This runner: ``id``, and ``host``, ``pid`` and ``started`` for people.
+    settle_s : float, optional
+        Wait before reading the item back.
+    force : bool, optional
+        Take the block even from another owner (a runner adopting the blocks
+        of the one it replaced).
+
+    Returns
+    -------
+    dict or None
+        The owner that holds the block: ``owner`` if this runner won, another
+        runner's owner if it lost, or None if the read-back shows no owner.
+    """
+    response = manager.item_get(uid=close_item_uid)
+    if not response.get("success", False):
+        raise RuntimeError(response.get("msg", "item_get failed"))
+    item = response["item"]
+    held = close_agent_owner(item)
+    if held is not None and held["id"] != owner["id"] and not force:
+        return held
+    item["args"] = [agent_uid]
+    item["kwargs"] = {}
+    item["meta"] = {**(item.get("meta") or {}), AGENT_OWNER_KEY: dict(owner)}
+    update_response = manager.item_update(item)
+    if not update_response.get("success", False):
+        raise RuntimeError(update_response.get("msg", "item_update failed"))
+    if settle_s:
+        time.sleep(settle_s)
+    response = manager.item_get(uid=close_item_uid)
+    if not response.get("success", False):
+        raise RuntimeError(response.get("msg", "item_get failed"))
+    return close_agent_owner(response["item"])
 
 
 def insert_before_queue_stop(

@@ -13,6 +13,9 @@ from nbs_agents.constants import (
 )
 from nbs_agents.plans.agent_control import close_agent, open_agent
 from nbs_agents.queue import (
+    claim_close_agent,
+    close_agent_owner,
+    describe_owner,
     ensure_queue_stop_before_close,
     find_sentinel_pair,
     insert_before_queue_stop,
@@ -102,6 +105,48 @@ class QueueHelperTests(unittest.TestCase):
         release_queue_toward_close(manager)
         manager.wait_for_idle.assert_called_once_with(timeout=60)
         manager.queue_start.assert_called_once()
+
+
+class ClaimCloseAgentTests(unittest.TestCase):
+    OWNER = {"id": "me", "host": "here", "pid": 2, "started": 0}
+
+    def manager(self, meta=None):
+        """A manager whose close_agent item keeps what item_update writes."""
+        store = {"item": {"item_type": "plan", "name": "close_agent", "item_uid": "close", "args": [], "kwargs": {}}}
+        if meta:
+            store["item"]["meta"] = meta
+        manager = MagicMock()
+        manager.item_get.side_effect = lambda uid: {"success": True, "item": dict(store["item"])}
+
+        def update(item):
+            store["item"] = item
+            return {"success": True}
+
+        manager.item_update.side_effect = update
+        return manager, store
+
+    def test_claims_an_unowned_block(self):
+        manager, store = self.manager()
+        self.assertEqual(claim_close_agent(manager, "close", "uid-1", self.OWNER, settle_s=0), self.OWNER)
+        self.assertEqual(store["item"]["args"], ["uid-1"])
+        self.assertEqual(close_agent_owner(store["item"]), self.OWNER)
+
+    def test_leaves_a_block_another_runner_owns(self):
+        other = {"id": "other", "host": "there", "pid": 3, "started": 0}
+        manager, store = self.manager({"agent_owner": other})
+        self.assertEqual(claim_close_agent(manager, "close", "uid-1", self.OWNER, settle_s=0), other)
+        manager.item_update.assert_not_called()
+
+    def test_last_writer_wins(self):
+        other = {"id": "other", "host": "there", "pid": 3, "started": 0}
+        manager, store = self.manager()
+        manager.item_update.side_effect = lambda item: (
+            store.update(item={**item, "meta": {"agent_owner": other}}) or {"success": True}
+        )
+        self.assertEqual(claim_close_agent(manager, "close", "uid-1", self.OWNER, settle_s=0), other)
+
+    def test_describes_the_owner(self):
+        self.assertIn("runner on here (pid 2", describe_owner(self.OWNER))
 
 
 class ControlPlanTests(unittest.TestCase):
