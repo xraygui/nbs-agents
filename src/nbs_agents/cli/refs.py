@@ -355,6 +355,45 @@ class ReferenceLibrary:
             meta["request"] = request
         return self._new(DRAFT_PREFIX, meta, body, snapshot).summary()
 
+    def edit_draft(
+        self, entry_id: str, author: str, title: Optional[str] = None, body: Optional[str] = None,
+        **lists: Optional[list[str]],
+    ) -> dict[str, Any]:
+        """
+        Change a draft its writer made: title, description or lists. Where the
+        run is and the snapshot never change; approved entries are refused.
+
+        Parameters
+        ----------
+        entry_id : str
+            A ``draft/...`` entry.
+        author : str
+            Who is editing; must be the draft's ``created_by``.
+        title, body : str, optional
+            Replacements; ``None`` keeps the current value.
+        **lists : list of str, optional
+            Replacement ``devices``, ``nodes``, ``tags`` or ``aliases``.
+
+        Returns
+        -------
+        dict
+            The draft's summary.
+        """
+        if not entry_id.startswith(DRAFT_PREFIX):
+            raise RefError(f"{entry_id} is an approved reference; only staff change it, in the web page")
+        draft = self.get(entry_id)
+        owner = str(draft.meta.get("created_by") or "")
+        if owner != author:
+            raise RefError(f"{entry_id} was drafted by {owner or 'someone else'}; you can edit only your own drafts")
+        meta = dict(draft.meta)
+        self._apply(meta, title, lists)
+        body = draft.body if body is None else body
+        if not body.strip():
+            raise RefError("a reference needs a description")
+        meta.update({"edited_by": author, "edited": self._stamp()})
+        draft.path.write_text(render_note(meta, body))
+        return self.get(entry_id).summary()
+
     def _new(self, prefix: str, meta: dict[str, Any], body: str, snapshot: Optional[dict[str, Any]]) -> Entry:
         base = slugify(meta["title"])
         entry_id, k = prefix + base, 2
@@ -655,6 +694,16 @@ def _server(uri: str) -> tuple[str, str]:
     return parts.scheme.lower(), parts.netloc.lower()
 
 
+NOT_PUBLIC = ("Reference scans must be marked public in Tiled, so that any API key (and, on another "
+              "server, an anonymous reader) can read them; this one probably is not.")
+
+
+def refused(exc: BaseException) -> bool:
+    """Whether Tiled refused a read (HTTP 401 or 403), as opposed to failing to answer."""
+    response = getattr(exc, "response", None)
+    return getattr(response, "status_code", None) in (401, 403)
+
+
 def open_catalog(config: Any, uri: str, path: str, interactive: bool = False):
     """
     The Tiled container at ``uri`` and ``path``.
@@ -662,17 +711,18 @@ def open_catalog(config: Any, uri: str, path: str, interactive: bool = False):
     On the install's own server this connects exactly as nbs-cli always does
     (``tiled_auth.connect``): the configured or agent API key, else the cached
     login. On another server no API key is sent, since a key is only good for
-    the server that made it: the cached login for that server is used, if
-    there is one.
+    the server that made it: nbs-cli reads as an anonymous reader, or with a
+    saved login for that server if there is one. Either way it can read only
+    runs marked public there, which reference scans must be.
 
     Raises
     ------
     RefError
-        If the server cannot be reached, needs a login, or the path cannot be read.
+        If the server needs a login, or the path cannot be read.
     """
     import copy
 
-    from nbs_agents.tiled_auth import TiledLoginRequired, _navigate, connect, login_context
+    from nbs_agents.tiled_auth import TiledLoginRequired, _navigate, connect, use_cache_dir
 
     try:
         if _server(uri) == _server(config.tiled_uri):
@@ -680,16 +730,29 @@ def open_catalog(config: Any, uri: str, path: str, interactive: bool = False):
             here.tiled_path = path
             return connect(here, interactive=interactive)
         from tiled.client import from_context
+        from tiled.client.context import Context
 
-        return _navigate(from_context(login_context(uri, interactive)), path)
+        use_cache_dir()
+        context, _ = Context.from_any_uri(uri)
+        auth = context.server_info.authentication
+        if not context.authenticated and auth.providers:
+            context.use_cached_tokens()
+        if not context.authenticated and auth.required:
+            raise RefError(
+                f"Tiled at {uri} admits no anonymous readers, and nbs-cli holds no key or login for it "
+                f"(the agents' key is only for {config.tiled_uri}). Reference scans on another server "
+                "need that server to let anyone read runs marked public."
+            )
+        return _navigate(from_context(context), path)
     except TiledLoginRequired as exc:
         raise RefError(f"{exc} (agents hold a key only for {config.tiled_uri})") from exc
     except KeyError as exc:
-        raise RefError(
-            f"cannot read {path!r} on {uri}: it does not exist, or this login or key may not read it. "
-            "The agents' key reads whatever the user who started nbs-agents-runner can read on the "
-            "install's own Tiled server, and nothing on other servers."
-        ) from exc
+        raise RefError(f"cannot read {path!r} on {uri}: it does not exist, or this reader may not see it. "
+                       + NOT_PUBLIC) from exc
+    except Exception as exc:
+        if refused(exc):
+            raise RefError(f"Tiled at {uri} refused to read {path!r}. " + NOT_PUBLIC) from exc
+        raise
 
 
 def resolve_refs(config: Any, entries: list) -> list[dict[str, Any]]:
@@ -723,9 +786,13 @@ def resolve_refs(config: Any, entries: list) -> list[dict[str, Any]]:
                 client[str(m["uid"])]
                 result["resolves"] = True
             except KeyError:
-                result.update(resolves=False, error=f"run {m['uid']} is not in {where[1] or '/'} on {where[0]}")
+                result.update(resolves=False, error=f"run {m['uid']} is not in {where[1] or '/'} on "
+                                                    f"{where[0]}, or this reader may not see it. {NOT_PUBLIC}")
         except Exception as exc:
-            result.update(resolves=None, error=f"{type(exc).__name__}: {exc}")
+            if refused(exc):
+                result.update(resolves=False, error=f"Tiled refused to read run {m.get('uid')}. {NOT_PUBLIC}")
+            else:
+                result.update(resolves=None, error=f"{type(exc).__name__}: {exc}")
         configured = catalogs(config).get(str(m.get("catalog") or DEFAULT_CATALOG))
         if configured and (configured["uri"], configured["path"]) != where:
             result["note"] = (f"catalog {m.get('catalog')!r} is now {configured['uri']} {configured['path']!r}; "

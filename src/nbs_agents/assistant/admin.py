@@ -56,8 +56,10 @@ enabled = false
 # model = "sonnet"
 # alert_model = "opus"
 
-# Other Tiled catalogs reference scans may come from (nbs-cli ref create --catalog NAME).
-# The catalog above (tiled_uri, tiled_path) is always "default".
+# Other Tiled catalogs runs may be read from (nbs-cli run/runs/ref create --catalog NAME).
+# The catalog above (tiled_uri, tiled_path) is always "default". Reference scans must be
+# marked public in Tiled: on this server agents read with their read-only key, and on
+# another server nbs-cli sends no key and reads as an anonymous reader.
 # [references.catalogs.commissioning]
 # uri = "https://tiled.example.org"
 # path = "sst/commissioning/raw"
