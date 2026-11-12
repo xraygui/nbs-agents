@@ -128,6 +128,21 @@ print(kb.human_dir or "-", kb.agent_dir, kb.review_dir)')
             export NBS_KB_DIR="$kb_human"
             mounts+=(--ro-path "$kb_human")
         fi
+        # Reference scans: approved entries and the review record read-only; agents
+        # write only drafts into their own folder.
+        read -r ref_human ref_agent ref_review < <("$python" -c 'from nbs_agents.cli.config import CliConfig
+from nbs_agents.cli.refs import ReferenceLibrary
+c = CliConfig.load(); r = ReferenceLibrary(c.ref_dir, c.ref_agent_dir, c.ref_review_dir)
+print(r.human_dir or "-", r.agent_dir, r.review_dir)')
+        mkdir -p "$ref_agent" "$ref_review"
+        ref_agent="$(readlink -f "$ref_agent")" ref_review="$(readlink -f "$ref_review")"
+        export NBS_REF_AGENT_DIR="$ref_agent" NBS_REF_REVIEW_DIR="$ref_review"
+        mounts+=(--rw-path "$ref_agent" --ro-path "$ref_review")
+        if [[ "$ref_human" != - && -d "$ref_human" ]]; then
+            ref_human="$(readlink -f "$ref_human")"
+            export NBS_REF_DIR="$ref_human"
+            mounts+=(--ro-path "$ref_human")
+        fi
         # The profile's beam_map.toml names the status PVs nbs-cli reads
         beam_map_file="$("$python" -c 'import os
 from nbs_agents.cli.config import CliConfig
@@ -218,7 +233,7 @@ case "$role" in
         export PATH="$here:$PATH"
         tools=("Read" "Skill" "Glob" "Grep" "Edit(./notebook/**)"
                "Bash(sandbox-python:*)" "Bash(nbs-cli post:*)")
-        for verb in state beam plans samples metadata devices device diagnose run runs log attach kb; do
+        for verb in state beam plans samples metadata devices device diagnose run runs log attach kb ref; do
             tools+=("Bash(nbs-cli $verb:*)")
         done
         ;;
