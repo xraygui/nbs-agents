@@ -326,6 +326,7 @@ def test_request_reference_draft_asks_the_assistant(tmp_path):
     assert entry["kind"] == "operator" and entry["source"] == "web"
     assert request["id"] in entry["text"]
     assert f"nbs-cli ref create 81234 --catalog eng --request {request['id']}" in entry["text"]
+    assert "nbs-cli run 81234 --catalog eng" in entry["text"]
     assert "M3 alignment reference" in entry["text"]
     assert client.get("/api/snapshot").json()["ref_pending"] == 1
     assert [q["id"] for q in client.get("/api/refs").json()["queue"]["requests"]] == [request["id"]]
