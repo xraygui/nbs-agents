@@ -670,13 +670,15 @@ def open_catalog(config: Any, uri: str, path: str, interactive: bool = False):
     RefError
         If the server cannot be reached, needs a login, or the path cannot be read.
     """
-    from dataclasses import replace
+    import copy
 
     from nbs_agents.tiled_auth import TiledLoginRequired, _navigate, connect, login_context
 
     try:
         if _server(uri) == _server(config.tiled_uri):
-            return connect(replace(config, tiled_path=path), interactive=interactive)
+            here = copy.copy(config)
+            here.tiled_path = path
+            return connect(here, interactive=interactive)
         from tiled.client import from_context
 
         return _navigate(from_context(login_context(uri, interactive)), path)
