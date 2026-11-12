@@ -46,15 +46,13 @@ appendix entries marked reviewed or removed.
 import json
 import os
 import re
-import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-import yaml
-
 from nbs_agents.paths import paths
+from .notes import ID_RE, NoteError, fts_rank, parse_note, query_terms, render_note, slugify  # noqa: F401
 
 AGENT_PREFIX = "agent/"
 DRAFT_PREFIX = "draft/"
@@ -62,32 +60,9 @@ APPENDIX = "appendix"
 REVIEW_FILE = "review.json"
 ENTRY_RE = re.compile(r"^## Appended by (.*) at (\d{4}-\d\d-\d\d \d\d:\d\d)$", re.M)
 LIST_KEYS = ("devices", "nodes", "tags")
-FRONT_RE = re.compile(r"\A---\n(.*?)\n---\n?(.*)\Z", re.S)
-WORD_RE = re.compile(r"[a-z0-9_]+")
-# Query words that say nothing about the subject; dropped so that a natural
-# question ("why is i0 noisy") is not judged on "why" and "is"
-STOP_WORDS = frozenset(
-    "a an and are as at be by can do does for from how i if in is it its of on or "
-    "the there this to was what when where which who why will with".split()
-)
-# Index columns: what a note is about (weighted), and its text
-HEAD_WEIGHT, BODY_WEIGHT = 3.0, 1.0
-SNIPPET_TOKENS = 24
 
 
-def fts_term(word: str) -> str:
-    """
-    One query word as an FTS5 query: quoted, so no word is read as FTS5 syntax,
-    and a prefix match for words of four letters or more (``reflect`` finds
-    ``reflectivity``). The porter tokenizer matches plurals and endings.
-    """
-    return f'"{word}"*' if len(word) >= 4 else f'"{word}"'
-
-
-ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*(/[A-Za-z0-9][A-Za-z0-9_.-]*)*$")
-
-
-class KBError(Exception):
+class KBError(NoteError):
     """A knowledge-base request that cannot be done (shown as the CLI error)."""
 
 
@@ -155,44 +130,6 @@ class Note:
         return out
 
 
-def parse_note(text: str) -> tuple[dict[str, Any], str]:
-    """
-    Split a note into front matter and body.
-
-    Parameters
-    ----------
-    text : str
-        File contents.
-
-    Returns
-    -------
-    tuple of (dict, str)
-        Front matter (empty without a block) and body.
-    """
-    match = FRONT_RE.match(text)
-    if not match:
-        return {}, text
-    try:
-        meta = yaml.safe_load(match.group(1)) or {}
-    except yaml.YAMLError as exc:
-        raise KBError(f"bad front matter: {exc}") from exc
-    if not isinstance(meta, dict):
-        raise KBError("front matter must be a mapping")
-    return meta, match.group(2)
-
-
-def render_note(meta: dict[str, Any], body: str) -> str:
-    """Front matter block plus body, as written to a file."""
-    front = yaml.safe_dump(meta, sort_keys=False, allow_unicode=True, default_flow_style=None).strip()
-    return f"---\n{front}\n---\n{body.rstrip()}\n"
-
-
-def slugify(text: str) -> str:
-    """A note-ID segment from a title: lowercase words joined by ``-``."""
-    slug = "-".join(WORD_RE.findall(text.lower()))[:60].strip("-")
-    return slug or "note"
-
-
 class KnowledgeBase:
     """
     Read human and agent notes, write agent notes, drafts and appendices, and
@@ -225,7 +162,7 @@ class KnowledgeBase:
         text = path.read_text()
         try:
             meta, body = parse_note(text)
-        except KBError as exc:
+        except NoteError as exc:
             # Keep a broken note visible, with the reason, instead of hiding every other note
             meta, body = {"error": str(exc)}, text
         appendix_path = self._appendix_path(note_id)
@@ -333,41 +270,19 @@ class KnowledgeBase:
             for partial matches, ``missing``.
         """
         notes = self.select(**filters)
-        words = list(dict.fromkeys(WORD_RE.findall(query.lower())))
-        terms = [w for w in words if w not in STOP_WORDS] or words
+        terms = query_terms(query)
         if not terms:
             return [dict(note.summary(), score=0, snippet=self._first_line(note)) for note in notes][:n]
-
-        db = sqlite3.connect(":memory:")
-        try:
-            db.execute("CREATE VIRTUAL TABLE kb USING fts5(head, body, tokenize='porter unicode61')")
-            db.executemany("INSERT INTO kb (rowid, head, body) VALUES (?, ?, ?)", [
-                (i, self._head(note), note.body + "\n" + note.appendix) for i, note in enumerate(notes)
-            ])
-            found: dict[int, list[str]] = {}
-            for term in terms:
-                for (rowid,) in db.execute("SELECT rowid FROM kb WHERE kb MATCH ?", (fts_term(term),)):
-                    found.setdefault(rowid, []).append(term)
-            rows = db.execute(
-                f"SELECT rowid, bm25(kb, {HEAD_WEIGHT}, {BODY_WEIGHT}), "
-                f"snippet(kb, 1, '', '', '...', {SNIPPET_TOKENS}) FROM kb WHERE kb MATCH ?",
-                (" OR ".join(fts_term(t) for t in terms),),
-            ).fetchall()
-        finally:
-            db.close()
-
+        docs = [(self._head(note), note.body + "\n" + note.appendix) for note in notes]
         hits = []
-        for rowid, rank, snippet in rows:
-            note = notes[rowid]
-            hit = note.summary()
-            hit["score"] = round(-rank, 3)
-            hit["snippet"] = " ".join(snippet.split()) or self._first_line(note)
-            missing = [t for t in terms if t not in found.get(rowid, ())]
+        for i, score, snippet, missing in fts_rank(docs, terms)[:n]:
+            hit = notes[i].summary()
+            hit["score"] = score
+            hit["snippet"] = snippet or self._first_line(notes[i])
             if missing:
                 hit["missing"] = missing
-            hits.append((len(missing), rank, hit))
-        hits.sort(key=lambda h: h[:2])
-        return [hit for _, _, hit in hits[:n]]
+            hits.append(hit)
+        return hits
 
     @staticmethod
     def _head(note: Note) -> str:
