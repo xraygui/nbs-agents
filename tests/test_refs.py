@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
@@ -13,7 +14,6 @@ from nbs_agents.cli.config import CliConfig, read_catalogs
 from nbs_agents.cli.main import add_note_refs, main
 from nbs_agents.cli.kb import KnowledgeBase
 from nbs_agents.cli.refs import RefError, ReferenceLibrary, baseline_start, scan_ranges
-from nbs_agents.tiled_auth import TiledLoginRequired
 
 UID = "4f1c0a7e-1111-2222-3333-444455556666"
 OTHER_UID = "9a9a9a9a-1111-2222-3333-444455556666"
@@ -333,13 +333,86 @@ class TestRefCommand(RefTestCase):
         self.assertEqual((meta["catalog"], meta["tiled_path"], meta["uid"]), ("eng", "eng/raw", OTHER_UID))
         self.assertIn(("https://tiled.example.org", "eng/raw"), self.connected)
 
-    def test_another_server_gets_no_key(self):
-        with mock.patch("nbs_agents.tiled_auth.login_context",
-                        side_effect=TiledLoginRequired("Tiled at https://other.example.org needs a login.")):
+    def other_server(self, required=False, catalog=None):
+        """Patch Tiled's client for https://other.example.org: anonymous, or needing a login."""
+        auth = SimpleNamespace(providers=[] if not required else ["entra"], required=required)
+        context = SimpleNamespace(authenticated=False, server_info=SimpleNamespace(authentication=auth),
+                                  use_cached_tokens=lambda: False, uri="https://other.example.org")
+        seen = []
+
+        def from_any_uri(uri, *a, **k):
+            seen.append(uri)
+            return context, "x/raw"
+
+        tree = {"x": {"raw": catalog if catalog is not None else FakeCatalog([make_run(OTHER_UID, 7)])}}
+        return seen, (mock.patch("tiled.client.context.Context.from_any_uri", from_any_uri),
+                      mock.patch("tiled.client.from_context", lambda ctx: tree))
+
+    def test_another_server_is_read_anonymously(self):
+        seen, patches = self.other_server()
+        with patches[0], patches[1]:
             status, out = self.cli("ref", "create", "-1", "--catalog", "elsewhere", "--title", "t", "--text", "b")
-        self.assertEqual(status, 1)
-        self.assertIn("agents hold a key only for https://tiled.example.org", out["error"])
+        self.assertEqual(status, 0, out)
+        self.assertEqual(seen, ["https://other.example.org"])
+        self.assertEqual(self.lib.get(out["id"]).meta["tiled_uri"], "https://other.example.org")
+        # No key: connect (which sends the agents' key) is never used for the other server
         self.assertNotIn(("https://other.example.org", "x/raw"), self.connected)
+
+    def test_another_server_needing_a_login_is_explained(self):
+        _, patches = self.other_server(required=True)
+        with patches[0], patches[1]:
+            status, out = self.cli("run", "-1", "--catalog", "elsewhere")
+        self.assertEqual(status, 1)
+        self.assertIn("admits no anonymous readers", out["error"])
+
+    def test_refused_or_missing_runs_point_at_public_marking(self):
+        class Refused(Exception):
+            response = SimpleNamespace(status_code=403)
+
+        class Locked(FakeCatalog):
+            def __getitem__(self, key):
+                raise Refused("403 Forbidden")
+
+        _, patches = self.other_server(catalog=Locked([]))
+        with patches[0], patches[1]:
+            status, out = self.cli("run", OTHER_UID, "--catalog", "elsewhere")
+        self.assertEqual(status, 1)
+        self.assertIn("marked public", out["error"])
+        status, out = self.cli("run", "nope", "--catalog", "eng")
+        self.assertEqual(status, 1)
+        self.assertIn("in catalog eng", out["error"])
+        self.assertIn("marked public", out["error"])
+
+    def test_run_and_runs_read_another_catalog(self):
+        status, out = self.cli("run", OTHER_UID[:8], "--catalog", "eng")
+        self.assertEqual((status, out["uid"], out["scan_id"]), (0, OTHER_UID, 5))
+        status, out = self.cli("runs", "-n", "1", "--catalog", "eng", "--no-summary")
+        self.assertEqual((status, [r["uid"] for r in out]), (0, [OTHER_UID]))
+        status, out = self.cli("run", "-1")
+        self.assertEqual(out["uid"], UID)
+        status, out = self.cli("ref", "catalogs")
+        self.assertEqual(out, {"default": {"uri": "https://tiled.example.org", "path": "bl/raw"},
+                               "eng": {"uri": "https://tiled.example.org", "path": "eng/raw"},
+                               "elsewhere": {"uri": "https://other.example.org", "path": "x/raw"}})
+
+    def test_agents_edit_only_their_own_drafts(self):
+        _, made = self.cli("ref", "create", "-1", "--title", "M3 pitch", "--text", "Rocking curve.")
+        snapshot = self.lib.get(made["id"]).snapshot_path.read_text()
+        status, out = self.cli("ref", "edit", made["id"], "--text", "Better text.", "--tags", "alignment",
+                               "--aliases", "mirror 3")
+        self.assertEqual(status, 0, out)
+        draft = self.lib.get(made["id"])
+        self.assertEqual((draft.body.strip(), draft.meta["tags"], draft.meta["edited_by"]),
+                         ("Better text.", ["alignment"], "assistant"))
+        self.assertEqual(draft.meta["uid"], UID)
+        self.assertEqual(draft.snapshot_path.read_text(), snapshot)
+        status, out = self.cli("ref", "edit", made["id"], "--title", "x", "--agent-uid", "0123456789", role="driver")
+        self.assertEqual(status, 1)
+        self.assertIn("only your own drafts", out["error"])
+        self.lib.approve(made["id"], "Ana")
+        status, out = self.cli("ref", "edit", "m3-pitch", "--text", "x")
+        self.assertEqual(status, 1)
+        self.assertIn("only staff change it", out["error"])
 
     def test_unknown_catalog_and_run(self):
         status, out = self.cli("ref", "create", "1", "--catalog", "nope", "--title", "t", "--text", "b")

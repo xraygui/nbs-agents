@@ -24,7 +24,10 @@ from nbs_agents.agentlog import ASSISTANT_POST_KINDS, assistant_uid
 from .config import ASSISTANT_ROLE, DEFAULT_CATALOG, ROLES, CliConfig
 from .core import NO_BEAM_MAP, Beamline, CliError, refuse_read_only
 from .kb import KBError, KnowledgeBase
-from .refs import ReferenceLibrary, RefError, catalogs, open_catalog, resolve_refs, run_location, take_snapshot
+from .refs import (
+    NOT_PUBLIC, ReferenceLibrary, RefError, catalogs, open_catalog, refused, resolve_refs, run_location,
+    take_snapshot,
+)
 from nbs_agents.paths import BeamlineError, add_beamline_argument, use_beamline
 
 
@@ -135,6 +138,7 @@ def cwd_path(name: str, flag: str = "--save") -> Path:
     return path
 
 
+CATALOG_HELP = "Tiled catalog to read: default (this beamline's), or a name from `ref catalogs`"
 # Global only: `devices --role` filters devices
 ROLE_HELP = "driver (default) or assistant (read-only; default $NBS_CLI_ROLE)"
 
@@ -202,11 +206,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--attach", action="store_true", help="plot the run into the figure store; prints the att: link")
     p.add_argument("--alt", default="", help="figure description for --attach (default: scan id, plan, sample)")
+    p.add_argument("--catalog", default=DEFAULT_CATALOG, help=CATALOG_HELP)
 
     p = sub.add_parser("runs", parents=[common], help="summaries of recent runs")
     p.add_argument("-n", type=int, default=10)
     p.add_argument("--mine", action="store_true", help="only runs from the current session")
     p.add_argument("--no-summary", action="store_true", help="skip reading data")
+    p.add_argument("--catalog", default=DEFAULT_CATALOG, help=CATALOG_HELP)
 
     p = sub.add_parser("wait", parents=[common], help="block until a run finishes or the queue changes")
     p.add_argument("--timeout", type=float, default=600)
@@ -332,12 +338,18 @@ def build_parser() -> argparse.ArgumentParser:
                        help="draft a reference from a run, for staff to review (agents only write drafts)")
     q.add_argument("run", help="uid, uid prefix, scan id, or -1 for the latest run")
     q.add_argument("--title", required=True)
-    q.add_argument("--catalog", default=DEFAULT_CATALOG,
-                   help="catalog the run is in: default, or a [references.catalogs] name")
+    q.add_argument("--catalog", default=DEFAULT_CATALOG, help=CATALOG_HELP)
     for key in ("devices", "nodes", "tags", "aliases"):
         q.add_argument(f"--{key}", help=f"comma-separated {key}" + (
             " (default: the run's motors and detectors)" if key == "devices" else ""))
     q.add_argument("--request", default="", help="ID of the staff request this draft answers")
+    q = ref.add_parser("edit", parents=[common, content],
+                       help="change a draft you wrote (never an approved reference, never its snapshot)")
+    q.add_argument("id")
+    q.add_argument("--title")
+    for key in ("devices", "nodes", "tags", "aliases"):
+        q.add_argument(f"--{key}", help=f"comma-separated {key}")
+    ref.add_parser("catalogs", parents=[common], help="Tiled catalogs runs can be read from, with their URI and path")
     return parser
 
 
@@ -489,9 +501,28 @@ def run_in_catalog(bl: Beamline, config: CliConfig, name: str) -> tuple[Beamline
         raise CliError(f"no catalog {name!r}; have {', '.join(found)} ([references.catalogs] in nbs-cli.toml)")
     if name == DEFAULT_CATALOG:
         return bl, found[name]
+    # Share the beamline info, so closing bl closes it once
+    bl.info  # noqa: B018
     view = copy.copy(bl)
-    view._tiled = open_catalog(config, found[name]["uri"], found[name]["path"])
+    try:
+        view._tiled = open_catalog(config, found[name]["uri"], found[name]["path"])
+    except RefError as exc:
+        raise CliError(f"catalog {name}: {exc}") from exc
     return view, found[name]
+
+
+def get_run(bl: Beamline, ref: str, catalog: str):
+    """``bl.get_run``, saying for another catalog that a missing run may just not be public."""
+    try:
+        return bl.get_run(ref)
+    except CliError as exc:
+        if catalog == DEFAULT_CATALOG:
+            raise
+        raise CliError(f"{exc} in catalog {catalog}. {NOT_PUBLIC}") from exc
+    except Exception as exc:
+        if catalog != DEFAULT_CATALOG and refused(exc):
+            raise CliError(f"Tiled refused to read {ref} in catalog {catalog}. {NOT_PUBLIC}") from exc
+        raise
 
 
 def run_ref(lib: ReferenceLibrary, config: CliConfig, args: argparse.Namespace, beamline) -> Any:
@@ -524,6 +555,8 @@ def run_ref(lib: ReferenceLibrary, config: CliConfig, args: argparse.Namespace, 
             if cmd == "list":
                 return [e.summary() for e in lib.select(lib.drafts() if args.drafts else None, **filters)]
             return lib.search(" ".join(args.words), n=args.n, **filters)
+        if cmd == "catalogs":
+            return catalogs(config)
         if cmd == "show":
             entry = lib.get(args.id)
             out = entry.full()
@@ -541,7 +574,7 @@ def run_ref(lib: ReferenceLibrary, config: CliConfig, args: argparse.Namespace, 
             uid = args.agent_uid or os.environ.get("NBS_AGENT_UID") or None
             text = kb_text(args, what="description")
             view, where = run_in_catalog(beamline(), config, args.catalog)
-            run = view.get_run(args.run)
+            run = get_run(view, args.run, args.catalog)
             location = run_location(args.catalog, where, run)
             snapshot = take_snapshot(view, run)
             lists = {key: split_list(getattr(args, key)) for key in ("devices", "nodes", "tags", "aliases")}
@@ -550,6 +583,11 @@ def run_ref(lib: ReferenceLibrary, config: CliConfig, args: argparse.Namespace, 
                 lists["devices"] = list(dict.fromkeys((start.get("motors") or []) + (start.get("detectors") or [])))
             return lib.create(args.title, text, kb_author(config, uid), location, snapshot,
                               request=args.request, **lists)
+        if cmd == "edit":
+            uid = args.agent_uid or os.environ.get("NBS_AGENT_UID") or None
+            lists = {key: split_list(getattr(args, key)) for key in ("devices", "nodes", "tags", "aliases")}
+            return lib.edit_draft(args.id, kb_author(config, uid), title=args.title,
+                                  body=kb_text(args, required=False, what="description"), **lists)
     except (KBError, RefError) as exc:
         raise CliError(str(exc)) from exc
     raise CliError(f"unknown ref command {cmd}")
@@ -597,8 +635,10 @@ def run_command(bl: Beamline, args: argparse.Namespace) -> Any:
         return bl.device(args.names)
     if cmd == "diagnose":
         return bl.diagnose()
+    if cmd in ("run", "runs"):
+        bl, _ = run_in_catalog(bl, bl.config, args.catalog)
     if cmd == "run":
-        run = bl.get_run(args.ref)
+        run = get_run(bl, args.ref, args.catalog)
         out = bl.run_summary(run)
         if args.data:
             out["data"] = bl.run_data(run)
