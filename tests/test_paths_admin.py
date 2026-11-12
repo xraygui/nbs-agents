@@ -112,7 +112,7 @@ def test_paths_command_lists_every_location(nbs_agents_home):
     lines = []
     assert admin.show_paths(out=lines.append) == 0
     assert lines[0].split()[1] == "testbl" and lines[1].split()[1] == str(nbs_agents_home)
-    assert len(lines) == 14
+    assert len(lines) == 15
 
 
 def test_init_writes_this_beamlines_tiled_catalog(nbs_agents_home):

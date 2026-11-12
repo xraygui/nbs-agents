@@ -9,7 +9,8 @@ folder to make, back up or move::
         config/   nbs-cli.toml, gateway.env (gateway key), token (web login)
         state/    agent-log/ (the agent log's Redis snapshot), tiled-agent/
                   (the agents' read-only Tiled key)
-        data/     attachments/ (figures), kb/ (agents' knowledge-base notes)
+        data/     attachments/ (figures), kb/ (agents' knowledge-base notes),
+                  references/ (agents' reference scan drafts)
         work/     sessions/<uid8>/ (driver workdirs), assistant/, logs/
     tiled/        your Tiled login, shared by every beamline
 
@@ -66,8 +67,9 @@ class Paths:
     tiled_agent_key : Path
         The read-only, expiring Tiled API key the runner makes for agents. It
         is alone in its folder, which sandboxed agents get mounted read-only.
-    attachments, kb_agent : Path
-        Figures linked as ``att:ID``, and agents' knowledge-base notes.
+    attachments, kb_agent, references : Path
+        Figures linked as ``att:ID``, agents' knowledge-base notes, and agents'
+        reference scan drafts.
     sessions, assistant, logs : Path
         Driver workdirs (one ``<uid8>`` folder per session), the assistant's
         workdir, and the logs of every Claude the runner starts.
@@ -85,6 +87,7 @@ class Paths:
     tiled_agent_key: Path
     attachments: Path
     kb_agent: Path
+    references: Path
     sessions: Path
     assistant: Path
     logs: Path
@@ -99,6 +102,7 @@ class Paths:
             "tiled_agent": self.tiled_agent_key.parent,
             "attachments": self.attachments,
             "kb_agent": self.kb_agent,
+            "references": self.references,
             "sessions": self.sessions,
             "assistant": self.assistant,
             "logs": self.logs,
@@ -183,6 +187,7 @@ def paths(beamline: Optional[str] = None) -> Paths:
         tiled_agent_key=root / "state" / "tiled-agent" / "api-key.json",
         attachments=root / "data" / "attachments",
         kb_agent=root / "data" / "kb",
+        references=root / "data" / "references",
         sessions=root / "work" / "sessions",
         assistant=root / "work" / "assistant",
         logs=root / "work" / "logs",

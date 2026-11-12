@@ -286,7 +286,7 @@ def show_paths(out=print) -> int:
     out(f"beamline         {p.beamline}")
     out(f"home             {p.home}")
     for name in ("root", "config_file", "gateway_env", "token", "agent_log_dir", "tiled_cache", "tiled_agent_key",
-                 "attachments", "kb_agent", "sessions", "assistant", "logs"):
+                 "attachments", "kb_agent", "references", "sessions", "assistant", "logs"):
         out(f"{name:<16} {getattr(p, name)}")
     return 0
 

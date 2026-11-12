@@ -34,7 +34,7 @@ except ImportError:  # pragma: no cover
 MAIN_TABLE = "nbs_cli"
 AGENT_LOG_TABLE = "agent_log"
 # Tables other than [nbs_cli] that packages read on their own
-OTHER_TABLES = {AGENT_LOG_TABLE, "assistant"}
+OTHER_TABLES = {AGENT_LOG_TABLE, "assistant", "references"}
 LIST_SETTINGS = ("allowed_plans", "baseline_keys")
 DEFAULT_AGENT_LOG_PORT = 60740
 NO_AGENT_LOG = "the agent log needs a Redis of its own: [agent_log] port must be set"
@@ -238,7 +238,9 @@ class AgentsConfig:
         """
         data = read_config_file(path)
         table = {k: v for k, v in data.get(MAIN_TABLE, data).items() if k not in OTHER_TABLES}
-        known = {f.name: f.type for f in fields(cls) if f.name not in (AGENT_LOG_TABLE, "extra")}
+        # Fields marked ``table`` come from a table of their own, which a subclass reads
+        known = {f.name: f.type for f in fields(cls)
+                 if f.name not in (AGENT_LOG_TABLE, "extra") and not f.metadata.get("table")}
         added = plugin_settings()
         types = {**known, **{name: type(default) for name, default in added.items()}}
         values = {**table, **cls._from_env(types)}

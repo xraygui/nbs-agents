@@ -13,7 +13,8 @@ def nbs_agents_home(tmp_path, monkeypatch):
     monkeypatch.delenv("TILED_CACHE_DIR", raising=False)
     monkeypatch.delenv("NBS_CLAUDE_SANDBOX", raising=False)
     monkeypatch.delenv("NBS_AGENT_OWNER", raising=False)
-    for name in ("NBS_CLI_CONFIG", "NBS_ATTACHMENTS_DIR", "NBS_KB_AGENT_DIR", "NBS_GATEWAY_ENV", "NBS_ENV_DIR"):
+    for name in ("NBS_CLI_CONFIG", "NBS_ATTACHMENTS_DIR", "NBS_KB_AGENT_DIR", "NBS_REF_AGENT_DIR", "NBS_REF_REVIEW_DIR",
+                 "NBS_GATEWAY_ENV", "NBS_ENV_DIR"):
         monkeypatch.delenv(name, raising=False)
     return home
 

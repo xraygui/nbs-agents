@@ -40,6 +40,8 @@ SETTINGS = """\
 # allowed_plans = ["nbs_count", "move_sample"]   # client-side allowlist; unset = server decides
 # kb_dir = ""                           # human knowledge-base notes, usually knowledge/ in the profile
 # kb_review_dir = ""                    # nbs-agents-web's KB review record (default data/kb-review)
+# ref_dir = ""                          # approved reference scans, usually references/ in the profile
+# ref_review_dir = ""                   # nbs-agents-web's reference review record (default data/references-review)
 # signal = ""                           # run summaries: detector, normalization, reference
 # norm = ""
 # reference = ""
@@ -53,6 +55,12 @@ TABLES = """\
 enabled = false
 # model = "sonnet"
 # alert_model = "opus"
+
+# Other Tiled catalogs reference scans may come from (nbs-cli ref create --catalog NAME).
+# The catalog above (tiled_uri, tiled_path) is always "default".
+# [references.catalogs.commissioning]
+# uri = "https://tiled.example.org"
+# path = "sst/commissioning/raw"
 """
 
 
@@ -165,6 +173,8 @@ def check_rows(config_name: str = "assistant config", extra_rows=None) -> list[R
         rows.append((WARN, "bwclaude", f"off (claude_sandbox = {sandbox(config)!r}): Claude runs without a sandbox"))
     if config.kb_dir:
         rows.append((OK if Path(config.kb_dir).expanduser().is_dir() else WARN, "kb_dir", config.kb_dir))
+    if config.ref_dir:
+        rows.append((OK if Path(config.ref_dir).expanduser().is_dir() else WARN, "ref_dir", config.ref_dir))
     if assistant.enabled:
         workdir = Path(assistant.workdir).expanduser()
         rows.append((OK if workdir.is_dir() else WARN, "assistant on", f"workdir {workdir}"))

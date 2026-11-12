@@ -14,6 +14,8 @@ from nbs_agents.config import AGENT_LOG_TABLE, AgentLogConfig, AgentsConfig, plu
 from nbs_agents.paths import paths
 
 ASSISTANT_TABLE = "assistant"
+REFERENCES_TABLE = "references"
+DEFAULT_CATALOG = "default"
 DRIVER_ROLE = "driver"
 ASSISTANT_ROLE = "assistant"
 ROLES = (DRIVER_ROLE, ASSISTANT_ROLE)
@@ -99,6 +101,23 @@ class CliConfig(AgentsConfig):
         originals of approved notes, rejected ones); empty for
         ``$NBS_KB_REVIEW_DIR`` or ``kb-review`` beside the agent folder.
         Agents get it read-only.
+    ref_dir : str
+        Folder of approved reference scan entries (``nbs-cli ref``), usually
+        ``references/`` in the beamline profile; empty for none. nbs-cli never
+        writes there; nbs-agents-web writes the entries staff approve.
+    ref_agent_dir : str
+        Folder for the reference drafts agents write; empty for
+        ``$NBS_REF_AGENT_DIR`` or ``data/references`` under ``$NBS_AGENTS_HOME``.
+    ref_review_dir : str
+        Folder for nbs-agents-web's reference review record (originals of
+        approved drafts, rejected ones, staff requests for drafts); empty for
+        ``$NBS_REF_REVIEW_DIR`` or ``references-review`` beside the agent folder.
+        Agents get it read-only.
+    ref_catalogs : dict
+        Other Tiled catalogs reference scans may come from, by name, each
+        ``{"uri": ..., "path": ...}``: the ``[references.catalogs.NAME]``
+        tables, not ``[nbs_cli]``. The install's own ``tiled_uri`` and
+        ``tiled_path`` are always the catalog ``default``.
     """
 
     strict = True
@@ -122,6 +141,10 @@ class CliConfig(AgentsConfig):
     kb_dir: str = ""
     kb_agent_dir: str = ""
     kb_review_dir: str = ""
+    ref_dir: str = ""
+    ref_agent_dir: str = ""
+    ref_review_dir: str = ""
+    ref_catalogs: dict[str, dict[str, str]] = field(default_factory=dict, metadata={"table": REFERENCES_TABLE})
     baseline_keys: list[str] = field(default_factory=list)
     beam_map_file: str = ""
     epics_ca_addr_list: str = ""
@@ -143,6 +166,7 @@ class CliConfig(AgentsConfig):
             Resolved settings.
         """
         config = super().load(path)
+        config.ref_catalogs = read_catalogs(read_config_file(path).get(REFERENCES_TABLE))
         if os.environ.get("NBS_CLI_ROLE"):
             config.role = os.environ["NBS_CLI_ROLE"]
         if config.role not in ROLES:
@@ -153,6 +177,42 @@ class CliConfig(AgentsConfig):
     def read_only(self) -> bool:
         """Whether this client may only read: the assistant role, or any role with drivers off."""
         return self.role == ASSISTANT_ROLE or not self.drivers
+
+
+def read_catalogs(table: Optional[dict[str, Any]]) -> dict[str, dict[str, str]]:
+    """
+    Check the ``[references]`` table's catalogs.
+
+    Parameters
+    ----------
+    table : dict or None
+        The ``[references]`` table: ``catalogs.NAME = {uri = ..., path = ...}``.
+
+    Returns
+    -------
+    dict
+        ``{name: {"uri": ..., "path": ...}}``.
+
+    Raises
+    ------
+    ValueError
+        On unknown settings, a catalog without a ``uri``, or one named ``default``.
+    """
+    table = dict(table or {})
+    unknown = set(table) - {"catalogs"}
+    if unknown:
+        raise ValueError(f"Unknown [references] settings: {sorted(unknown)}")
+    out = {}
+    for name, entry in (table.get("catalogs") or {}).items():
+        if name == DEFAULT_CATALOG:
+            raise ValueError("[references.catalogs.default] is reserved: it is the install's own tiled_uri/tiled_path")
+        if not isinstance(entry, dict) or not str(entry.get("uri") or "").strip():
+            raise ValueError(f"[references.catalogs.{name}] needs a uri")
+        extra = set(entry) - {"uri", "path"}
+        if extra:
+            raise ValueError(f"Unknown [references.catalogs.{name}] settings: {sorted(extra)}")
+        out[name] = {"uri": str(entry["uri"]).strip(), "path": str(entry.get("path") or "").strip("/")}
+    return out
 
 
 @dataclass
