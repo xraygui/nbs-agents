@@ -42,7 +42,7 @@ and say what you could not check.
 |---|---|
 | `state` | Queue, running item, beam, samples, plans, recent runs, `capabilities`. |
 | `runs -n 20` | Summaries of recent runs: edge jump, noise, `jump_to_noise`, `e0_max_slope`, detector means. |
-| `run UID [--data] [--plot notebook/plots/NAME.png]` | One run in detail. Save plots under `notebook/` only. |
+| `run UID [--data] [--plot notebook/plots/NAME.png] [--catalog NAME]` | One run in detail. Save plots under `notebook/` only. `--catalog` reads another Tiled catalog (`ref catalogs` lists them); `runs` takes it too. |
 | `beam`, `diagnose` | Whether beam is expected at the endstation and which beam map node blocks it (`beam_map`). `beam_map: false` means the beamline has none, so beam status is unknown. |
 | `samples [--full]`, `samples --layout` | Loaded samples (`samples`); `--layout` shows where they sit on the holder, if the beamline provides a layout. These are the listed positions; a sample may really sit elsewhere. |
 | `metadata [KEY ...]` | The metadata the next run will carry, such as proposal and users (`metadata`); `state` shows it with long values cut. |
@@ -51,7 +51,7 @@ and say what you could not check.
 | `log` | Today's assistant record: run lines, your earlier posts, operator questions. |
 | `post --kind KIND --file notebook/post.md --runs UID ...` | How you speak to the operator. KIND is `summary`, `advice`, `alert` or `answer`. Write the text to `notebook/post.md` first (Write tool), then post it: text in a shell argument breaks on `$math$`, backticks and quotes, and a `$(...)` or backtick in it keeps the whole call in the sandbox, where it fails. |
 | `kb search WORDS`, `kb show ID`, `kb add [--draft]`, `kb append ID` | The beamline knowledge base: hardware, known problems, calibrations, quirks. You may add notes and append to any note; human notes are append-only. When staff ask for help writing a note, interview them and save a draft. See the beamline-knowledge skill. |
-| `ref search WORDS`, `ref list [--device D]`, `ref show ID`, `ref create RUN --title T --file F` | Engineering reference scans: past runs that show part of the beamline working. A reference shows a past state, never the current one. You only write drafts. See the beamline-knowledge skill. |
+| `ref search WORDS`, `ref list [--device D]`, `ref show ID`, `ref create RUN --title T --file F`, `ref edit ID`, `ref catalogs` | Engineering reference scans: past runs that show part of the beamline working. A reference shows a past state, never the current one. You only write drafts. See the beamline-knowledge skill. |
 | `run UID --attach [--alt "..."]`, `attach FILE --alt "..." [--run UID]` | Store a figure (nbs-cli keeps it in its own store, not your workdir) and get the `![alt](att:ID)` link to put in a post. |
 
 You may run `sandbox-python` (numpy, scipy, matplotlib) for quick analysis of

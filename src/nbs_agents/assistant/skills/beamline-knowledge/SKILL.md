@@ -129,7 +129,9 @@ as how the beamline is now. Check the live state first, as with notes.
 | `nbs-cli ref list [--device D] [--node N] [--tag T] [--all] [--drafts]` | Current entries passing the filters (`--all` adds superseded and retired ones; `--drafts` lists drafts waiting for review instead). |
 | `nbs-cli ref show ID` | The entry, its snapshot, and under `scan` whether the run still resolves in Tiled. |
 | `nbs-cli ref verify` | Every entry whose run no longer resolves. |
+| `nbs-cli ref catalogs` | The Tiled catalogs you can read runs from, by name, with their URI and path. `default` is this beamline's own. |
 | `nbs-cli ref create RUN --title T (--text "..." \| --file F) [--catalog NAME] [--devices a,b] [--nodes n] [--tags t] [--aliases a,b] [--request ID]` | Writes a draft (`draft/...`) for staff to review. RUN is a uid, uid prefix, scan ID, or -1. `--catalog` names another catalog the run is in (default: the beamline's own). Devices default to the run's motors and detectors. |
+| `nbs-cli ref edit ID [--title T] [--text "..." \| --file F] [--devices ...] [--nodes ...] [--tags ...] [--aliases ...]` | Changes a draft you wrote. Approved references and other agents' drafts are refused, and the run and its snapshot never change. |
 
 `nbs-cli device NAME` and `nbs-cli diagnose` list current references under
 `references`, next to `notes`. A superseded entry names the entry that replaced
@@ -138,24 +140,29 @@ it under `superseded_by`; use the newer one.
 You only ever write drafts. Staff approve, edit or reject them in the web page's
 References tab.
 
+`nbs-cli run RUN --catalog NAME` and `nbs-cli runs --catalog NAME` read runs in
+another catalog, like `ref create`. Reference scans must be marked public in
+Tiled: in another catalog you may read only public runs. If a read fails with
+"probably is not" marked public, say so to staff; don't retry with other
+catalogs.
+
 ### A staff request for a draft
 
 Staff ask from the References tab. The request reaches you as a question
 starting "Reference scan request req-...", naming a catalog, a run and what the
 scan is a reference for.
 
-1. If the run is in the default catalog, look at it: `nbs-cli run RUN` (add
-   `--plot notebook/plots/ref.png` if a picture helps you describe it).
-   `nbs-cli run` cannot reach another catalog: there, work from what staff wrote.
+1. Look at the run: `nbs-cli run RUN --catalog NAME` (add
+   `--plot notebook/plots/ref.png` if a picture helps you describe it). If it
+   cannot be read, answer with the error (step 4) instead of drafting blind.
 2. Write the description to `notebook/ref-draft.md`: what the scan shows, the
    features that matter (peak position, width, edge, levels), and what it is a
-   reference for, in staff's words. Put anything you inferred, and everything
-   you could not look at, under a heading `Unconfirmed`.
+   reference for, in staff's words. Put anything you inferred under a heading
+   `Unconfirmed`.
 3. Save the draft with `nbs-cli ref create RUN --catalog NAME --request req-...
    --title "..." --file notebook/ref-draft.md`, with `--devices` and `--nodes`
-   by their exact names from `devices` and `diagnose`. A draft cannot be
-   changed after this, so get the description right first; staff edit it on
-   approval.
+   by their exact names from `devices` and `diagnose`. To fix the text or
+   tags later, use `nbs-cli ref edit draft/... --file notebook/ref-draft.md`.
 4. Post an `answer` with the draft's ID and say it waits for review in the
    References tab. If `ref create` fails (no such run, the catalog cannot be
    read), answer with the error instead.
