@@ -540,6 +540,85 @@ def tag_agent_metadata(
     return item
 
 
+def wind_up_block(manager: Any, agent_uid: str, drop_pending: bool = True) -> list[str]:
+    """
+    Let an agent block run on to its ``close_agent``: what ``nbs-cli finalize`` does.
+
+    Removes the ``queue_stop`` before the block's ``close_agent`` and, with
+    ``drop_pending``, the block's pending items.
+
+    Parameters
+    ----------
+    manager : REManagerAPI
+        QueueServer API client.
+    agent_uid : str
+        Session UID.
+    drop_pending : bool, optional
+        Remove the block's queued plans too.
+
+    Returns
+    -------
+    list of str
+        Item UIDs of the dropped plans.
+    """
+    items = manager.queue_get().get("items", [])
+    close = next(
+        (i for i, item in enumerate(items) if item.get("name") == CLOSE_AGENT_PLAN and (item.get("args") or [None])[0] == agent_uid),
+        None,
+    )
+    if close is None:
+        return []
+    dropped = []
+    for item in items[:close]:
+        ours = (item.get("meta") or {}).get(AGENT_UID_KEY) == agent_uid
+        if drop_pending and ours:
+            _check_response(manager.item_remove(uid=item["item_uid"]), "item_remove")
+            dropped.append(item["item_uid"])
+    if close > 0:
+        prev = items[close - 1]
+        if prev.get("item_type") == "instruction" and prev.get("name") == QUEUE_STOP_INSTRUCTION:
+            _check_response(manager.item_remove(uid=prev["item_uid"]), "item_remove")
+    return dropped
+
+
+def start_toward_close(manager: Any, agent_uid: str) -> bool:
+    """
+    Start the queue if it is idle and its head belongs to this agent block.
+
+    Parameters
+    ----------
+    manager : REManagerAPI
+        QueueServer API client.
+    agent_uid : str
+        Session UID.
+
+    Returns
+    -------
+    bool
+        Whether the queue was started.
+    """
+    status = manager.status()
+    if status.get("manager_state") != "idle" or not status.get("worker_environment_exists"):
+        return False
+    items = manager.queue_get().get("items", [])
+    if not items:
+        return False
+    head = items[0]
+    ours = (head.get("meta") or {}).get(AGENT_UID_KEY) == agent_uid or (
+        head.get("name") == CLOSE_AGENT_PLAN and (head.get("args") or [None])[0] == agent_uid
+    )
+    if not ours:
+        return False
+    _check_response(manager.queue_start(), "queue_start")
+    return True
+
+
+def _check_response(response: dict[str, Any], what: str) -> dict[str, Any]:
+    if not response.get("success", False):
+        raise RuntimeError(response.get("msg", f"{what} failed"))
+    return response
+
+
 def release_queue_toward_close(manager: REManagerAPI) -> None:
     """
     Clear a pending queue stop and restart execution toward ``close_agent``.

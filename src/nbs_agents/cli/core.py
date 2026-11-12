@@ -1429,7 +1429,8 @@ class Beamline:
         if stop:
             out["instruction"] = (
                 "The operator asked this session to stop: add is refused. Wrap up now with "
-                "`nbs-cli finalize --summary ...` (add --drop-pending to skip queued scans)."
+                "`nbs-cli finalize --summary ...` (add --drop-pending to skip queued scans). If you do not, "
+                "the runner winds the block up itself within a few minutes and drops the queued scans."
             )
         else:
             out["instruction"] = "Messages from the operator at the beamline. Read and follow them before continuing."

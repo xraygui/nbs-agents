@@ -172,6 +172,38 @@ class ClaudeLaunchTests(unittest.TestCase):
         self.assertEqual(launcher.launched, [])
         supervisor.shutdown()
 
+    def test_runner_carries_out_a_stop_the_driver_ignores(self):
+        supervisor = self.make(FakeLauncher())
+        manager = supervisor.manager
+        supervisor._activate_agent(_open_run({"goal": "g", "launch": True}))
+        items = [
+            {"item_type": "plan", "name": "c_xas", "item_uid": "p1", "meta": {AGENT_UID_KEY: "uid-12345678"}},
+            {"item_type": "instruction", "name": "queue_stop", "item_uid": "stop"},
+            {"item_type": "plan", "name": "close_agent", "item_uid": "close", "args": ["uid-12345678"]},
+        ]
+        manager.queue_get.return_value = {"success": True, "items": items}
+        manager.item_remove.return_value = {"success": True}
+        manager.queue_start.return_value = {"success": True}
+        manager.status.return_value = {"manager_state": "executing_queue", "worker_environment_exists": True}
+        self.log.request_stop("uid-12345678", "enough")
+        t = self.log.get("uid-12345678")["stop_requested"]["t"]
+
+        supervisor.check_stops(now=t + 10)  # the driver still has time
+        manager.item_remove.assert_not_called()
+        self.assertEqual(self.log.get("uid-12345678")["status"], "active")
+
+        supervisor.check_stops(now=t + supervisor.STOP_GRACE_S)
+        removed = [c.kwargs["uid"] for c in manager.item_remove.call_args_list]
+        self.assertEqual(removed, ["p1", "stop"])
+        self.assertEqual(self.log.get("uid-12345678")["status"], "finalizing")
+        manager.queue_start.assert_not_called()  # busy
+
+        items[:] = items[2:]
+        manager.status.return_value = {"manager_state": "idle", "worker_environment_exists": True}
+        supervisor.check_stops(now=t + supervisor.STOP_GRACE_S + 10)
+        manager.queue_start.assert_called_once()
+        supervisor.shutdown()
+
     def test_unexpected_exit_while_active_is_an_error(self):
         supervisor = self.make(FakeLauncher())
         supervisor._activate_agent(_open_run({"goal": "g", "launch": True}))

@@ -1,6 +1,7 @@
 import logging
 import os
 import socket
+import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -20,7 +21,13 @@ from .constants import (
     CLOSE_AGENT_PLAN,
     OPEN_AGENT_PLAN,
 )
-from .queue import claim_close_agent, describe_owner, ensure_queue_stop_before_close
+from .queue import (
+    claim_close_agent,
+    describe_owner,
+    ensure_queue_stop_before_close,
+    start_toward_close,
+    wind_up_block,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -70,6 +77,9 @@ class AgentSupervisor:
 
     # Wait before reading a claimed close_agent back (see claim_close_agent)
     CLAIM_SETTLE_S = 0.5
+    # How long a driver has to finalize after an operator's stop request
+    # before the runner winds the block up itself (check_stops)
+    STOP_GRACE_S = 120.0
 
     def __init__(
         self,
@@ -89,6 +99,58 @@ class AgentSupervisor:
         self.observers = list(observers or [])
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="agent-qs")
         self.catalog.subscribe_stop(self._on_run_stop)
+
+    def check_stops(self, now: Optional[float] = None) -> None:
+        """
+        Carry out operators' stop requests for this runner's sessions.
+
+        A session whose stop was requested more than ``STOP_GRACE_S`` ago and
+        that its driver has not finalized is wound up here: its pending plans
+        are dropped and its ``queue_stop`` removed, as ``nbs-cli finalize
+        --drop-pending`` would. For every finalizing session, the queue is
+        started if it sits idle with the block at its head, so ``close_agent``
+        runs without anyone starting it by hand.
+
+        Parameters
+        ----------
+        now : float, optional
+            Current time, for tests.
+        """
+        if self.agent_log is None:
+            return
+        now = time.time() if now is None else now
+        for agent_uid, agent in list(self.active_agents.items()):
+            try:
+                record = self.agent_log.get(agent_uid) or {}
+                stop = record.get("stop_requested")
+                if record.get("status") == "active" and stop and now - stop.get("t", now) >= self.STOP_GRACE_S:
+                    dropped = wind_up_block(self.manager, agent_uid, drop_pending=True)
+                    agent.log(
+                        "finalize",
+                        f"operator stop: the driver did not finalize within {self.STOP_GRACE_S:.0f} s, so the "
+                        f"runner wound the block up ({len(dropped)} pending plan(s) dropped)",
+                    )
+                    self.agent_log.set_status(agent_uid, "finalizing")
+                    record["status"] = "finalizing"
+                if record.get("status") == "finalizing" and start_toward_close(self.manager, agent_uid):
+                    LOGGER.info("Started the queue toward close_agent for %s", agent_uid)
+            except Exception:
+                LOGGER.exception("Could not carry out the stop for agent %s", agent_uid)
+
+    def start_stop_watch(self, period_s: float = 10.0) -> None:
+        """Run ``check_stops`` every ``period_s`` on the QueueServer worker thread."""
+
+        def watch():
+            while True:
+                time.sleep(period_s)
+                try:
+                    self._executor.submit(self.check_stops).result()
+                except RuntimeError:
+                    return  # the executor shut down
+                except Exception:
+                    LOGGER.exception("Stop watch failed")
+
+        threading.Thread(target=watch, name="agent-stop-watch", daemon=True).start()
 
     def shutdown(self) -> None:
         """

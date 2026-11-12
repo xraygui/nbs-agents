@@ -173,6 +173,7 @@ def main(argv=None) -> int:
         supervisor.adopt_open_sessions()
     except Exception:
         LOGGER.exception("Could not adopt the sessions open before this runner started")
+    supervisor.start_stop_watch()
     if agent_log is not None:
         _start_heartbeat(agent_log)
     LOGGER.info("Agent runner listening for Bluesky documents at %s", config.zmq_addr)
