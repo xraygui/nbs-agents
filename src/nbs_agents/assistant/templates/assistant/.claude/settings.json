@@ -18,7 +18,8 @@
       "Bash(nbs-cli runs:*)",
       "Bash(nbs-cli log:*)",
       "Bash(nbs-cli post:*)",
-      "Bash(nbs-cli attach:*)"
+      "Bash(nbs-cli attach:*)",
+      "Bash(nbs-reduce:*)"
     ],
     "deny": [
       "Bash(nbs-cli open:*)",

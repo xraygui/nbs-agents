@@ -228,7 +228,7 @@ case "$role" in
         # workdir); Write and Edit only in the workdir (Edit rules cover Write).
         # Plain python stays disallowed.
         export PATH="$here:$PATH"
-        tools=("Bash(nbs-cli:*)" "Read" "Skill" "Bash(sandbox-python:*)"
+        tools=("Bash(nbs-cli:*)" "Bash(nbs-reduce:*)" "Read" "Skill" "Bash(sandbox-python:*)"
                "Edit(./**)" "Glob" "Grep")
         ;;
     assistant)
@@ -243,7 +243,7 @@ case "$role" in
         # Analysis only in sandbox-python, as for the driver; plain python is not allowed.
         export PATH="$here:$PATH"
         tools=("Read" "Skill" "Glob" "Grep" "Edit(./notebook/**)"
-               "Bash(sandbox-python:*)" "Bash(nbs-cli post:*)")
+               "Bash(sandbox-python:*)" "Bash(nbs-cli post:*)" "Bash(nbs-reduce:*)")
         for verb in state beam plans samples metadata devices device diagnose run runs log attach kb ref; do
             tools+=("Bash(nbs-cli $verb:*)")
         done
@@ -256,7 +256,8 @@ esac
 # Run nbs-cli outside it; bwclaude still confines it, and the allow rules above
 # and nbs-cli's role decide what it may do. Only a call that is exactly
 # `nbs-cli ...` matches: a redirect, pipe or `&&` keeps the whole call sandboxed.
-settings='{"sandbox":{"excludedCommands":["nbs-cli *"]}}'
+# nbs-reduce reads only Tiled and writes only inside the working folder.
+settings='{"sandbox":{"excludedCommands":["nbs-cli *","nbs-reduce *"]}}'
 
 if [[ $headless == 1 ]]; then
     exec claude -p "$prompt" "${system[@]}" --settings "$settings" --allowedTools "${tools[@]}" --output-format stream-json --verbose "$@"
