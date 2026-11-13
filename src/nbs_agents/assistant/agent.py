@@ -33,7 +33,7 @@ from nbs_agents.agentlog import (
 )
 from nbs_agents.catalog import ZMQCatalog, ZMQRun
 from ..cli.config import AssistantConfig
-from ..cli.summaries import SummaryContext, summarize
+from ..reduce.metrics import SummaryContext, summarize
 from nbs_agents.constants import AGENT_UID_KEY, CLOSE_AGENT_PLAN, OPEN_AGENT_PLAN
 from .launcher import ClaudeLauncher, LaunchedAgent
 from .resources import SKILLS_DIR, WORKDIR_TEMPLATE

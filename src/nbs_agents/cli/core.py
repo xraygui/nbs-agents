@@ -35,7 +35,7 @@ from nbs_agents.constants import (
 from ..queue import close_agent_owner, describe_owner
 from ..beamline_info import DEVICES, METADATA, SAMPLES, BeamlineInfo, load_beamline_info
 from .config import CliConfig
-from .summaries import SummaryContext, summarize
+from ..reduce.metrics import SummaryContext, summarize
 
 LOGGER = logging.getLogger(__name__)
 
@@ -713,24 +713,12 @@ class Beamline:
         BlueskyRun
             Tiled run.
         """
-        from tiled.queries import Key
+        from ..reduce.runs import find_run
 
-        ref = str(ref)
-        if ref.lstrip("-").isdigit():
-            n = int(ref)
-            if n < 0:
-                runs = list(self.tiled.values()[-1 : n - 1 : -1])
-                if len(runs) < -n:
-                    raise CliError(f"only {len(runs)} runs in the catalog")
-                return runs[-1]
-            matches = list(self.tiled.search(Key("scan_id") == n).values()[-1:-2:-1])
-            if not matches:
-                raise CliError(f"no run with scan_id {n}")
-            return matches[0]
         try:
-            return self.tiled[ref]
-        except KeyError:
-            raise CliError(f"no run {ref!r}") from None
+            return find_run(self.tiled, ref)
+        except LookupError as exc:
+            raise CliError(str(exc)) from None
 
     def run_data(self, run) -> dict[str, np.ndarray]:
         """
@@ -941,7 +929,7 @@ class Beamline:
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
-        from .summaries import dimension_keys
+        from ..reduce.metrics import dimension_keys
 
         start = run.metadata["start"]
         data = self.run_data(run)

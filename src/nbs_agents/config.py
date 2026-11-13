@@ -34,7 +34,7 @@ except ImportError:  # pragma: no cover
 MAIN_TABLE = "nbs_cli"
 AGENT_LOG_TABLE = "agent_log"
 # Tables other than [nbs_cli] that packages read on their own
-OTHER_TABLES = {AGENT_LOG_TABLE, "assistant", "references"}
+OTHER_TABLES = {AGENT_LOG_TABLE, "assistant", "references", "reduce"}
 LIST_SETTINGS = ("allowed_plans", "baseline_keys")
 DEFAULT_AGENT_LOG_PORT = 60740
 NO_AGENT_LOG = "the agent log needs a Redis of its own: [agent_log] port must be set"

@@ -53,11 +53,15 @@ nbs-cli = "nbs_agents.cli.main:main"
 nbs-agents-web = "nbs_agents.web.__main__:main"
 nbs-agents-assistant = "nbs_agents.assistant.admin:main"
 claude-beamline = "nbs_agents.assistant.resources:claude_beamline"
+# Reduction and plotting from Tiled (the [reduce] extra)
+nbs-reduce = "nbs_agents.reduce.cli:main"
 
 [project.optional-dependencies]
 gui = ["nbs-gui", "qtpy"]
 # nbs-cli, the Claude agents, the beamline assistant and its web UI
 assistant = ["fastapi", "uvicorn", "matplotlib", "pyyaml", "pyepics"]
+# nbs-reduce: Tiled only, no beamline access (pyyaml for the reference library)
+reduce = ["matplotlib", "pyyaml"]
 
 # The "claude" agent, the runner plugin (launch hook and assistant) and the
 # New agent launcher
