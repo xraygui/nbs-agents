@@ -16,6 +16,15 @@ roles that each take their own events, write their own record
 event goes to exactly one role. The assistant also follows the open driver
 sessions (``driver_active``) for triage and the snapshot.
 
+While a driver runs, the chat role is its manager: instead of summarizing
+each group of the driver's runs, it writes a digest of everything the driver
+did since the last one (``digest`` events: a driver group end at most every
+``digest_min_s``, hourly, and when the session ends). Each question a person
+asks opens a thread (``nbs_agents.threads``), a Claude session that every
+follow-up resumes and that closes with a summary in ``notebook/threads.md``.
+Directives a person confirmed (``nbs_agents.directives``) go into their
+role's prompt until they expire.
+
 The assistant never queues, removes, aborts or starts anything and never
 messages driver agents. It is not opened with ``open_agent`` and never sits in
 the queue.
@@ -29,6 +38,7 @@ import shutil
 import statistics
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Optional
 
@@ -41,6 +51,9 @@ from nbs_agents.agentlog import (
 )
 from nbs_agents.catalog import ZMQCatalog, ZMQRun
 from ..cli.config import ASSISTANT_ROLE, ASSISTANT_ROLE_PREFIX, AssistantConfig, RoleConfig
+from ..cli.core import compact_item
+from ..directives import DirectiveStore, directives_text, expired, log_directive
+from ..threads import ThreadStore, seed_text, unseen
 from ..reduce.metrics import SummaryContext, summarize
 from nbs_agents.constants import AGENT_UID_KEY, CLOSE_AGENT_PLAN, OPEN_AGENT_PLAN
 from .launcher import ClaudeLauncher, LaunchedAgent
@@ -54,6 +67,10 @@ LOGGER = logging.getLogger(__name__)
 SENTINEL_PLANS = (OPEN_AGENT_PLAN, CLOSE_AGENT_PLAN)
 # Events that need the stronger model
 URGENT_EVENTS = ("alert", "question", "recheck", "request", "reply")
+# Sections of notebook/threads.md kept (the newest)
+THREAD_SUMMARIES_KEPT = 40
+# Run fields shown on a driver record entry in a digest
+DIGEST_REFS = ("plan", "scan_id", "exit_status", "run_uid", "item_uid")
 # Calls whose events the record keeps, so a post can be re-checked later
 CALL_EVENTS_KEPT = 30
 HEARTBEAT_S = 30.0
@@ -194,7 +211,8 @@ class Triage:
         dict
             ``alerts`` and ``flags`` (lists of short reasons),
             ``ended_group``: the runs of the group this run closed, or ``[]``,
-            and ``driver_run``: whether an open driver session queued the run.
+            and ``driver_run``: whether an open driver session queued the run
+            (also set in ``facts``).
         """
         cfg = self.config
         alerts, flags = [], []
@@ -236,11 +254,12 @@ class Triage:
                     )
             self._last_jump[key] = float(jump)
 
+        driver_run = bool(facts.get("agent_uid")) and facts.get("agent_uid") in self.drivers
+        facts["driver_run"] = driver_run
         ended: list[dict[str, Any]] = []
         if self.group and self.group_key(self.group[-1]) != self.group_key(facts):
             ended, self.group = self.group, []
         self.group.append(facts)
-        driver_run = bool(facts.get("agent_uid")) and facts.get("agent_uid") in self.drivers
         return {"alerts": alerts, "flags": flags, "ended_group": ended, "driver_run": driver_run}
 
     def end_group(self) -> list[dict[str, Any]]:
@@ -265,6 +284,17 @@ def describe_group(runs: list[dict[str, Any]]) -> str:
     return f"{len(runs)} run(s) of {what} ({span})"
 
 
+def entry_line(entry: dict[str, Any]) -> str:
+    """
+    One driver record entry for a digest: ``HH:MM:SS [kind] text (refs)``,
+    the text whole, its later lines indented.
+    """
+    when = time.strftime("%H:%M:%S", time.localtime(entry.get("t") or 0))
+    refs = ", ".join(f"{k}={entry[k]}" for k in DIGEST_REFS if entry.get(k) is not None)
+    text = (entry.get("text") or "").strip().replace("\n", "\n    ")
+    return f"{when} [{entry.get('kind')}] {text}" + (f" ({refs})" if refs else "")
+
+
 def last_reply(log_path: str) -> Optional[str]:
     """
     Claude's final reply in a call's stream-json log.
@@ -279,6 +309,16 @@ def last_reply(log_path: str) -> Optional[str]:
     str or None
         The ``result`` text, or None when the log is missing or has none.
     """
+    result = final_result(log_path)
+    return (result or {}).get("result") or None
+
+
+def final_result(log_path: str) -> Optional[dict[str, Any]]:
+    """
+    The ``result`` message that ends a call's stream-json log (with
+    ``is_error`` set when the call failed, for example a session that could
+    not be resumed), or None when the log is missing or has none.
+    """
     try:
         lines = Path(log_path).read_text(errors="replace").splitlines()
     except OSError:
@@ -289,7 +329,7 @@ def last_reply(log_path: str) -> Optional[str]:
         except ValueError:
             continue
         if isinstance(message, dict) and message.get("type") == "result":
-            return message.get("result") or None
+            return message
     return None
 
 
@@ -471,6 +511,20 @@ class AssistantAgent(BaseAgent):
         self._xas_plans_t = 0.0
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
+        # Digests: per driver session, the newest record entry the last digest
+        # covered; sessions that ended since; group ends waiting for digest_min_s
+        self.digest_since: dict[str, float] = {}
+        self.ended_drivers: list[dict[str, Any]] = []
+        self._digest_wait: list[dict[str, Any]] = []
+        self._last_digest_t = clock()
+        # Threads: running calls by thread id
+        self.threads = ThreadStore.for_agent_log(agent_log)
+        self.thread_calls: dict[str, dict[str, Any]] = {}
+        self._pruned_t = 0.0
+        # Directives, and the proposal they may expire with
+        self.directives = DirectiveStore.for_agent_log(agent_log)
+        self._proposal: Any = None
+        self._proposal_t = 0.0
 
     @property
     def launcher(self) -> Optional[ClaudeLauncher]:
@@ -513,6 +567,9 @@ class AssistantAgent(BaseAgent):
         if not isinstance(agent, ExternalAgent):
             return
         with self._lock:
+            if not self.drivers:
+                # The first digest waits digest_min_s from here, not from the runner's start
+                self._last_digest_t = self.clock()
             self.drivers[agent.agent_uid] = {
                 "agent_uid": agent.agent_uid,
                 "record": self.agent_log.key_prefix + agent.agent_uid,
@@ -526,10 +583,173 @@ class AssistantAgent(BaseAgent):
         self.on_agent_opened(agent)
 
     def on_agent_closed(self, agent: Any) -> None:
-        """Forget a driver session that closed."""
+        """Forget a driver session that closed; the next digest covers its end."""
         with self._lock:
-            if self.drivers.pop(agent.agent_uid, None) is not None:
-                self._driver_changed()
+            driver = self.drivers.pop(agent.agent_uid, None)
+            if driver is None:
+                return
+            self._driver_changed()
+            if self.digests:
+                self.ended_drivers.append(dict(driver, ended=self.clock()))
+                self._queue_digest(f"driver session {agent.agent_uid[:8]} ended (goal: {driver.get('goal')})")
+                self._dispatch()
+
+    # ---------------------------------------------------------------- digests
+
+    @property
+    def digests(self) -> bool:
+        """Whether a role takes ``digest`` events; if none does, driver runs get group summaries as before."""
+        return "digest" in self.routes
+
+    def _digest_mark(self, agent_uid: str) -> float:
+        """The newest entry of a driver's record that the last digest covered (0 for none)."""
+        if agent_uid not in self.digest_since:
+            saved = (self.agent_log.get(self.chat.uid) or {}).get("digest_since") or {}
+            self.digest_since[agent_uid] = float(saved.get(agent_uid) or 0)
+        return self.digest_since[agent_uid]
+
+    def _queue_digest(self, text: str, run_uids: Optional[list[str]] = None) -> None:
+        """Queue a digest event now, with any group ends that waited for one."""
+        waited = self._digest_wait
+        self._digest_wait = []
+        uids = sorted({u for w in waited for u in w["run_uids"]} | set(run_uids or []))
+        lines = [w["text"] for w in waited] + [text]
+        self._add_event("digest", "; ".join(lines), uids)
+        self._last_digest_t = self.clock()
+
+    def _group_ended(self, runs: list[dict[str, Any]], why: str) -> None:
+        """
+        A group of runs finished: a digest (at most every ``digest_min_s``)
+        when a driver queued them all, else a ``group_end`` event as always.
+        """
+        if not (self.digests and self.driver_active and all(r.get("driver_run") for r in runs)):
+            self._group_event(runs, why)
+            return
+        text = f"a driver's group finished ({why}): {describe_group(runs)}"
+        uids = [r["uid"] for r in runs]
+        if self.clock() - self._last_digest_t >= self.config.digest_min_s:
+            self._queue_digest(text, uids)
+        else:
+            self._digest_wait.append({"text": text, "run_uids": uids})
+
+    def _check_digest(self) -> None:
+        """Queue a digest when group ends have waited ``digest_min_s``, or hourly while a driver runs."""
+        if not self.digests:
+            return
+        since = self.clock() - self._last_digest_t
+        if self._digest_wait and since >= self.config.digest_min_s:
+            self._queue_digest("digest of the driver groups that finished since the last one")
+        elif self.driver_active and since >= self.config.checkin_s:
+            state = self.roles[self.routes["digest"]]
+            if state.call is not None or any(e["kind"] == "digest" for e in state.pending):
+                return
+            new = any(self._driver_entries(uid) for uid in self.drivers)
+            if new:
+                minutes = round(self.config.checkin_s / 60)
+                self._queue_digest(f"hourly digest: the driver did more in the last {minutes} min")
+            else:
+                self._last_digest_t = self.clock()
+
+    def _driver_entries(self, agent_uid: str) -> list[dict[str, Any]]:
+        """A driver's record entries newer than the last digest."""
+        since = self._digest_mark(agent_uid)
+        entries = (self.agent_log.get(agent_uid) or {}).get("log") or []
+        return [e for e in entries if (e.get("t") or 0) > since]
+
+    def _driver_queue(self, agent_uid: str) -> list[dict[str, Any]]:
+        """The running and queued items a driver session added, with their reasons."""
+        queue = self.beamline.queue() or {}
+        out = []
+        running = queue.get("running_item") or {}
+        if (running.get("meta") or {}).get(AGENT_UID_KEY) == agent_uid:
+            out.append(dict(compact_item(running), running=True))
+        for item in queue.get("items") or []:
+            if (item.get("meta") or {}).get(AGENT_UID_KEY) == agent_uid:
+                out.append(compact_item(item))
+        return out
+
+    def digest_material(self, role: RoleState) -> dict[str, Any]:
+        """
+        What a digest call reads: every driver record entry since the last
+        digest, for the open sessions and those that ended since, and each
+        open session's queued items with their reasons. The entries are also
+        written whole to ``digest/driver-UID8.md`` in the role's working
+        folder, since the prompt holds at most ``digest_chars`` of them.
+
+        Parameters
+        ----------
+        role : RoleState
+            The role making the digest.
+
+        Returns
+        -------
+        dict
+            ``lines`` (prompt lines), ``marks`` (``{agent_uid: t}`` to keep
+            once the digest is posted) and ``ended`` (agent_uids of the ended
+            sessions it covers).
+        """
+        sessions = [(d, True) for d in self.drivers.values()] + [(d, False) for d in self.ended_drivers]
+        budget = max(1000, self.config.digest_chars // max(1, len(sessions)))
+        folder = Path(role.role.workdir).expanduser() / "digest"
+        lines = ["", "## Driver sessions since the last digest"]
+        marks: dict[str, float] = {}
+        for driver, open_ in sessions:
+            uid = driver["agent_uid"]
+            since = self._digest_mark(uid)
+            try:
+                entries = self._driver_entries(uid)
+            except Exception as exc:
+                entries = []
+                LOGGER.exception("Could not read the driver record %s", uid)
+                lines += ["", f"(record {uid} unavailable: {type(exc).__name__}: {exc})"]
+            marks[uid] = max([since] + [e.get("t") or 0 for e in entries])
+            text = "\n".join(entry_line(e) for e in entries) or "(nothing new)"
+            path = folder / f"driver-{uid[:8]}.md"
+            try:
+                folder.mkdir(parents=True, exist_ok=True)
+                path.write_text(f"# Driver session {uid}: record since the last digest\n\n{text}\n")
+                where = f"all of it in digest/{path.name}"
+            except OSError as exc:
+                where = f"could not write digest/{path.name}: {exc}"
+            start = time.strftime("%H:%M:%S", time.localtime(since)) if since else "the session opened"
+            lines += [
+                "",
+                f"### Session {uid[:8]} ({'open' if open_ else 'ended'}), goal: {driver.get('goal') or 'none given'}",
+                f"Its record ({uid}) since {start}: {len(entries)} entries, {where}.",
+            ]
+            if len(text) > budget:
+                text = text[:budget] + f" …(cut; Read digest/{path.name} for the rest)"
+            lines.append(text)
+            if open_:
+                try:
+                    queued = self._driver_queue(uid)
+                    lines += ["Running and queued for it (with the reasons it gave):"]
+                    lines += [json.dumps(q, default=str, separators=(",", ":")) for q in queued] or ["(nothing)"]
+                except Exception as exc:
+                    lines.append(f"(queue unavailable: {type(exc).__name__}: {exc})")
+        if not sessions:
+            lines.append("(no driver session is open or ended since the last digest)")
+        return {"lines": lines, "marks": marks, "ended": [d["agent_uid"] for d in self.ended_drivers]}
+
+    def _digest_done(self, state: RoleState, call: dict[str, Any]) -> None:
+        """A digest call ended well: move the marks on and tag its posts as the digest."""
+        digest = call.get("digest") or {}
+        self.digest_since.update(digest.get("marks") or {})
+        ended = set(digest.get("ended") or [])
+        self.ended_drivers = [d for d in self.ended_drivers if d["agent_uid"] not in ended]
+        for uid in ended:
+            self.digest_since.pop(uid, None)
+        try:
+            self.agent_log.update(
+                self.chat.uid, digest_since={u: t for u, t in self.digest_since.items() if u in self.drivers},
+                last_digest={"t": call["t"], "n": call["n"], "role": state.name},
+            )
+            self.agent_log.annotate(
+                call["uid"], lambda e: e.get("call") == call["n"] and e.get("kind") in ASSISTANT_POST_KINDS,
+                digest=True,
+            )
+        except Exception:
+            LOGGER.exception("Could not record the digest")
 
     # ------------------------------------------------------------------ record
 
@@ -601,6 +821,13 @@ class AssistantAgent(BaseAgent):
             except Exception:
                 LOGGER.exception("Could not prepare the %s role's workdir %s", state.name, state.role.workdir)
         self.open_log()
+        # A thread call a previous runner left running is gone; its question is answered again
+        try:
+            for thread in self.threads.open_threads():
+                if thread.get("calling"):
+                    self.threads.update(thread["id"], calling=False, seen=thread.get("call_seen_before", 0))
+        except Exception:
+            LOGGER.exception("Could not reset the threads' running calls")
         self._thread = threading.Thread(target=self._loop, name="assistant", daemon=True)
         self._thread.start()
 
@@ -610,6 +837,9 @@ class AssistantAgent(BaseAgent):
         for state in self.roles.values():
             if state.call is not None and state.launcher is not None:
                 state.launcher.terminate(state.call["uid"])
+        for thread_id in list(self.thread_calls):
+            if self.chat.launcher is not None:
+                self.chat.launcher.terminate(thread_id)
             if not state.chat:
                 try:
                     self.agent_log.set_status(state.uid, "stopped", close_reason=reason)
@@ -712,7 +942,7 @@ class AssistantAgent(BaseAgent):
             )
             self._add_event("run", run_line(facts), [facts["uid"]])
             if result["ended_group"]:
-                self._group_event(result["ended_group"], "the next run changed plan, sample or edge")
+                self._group_ended(result["ended_group"], "the next run changed plan, sample or edge")
             for alert in result["alerts"]:
                 self._add_event("alert", f"{run_line(facts)}: {alert}", [facts["uid"]])
             for flag in result["flags"]:
@@ -741,17 +971,20 @@ class AssistantAgent(BaseAgent):
     def tick(self) -> None:
         """
         Periodic work: day rollover, heartbeat, operator questions, role
-        requests, the end of a group when the queue goes idle, the hourly
-        check-in and call timeouts.
+        requests, the end of a group when the queue goes idle, digests, the
+        hourly check-in, directive expiry, thread calls and call timeouts.
         """
         with self._lock:
             self._roll_day()
             self._check_operator()
             self._check_requests()
             self._check_idle()
+            self._check_digest()
             self._check_quiet_hour()
+            self._check_directives()
             self._check_timeout()
             self._dispatch()
+            self._check_threads()
             self._beat()
 
     def _check_operator(self) -> None:
@@ -765,6 +998,10 @@ class AssistantAgent(BaseAgent):
                 continue
             if isinstance(message.get("recheck"), dict):
                 self._add_recheck(message)
+            elif message.get("thread"):
+                continue  # opened by nbs-cli or the web UI; the thread's own call answers it
+            elif self.config.threads:
+                self._thread_from_message(message)
             else:
                 self._add_event("question", f"operator asked: {message.get('text', '')}", role=self.chat)
 
@@ -781,7 +1018,8 @@ class AssistantAgent(BaseAgent):
                 self._add_event(
                     "request", f"{request.get('source') or 'the manager'} asked: {request.get('text', '')}",
                     list(request.get("run_uids") or []), role=state,
-                    request={"t": request["t"], "reply_to": request.get("reply_to") or self.chat.uid},
+                    request={"t": request["t"], "reply_to": request.get("reply_to") or self.chat.uid,
+                             "thread": request.get("thread")},
                 )
 
     def _add_recheck(self, message: dict[str, Any]) -> None:
@@ -810,7 +1048,7 @@ class AssistantAgent(BaseAgent):
         if state == "idle" and previous not in (None, "idle"):
             runs = self.triage.end_group()
             if runs:
-                self._group_event(runs, "the queue went idle")
+                self._group_ended(runs, "the queue went idle")
 
     def quiet_since(self, state: Optional[RoleState] = None) -> float:
         """
@@ -833,7 +1071,7 @@ class AssistantAgent(BaseAgent):
 
     def _check_quiet_hour(self) -> None:
         name = self.routes.get("checkin")
-        if name is None or self._last_run_t is None:
+        if name is None or self._last_run_t is None or (self.digests and self.driver_active):
             return
         state = self.roles[name]
         if state.call is not None or state.pending:
@@ -854,6 +1092,66 @@ class AssistantAgent(BaseAgent):
                 call["timed_out"] = True
                 LOGGER.warning("Assistant %s call %s timed out; stopping it", state.name, call["n"])
                 state.launcher.terminate(call["uid"])
+        for thread_id, call in self.thread_calls.items():
+            if self.clock() - call["t"] > self.config.call_timeout_s and not call.get("timed_out"):
+                call["timed_out"] = True
+                LOGGER.warning("Assistant thread %s call timed out; stopping it", thread_id)
+                self.chat.launcher.terminate(thread_id)
+
+    def _current_proposal(self) -> Any:
+        """The beamline's proposal metadata, read at most every few minutes; None if unknown."""
+        now = self.clock()
+        if now - self._proposal_t > STATUS_REFRESH_S:
+            self._proposal_t = now
+            try:
+                self._proposal = (self.beamline.info.metadata(["proposal"]) or {}).get("proposal")
+            except Exception:
+                self._proposal = None
+        return self._proposal
+
+    def _check_directives(self) -> None:
+        """End the active directives whose time ran out or whose beamtime ended."""
+        try:
+            active = self.directives.listing(statuses=("active",))
+        except Exception:
+            LOGGER.exception("Could not read the directives")
+            return
+        if not active:
+            return
+        proposal = self._current_proposal()
+        for directive in active:
+            why = expired(directive, self.clock(), proposal)
+            if why is None:
+                continue
+            try:
+                directive = self.directives.end(directive["id"], "expired", why, t=self.clock())
+                log_directive(self.agent_log, directive, f"directive {directive['id']} for {directive['role']} "
+                              f"expired: {why}. It was: {directive['text']}", source="runner", role_record=True,
+                              chat_role=self.chat.name)
+            except Exception:
+                LOGGER.exception("Could not end directive %s", directive["id"])
+
+    def directive_lines(self, role: RoleState) -> list[str]:
+        """
+        Prompt lines with the role's active directives; also writes them to
+        ``directives.md`` in its working folder (outside the notebook, which
+        the role may edit).
+        """
+        try:
+            active = self.directives.active(role.name)
+        except Exception:
+            LOGGER.exception("Could not read the %s role's directives", role.name)
+            return []
+        text = directives_text(active)
+        try:
+            path = Path(role.role.workdir).expanduser()
+            path.mkdir(parents=True, exist_ok=True)
+            (path / "directives.md").write_text(text + "\n")
+        except OSError:
+            LOGGER.exception("Could not write the %s role's directives.md", role.name)
+        if not active:
+            return []
+        return ["", "## Directives (a person confirmed these; follow them until they expire)", text]
 
     # ------------------------------------------------------------------ calls
 
@@ -933,7 +1231,8 @@ class AssistantAgent(BaseAgent):
             "from python or anything else; python is for analysing data only).",
         ]
 
-    def build_prompt(self, events: list[dict[str, Any]], role: Optional[RoleState] = None) -> str:
+    def build_prompt(self, events: list[dict[str, Any]], role: Optional[RoleState] = None,
+                     digest: Optional[dict[str, Any]] = None) -> str:
         """
         The prompt for one call: the role's record, the triggering events and
         a snapshot of the beamline, the record's recent entries and the notebook.
@@ -944,6 +1243,8 @@ class AssistantAgent(BaseAgent):
             Pending events, oldest first.
         role : RoleState, optional
             The role making the call; the chat role if omitted.
+        digest : dict, optional
+            ``digest_material`` for a call with ``digest`` events; read here if omitted.
 
         Returns
         -------
@@ -961,7 +1262,18 @@ class AssistantAgent(BaseAgent):
                 line += f" (runs: {' '.join(event['run_uids'])})"
             lines.append(line)
         lines += self.snapshot(role=role)
+        lines += self.directive_lines(role)
         kinds = {e["kind"] for e in events}
+        if "digest" in kinds:
+            lines += (digest or self.digest_material(role))["lines"]
+            lines += [
+                "",
+                "This call writes the digest. Read the driver records above in full (Read the digest/ file where"
+                " one is cut) and post one `summary` for a person who was away: what the driver did and found"
+                " since the last digest, what it is doing now and has queued, and anything they need to decide."
+                " Do not retell it step by step, and do not judge its science again unless you see a problem"
+                " it missed; then say so plainly.",
+            ]
         if "question" in kinds:
             lines.append("Answer each operator question with `nbs-cli post --kind answer --file notebook/post.md`.")
         if "reply" in kinds:
@@ -1059,7 +1371,8 @@ class AssistantAgent(BaseAgent):
         model = state.role.alert_model if urgent else state.role.model
         if recheck is not None and recheck.get("model"):
             model = recheck["model"]
-        prompt = self.build_prompt(events, role=state)
+        digest = self.digest_material(state) if any(e["kind"] == "digest" for e in events) else None
+        prompt = self.build_prompt(events, role=state, digest=digest)
         record = self.agent_log.get(state.uid) or {}
         n = int(record.get("calls") or 0) + 1
         reasons = sorted({e["kind"] for e in events})
@@ -1083,6 +1396,7 @@ class AssistantAgent(BaseAgent):
             "n": n, "uid": state.uid, "t": self.clock(), "model": model, "reasons": reasons,
             "log_len": len(record.get("log") or []),
             "requests": [e["request"] for e in events if e.get("request")],
+            "digest": digest and {"marks": digest["marks"], "ended": digest["ended"]},
         }
         run_uids = sorted({u for e in events for u in e["run_uids"]})
         kept = dict(list((record.get("call_events") or {}).items())[-(CALL_EVENTS_KEPT - 1):])
@@ -1127,6 +1441,14 @@ class AssistantAgent(BaseAgent):
                 text += f"\n\nIts last reply was:\n\n{reply.strip()}"
         run_uids = sorted({u for p in posts for u in p.get("run_uids") or []})
         for request in call["requests"]:
+            if request.get("thread"):
+                try:
+                    self.threads.add(request["thread"], "reply", text, role=state.name, source=state.source,
+                                     request_t=request["t"], run_uids=run_uids or None, t=self.clock())
+                    continue
+                except Exception:
+                    LOGGER.exception("Could not pass the %s role's reply to thread %s; it goes to the main record",
+                                     state.name, request["thread"])
             reply_to = request.get("reply_to") or self.chat.uid
             try:
                 self.agent_log.append(
@@ -1149,6 +1471,9 @@ class AssistantAgent(BaseAgent):
             LOGGER.exception("Could not keep the %s role's notebook in its record", state.name)
 
     def _on_call_exit(self, state: RoleState, launched: LaunchedAgent, returncode: int) -> None:
+        if getattr(launched, "agent_uid", None) in self.thread_calls:
+            self._on_thread_exit(launched, returncode)
+            return
         with self._lock:
             call, state.call = state.call, None
             if call is not None:
@@ -1181,8 +1506,230 @@ class AssistantAgent(BaseAgent):
                     self._check_answered(state, call, launched.log_path)
                 elif "recheck" in call["reasons"]:
                     self._check_answered(state, call, launched.log_path, ASSISTANT_POST_KINDS, "its re-check")
+                if returncode == 0 and "digest" in call["reasons"]:
+                    self._digest_done(state, call)
             self._dispatch()
+            if call is not None and any(r.get("thread") for r in call.get("requests") or []):
+                self._check_threads()
             self._beat(force=True)
+
+    # ---------------------------------------------------------------- threads
+
+    def _thread_from_message(self, message: dict[str, Any]) -> None:
+        """Open a thread for a question written straight into the main record (as older UIs do)."""
+        by = message.get("by") or message.get("source") or "operator"
+        try:
+            thread = self.threads.create(
+                message.get("text", ""), by, source=message.get("source") or "operator",
+                marker={"record": self.chat.uid, "t": message["t"]}, t=self.clock(),
+            )
+            self.agent_log.annotate(self.chat.uid, lambda e: e.get("t") == message["t"] and e.get("kind") == "operator",
+                                    thread=thread["id"])
+        except Exception:
+            LOGGER.exception("Could not open a thread for an operator question; answering it in the record")
+            self._add_event("question", f"operator asked: {message.get('text', '')}", role=self.chat)
+
+    def _check_threads(self) -> None:
+        """Answer new questions and replies in threads, and close the quiet ones."""
+        if not self._active or self.chat.launcher is None:
+            return
+        try:
+            threads = self.threads.open_threads()
+        except Exception:
+            LOGGER.exception("Could not read the threads")
+            return
+        now = self.clock()
+        for thread in threads:
+            if thread["id"] in self.thread_calls or len(self.thread_calls) >= max(1, self.config.thread_calls):
+                continue
+            if unseen(thread):
+                self._thread_call(thread)
+            elif now - (thread.get("last_t") or 0) > self.config.thread_idle_s:
+                self._thread_call(thread, closing=True)
+        if now - self._pruned_t > STATUS_REFRESH_S:
+            self._pruned_t = now
+            try:
+                self.threads.prune(now - self.config.thread_keep_days * 86400)
+            except Exception:
+                LOGGER.exception("Could not prune old threads")
+
+    def thread_prompt(self, thread: dict[str, Any], resume: bool) -> str:
+        """
+        The prompt for a thread call: what is new in the thread since the
+        manager last saw it. A first call (or one that cannot resume the
+        thread's session) also gets the seed, the earlier messages, the
+        snapshot and how to answer.
+
+        Parameters
+        ----------
+        thread : dict
+            The thread.
+        resume : bool
+            Whether the call resumes the thread's Claude session.
+
+        Returns
+        -------
+        str
+            Prompt text.
+        """
+        messages = thread.get("messages") or []
+        seen = thread.get("seen") or 0
+
+        def listed(ms):
+            out = []
+            for m in ms:
+                when = time.strftime("%H:%M:%S", time.localtime(m.get("t") or 0))
+                who = m.get("by") or (f"the {m['role']} role" if m.get("role") else m.get("source") or "")
+                verb = {"question": "asked", "reply": "replied", "answer": "answered"}.get(m.get("kind"), "noted")
+                out.append(f"- {when} {who or m.get('kind')} {verb}: {m.get('text', '')}")
+            return out
+
+        answer = (f"Your final message is your answer: the runner shows it to the person in thread {thread['id']}."
+                  " Do not use `nbs-cli post` for it.")
+        if resume:
+            return "\n".join([f"New in thread {thread['id']} since your last answer:"] + listed(messages[seen:])
+                             + ["", answer])
+        lines = self._intro(self.chat) + [
+            "",
+            f"A person asked you a question. This conversation is thread {thread['id']}: you answer it here,"
+            " and their follow-ups resume this conversation.",
+            seed_text(thread.get("seed") or {}),
+        ]
+        if seen:
+            lines += ["", "Earlier in this thread:"] + listed(messages[:seen])
+        lines += ["", "New:" if seen else "The question:"] + listed(messages[seen:])
+        lines += self.snapshot(role=self.chat)
+        lines += self.directive_lines(self.chat)
+        folder = f"notebook/threads/{thread['id']}"
+        lines += [
+            "",
+            answer,
+            "- To see what another assistant role saw or did, read it first with `nbs-cli role show NAME`"
+            " (its tile, record and notebook). Use `nbs-cli role request NAME \"...\"` only when you need that"
+            " role's own tools (a re-plot with other keys, a re-check with its rules). Its answer comes back into"
+            " this thread and resumes you.",
+            "- If the person tells you something a role should keep doing or stop doing (\"U6 is known to charge,"
+            " stop alerting on it\"), propose it: write it to"
+            f" `{folder}/directive.md`, then `nbs-cli directive propose ROLE --file {folder}/directive.md"
+            " --expires beamtime` (or a duration such as 12h, or a date). Only a person can confirm it; say in"
+            " your answer that you proposed it and what it would change.",
+            f"- Keep scratch files for this thread under `{folder}/`.",
+        ]
+        return "\n".join(lines)
+
+    def thread_close_prompt(self, thread: dict[str, Any]) -> str:
+        """The prompt that asks a quiet thread's session for its closing summary."""
+        minutes = round(self.config.thread_idle_s / 60)
+        return (
+            f"Thread {thread['id']} has been quiet for {minutes} min and is closing. Reply with a summary of two to"
+            " four lines: what was asked, what you found, any directive proposed, and anything left open. Your"
+            " final message is the summary; it goes into notebook/threads.md, which later calls read. Run no"
+            " commands."
+        )
+
+    def _thread_call(self, thread: dict[str, Any], closing: bool = False, fresh: bool = False) -> None:
+        """
+        Start a call for a thread: an answer to what is new in it, or its
+        closing summary. It resumes the thread's Claude session unless the
+        session does not exist yet or ``fresh`` asks for a new one.
+        """
+        state = self.chat
+        thread_id = thread["id"]
+        resume = bool(thread.get("started")) and not fresh
+        if closing and not resume:
+            self._close_thread(thread, None)
+            return
+        if fresh:
+            thread = self.threads.update(thread_id, session_id=str(uuid.uuid4()), started=False)
+        model = state.role.model if closing else state.role.alert_model
+        prompt = self.thread_close_prompt(thread) if closing else self.thread_prompt(thread, resume)
+        args = ["--role", "assistant"]
+        if model:
+            args += ["--model", model]
+        args += ["--resume", thread["session_id"]] if resume else ["--session-id", thread["session_id"]]
+        env = {
+            "NBS_CLI_ROLE": state.cli_role, "NBS_AGENT_UID": "", "NBS_ASSISTANT_PROMPT": prompt,
+            "NBS_MODEL": model or "", "NBS_ASSISTANT_CALL": "", "NBS_RECHECK_OF": "",
+            "NBS_ASSISTANT_SKILL": state.role.skill, "NBS_ASSISTANT_THREAD": thread_id,
+        }
+        seen_before = thread.get("seen") or 0
+        try:
+            (Path(state.role.workdir).expanduser() / "notebook" / "threads" / thread_id).mkdir(parents=True, exist_ok=True)
+            launched = state.launcher.launch(thread_id, None, f"assistant-thread-{thread_id}", extra_args=args, env=env)
+        except Exception as exc:
+            LOGGER.exception("Could not start a call for thread %s", thread_id)
+            self.threads.add(thread_id, "error", f"could not start a call: {exc}", t=self.clock())
+            self.threads.mark_seen(thread_id, len(thread.get("messages") or []))
+            return
+        self.thread_calls[thread_id] = {
+            "t": self.clock(), "model": model, "closing": closing, "resume": resume, "fresh": fresh,
+            "seen_before": seen_before, "pid": launched.pid, "log_path": launched.log_path,
+        }
+        self.threads.mark_seen(thread_id, len(thread.get("messages") or []), calling=True, started=True,
+                               call_seen_before=seen_before, model=model)
+        LOGGER.info("Assistant thread %s call (%s, %s, %s)", thread_id, model,
+                    "closing" if closing else "resume" if resume else "new session", launched.pid)
+
+    def _on_thread_exit(self, launched: LaunchedAgent, returncode: int) -> None:
+        with self._lock:
+            thread_id = launched.agent_uid
+            call = self.thread_calls.pop(thread_id)
+            result = final_result(launched.log_path) or {}
+            failed = bool(result.get("is_error"))
+            reply = None if failed else (result.get("result") or "").strip() or None
+            served = served_model_file(launched.log_path)
+            try:
+                thread = self.threads.update(thread_id, calling=False)
+                if call["closing"]:
+                    self._close_thread(thread, reply if returncode == 0 else None)
+                elif reply:
+                    self.threads.add(thread_id, "answer", reply, model=call["model"], served_model=served,
+                                     t=self.clock())
+                elif call["resume"]:
+                    # The session could not be resumed (or the call failed): start a new
+                    # one that is shown the whole thread
+                    LOGGER.warning("Thread %s call exited %s without an answer; retrying in a new session",
+                                   thread_id, returncode)
+                    thread = self.threads.mark_seen(thread_id, call["seen_before"])
+                    self._thread_call(thread, fresh=True)
+                else:
+                    why = "timed out" if call.get("timed_out") else f"exited with status {returncode}"
+                    if failed and result.get("result"):
+                        why += f": {result['result']}"
+                    self.threads.add(thread_id, "error", f"the assistant could not answer (call {why}; see"
+                                     f" {launched.log_path})", t=self.clock())
+            except Exception:
+                LOGGER.exception("Could not record the end of thread %s's call", thread_id)
+            self._check_threads()
+
+    def _close_thread(self, thread: dict[str, Any], summary: Optional[str]) -> None:
+        """Close a thread: its summary goes into the chat role's notebook/threads.md and onto its marker."""
+        messages = thread.get("messages") or []
+        question = messages[0]["text"] if messages else ""
+        if not summary:
+            answers = sum(1 for m in messages if m.get("kind") == "answer")
+            summary = f"Asked: {question[:300]} ({answers} answer(s); closed without a summary)"
+        summary = summary.strip()
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(thread.get("created_t") or self.clock()))
+        heading = f"## {when} thread {thread['id']} ({thread.get('created_by')}): {question.splitlines()[0][:120] if question else ''}"
+        path = Path(self.chat.role.workdir).expanduser() / "notebook" / "threads.md"
+        try:
+            old = path.read_text() if path.exists() else ""
+            sections = [s for s in old.split("\n## ") if s.strip() and not s.startswith("# ")]
+            sections = [s if s.startswith("## ") else "## " + s for s in sections][-(THREAD_SUMMARIES_KEPT - 1):]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("# Closed threads (newest last)\n\n" + "\n\n".join(
+                [s.strip() for s in sections] + [f"{heading}\n{summary}"]) + "\n")
+        except OSError:
+            LOGGER.exception("Could not write %s", path)
+        try:
+            self.threads.update(thread["id"], status="closed", summary=summary, closed_t=self.clock(), calling=False)
+            marker = thread.get("marker") or {}
+            if marker.get("record"):
+                self.agent_log.annotate(marker["record"], lambda e: e.get("t") == marker.get("t") and e.get("thread"),
+                                        thread_status="closed", thread_summary=summary)
+        except Exception:
+            LOGGER.exception("Could not close thread %s", thread["id"])
 
 
 def read_notebook(workdir: str) -> str:

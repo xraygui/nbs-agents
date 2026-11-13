@@ -268,7 +268,8 @@ class AssistantAgentTests(unittest.TestCase):
         self.assertEqual(len(self.launcher.calls), 1)
 
     def test_operator_question_calls_with_the_strong_model(self):
-        agent = self.make(model="haiku", alert_model="opus")
+        # Questions in the main record, as before threads
+        agent = self.make(model="haiku", alert_model="opus", threads=False)
         self.log.message(self.uid, "is s6 worth repeating?", source="gui")
         agent.tick()
         call = self.launcher.calls[0]
@@ -279,7 +280,7 @@ class AssistantAgentTests(unittest.TestCase):
         self.assertEqual(len(self.launcher.calls), 1)
 
     def test_question_call_that_posts_no_answer_is_flagged(self):
-        agent = self.make()
+        agent = self.make(threads=False)
         log_path = os.path.join(agent.config.workdir, "call.log")
         with open(log_path, "w") as f:
             f.write('{"type": "assistant"}\nnot json\n{"type": "result", "result": "L2 on gold is fine."}\n')
@@ -292,7 +293,7 @@ class AssistantAgentTests(unittest.TestCase):
         self.assertIn("L2 on gold is fine.", last["text"])
 
     def test_question_call_that_answers_is_not_flagged(self):
-        agent = self.make()
+        agent = self.make(threads=False)
         self.log.message(self.uid, "which stripe at 6 keV?", source="gui")
         agent.tick()
         self.log.append(self.uid, "answer", "gold", source="assistant")

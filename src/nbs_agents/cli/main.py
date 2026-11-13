@@ -5,7 +5,8 @@ Every command prints one JSON document on stdout. Errors print
 ``{"error": ...}`` and exit with status 1.
 
 ``--role assistant`` (or ``NBS_CLI_ROLE=assistant``) makes the client
-read-only: only the read verbs, ``post`` and ``role`` work.
+read-only: only the read verbs, ``post``, ``role``, ``thread`` and
+``directive propose`` work.
 ``NBS_CLI_ROLE=assistant:NAME`` (set by the runner, never by ``--role``) is
 the assistant's headless role NAME: read-only too, and ``post`` writes only
 that role's record and tile.
@@ -265,12 +266,43 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("text")
 
     p = sub.add_parser("ask-assistant", parents=[common],
-                       help="operator: ask the beamline assistant a question (shows in its conversation)")
+                       help="operator: ask the beamline assistant a question (each question opens its own thread)")
     p.add_argument("text", nargs="?", default="", help="the question; with --about, what to look at in particular")
     p.add_argument("--about", metavar="POST",
                    help="re-check one of today's assistant posts with a fresh call that does not see it: "
                    "its time (HH:MM, HH:MM:SS or the epoch seconds `log` shows) or 'last'")
     p.add_argument("--model", help="with --about: the model for the re-check (default: the assistant's alert_model)")
+    about = p.add_mutually_exclusive_group()
+    about.add_argument("--thread", metavar="ID", help="a follow-up in this thread (`thread list`)")
+    about.add_argument("--entry", metavar="POST", help="ask about one of today's assistant posts (as --about)")
+    about.add_argument("--tile", metavar="ROLE", help="ask about this role's tile")
+
+    p = sub.add_parser("thread", parents=[common], help="operator and assistant: the assistant's question threads")
+    thread = p.add_subparsers(dest="thread_command", required=True)
+    q = thread.add_parser("list", parents=[common], help="threads, newest first")
+    q.add_argument("--since", help="active since then: HH:MM, HH:MM:SS, epoch seconds, or an age like 2h")
+    q = thread.add_parser("show", parents=[common], help="one thread with its messages")
+    q.add_argument("id")
+
+    p = sub.add_parser("directive", parents=[common],
+                       help="standing instructions to an assistant role: the manager proposes, a person confirms")
+    directive = p.add_subparsers(dest="directive_command", required=True)
+    q = directive.add_parser("propose", parents=[common], help="assistant chat role: propose a directive for a role")
+    q.add_argument("role")
+    text = q.add_mutually_exclusive_group(required=True)
+    text.add_argument("text", nargs="?")
+    text.add_argument("--file", metavar="FILE", help="read the text from FILE (relative, inside the current folder)")
+    q.add_argument("--expires", default="beamtime",
+                   help="beamtime (default: until the proposal changes), a duration (12h, 3d) or a date (YYYY-MM-DD)")
+    q = directive.add_parser("list", parents=[common], help="proposed and active directives")
+    q.add_argument("--role", dest="directive_role", help="only this role's")
+    q.add_argument("--all", action="store_true", help="also rejected, expired and revoked ones")
+    for action, what in (("confirm", "confirm a proposed directive"), ("reject", "reject a proposed directive"),
+                         ("revoke", "end an active directive now")):
+        q = directive.add_parser(action, parents=[common], help=f"operator: {what} (logged)")
+        q.add_argument("id")
+        if action != "confirm":
+            q.add_argument("--reason", default="")
     p = sub.add_parser("stop", parents=[common], help="operator: ask a running agent to wrap up")
     p.add_argument("--reason", default="")
 
@@ -734,10 +766,29 @@ def run_command(bl: Beamline, args: argparse.Namespace) -> Any:
         return bl.finalize(summary, drop_pending=args.drop_pending, agent_uid=uid)
     if cmd == "ask-assistant":
         if args.about:
+            if args.thread or args.entry or args.tile:
+                raise CliError("--about is a re-check; --thread, --entry and --tile are for questions")
             return bl.recheck(args.about, model=args.model, text=args.text)
         if args.model:
             raise CliError("--model goes with --about (a re-check); a question uses the assistant's alert_model")
-        return bl.ask_assistant(args.text)
+        return bl.ask_assistant(args.text, thread=args.thread, entry=args.entry, tile=args.tile)
+    if cmd == "thread":
+        if args.thread_command == "list":
+            return bl.thread_list(since=args.since)
+        return bl.thread_show(args.id)
+    if cmd == "directive":
+        if args.directive_command == "propose":
+            text = args.text
+            if args.file:
+                path = cwd_path(args.file, "--file")
+                try:
+                    text = path.read_text()
+                except OSError as exc:
+                    raise CliError(f"cannot read --file {args.file}: {exc.strerror}") from exc
+            return bl.directive_propose(args.role, text, expires=args.expires)
+        if args.directive_command == "list":
+            return bl.directive_list(role=args.directive_role, all_=args.all)
+        return bl.directive_decide(args.id, args.directive_command, reason=getattr(args, "reason", ""))
     if cmd in ("tell", "stop"):
         refuse_read_only(bl.config, cmd)
         record = bl.find_session(uid)

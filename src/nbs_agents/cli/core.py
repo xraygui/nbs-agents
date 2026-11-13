@@ -19,6 +19,7 @@ from nbs_agents.agentlog import (
     ASSISTANT_POST_KINDS,
     AgentLog,
     assistant_uid,
+    find_assistant_post,
     is_assistant_record,
     unread_operator_entries,
 )
@@ -36,6 +37,9 @@ from ..queue import close_agent_owner, describe_owner
 from ..beamline_info import DEVICES, METADATA, SAMPLES, BeamlineInfo, load_beamline_info
 from .config import ASSISTANT_ROLE, AssistantConfig, CliConfig, RoleConfig
 from ..tiles import TileError, TileStore, acknowledge
+from ..threads import ThreadError, ThreadStore, open_thread
+from ..directives import DIRECTIVE_STATUSES, DirectiveError, DirectiveStore, decide_directive, parse_expiry, \
+    log_directive, revoke_directive
 from ..reduce.metrics import SummaryContext, summarize
 
 LOGGER = logging.getLogger(__name__)
@@ -104,6 +108,18 @@ def parse_since(text: str, now: float) -> float:
         return float(text)
     except ValueError:
         raise CliError(f"--since takes HH:MM, HH:MM:SS, epoch seconds or an age like 30m or 2h, not {text!r}") from None
+
+
+def is_person(config: CliConfig) -> bool:
+    """Whether this client is a person: not the assistant, and not run by the runner for a driver."""
+    return not (config.is_assistant or os.environ.get("NBS_AGENT_UID") or os.environ.get("NBS_DRIVER"))
+
+
+def login_name() -> str:
+    """The person running this client."""
+    import getpass
+
+    return getpass.getuser()
 
 
 def refuse_read_only(config: CliConfig, verb: str) -> None:
@@ -1875,12 +1891,23 @@ class Beamline:
             return records
         return {uid: r for uid, r in records.items() if not is_assistant_record(r, uid)}
 
-    def ask_assistant(self, text: str, source: str = "nbs-cli") -> dict[str, Any]:
+    def ask_assistant(
+        self,
+        text: str,
+        source: str = "nbs-cli",
+        thread: Optional[str] = None,
+        entry: Optional[str] = None,
+        tile: Optional[str] = None,
+        by: Optional[str] = None,
+    ) -> dict[str, Any]:
         """
-        Put an operator question in today's assistant record.
+        Ask the assistant (its chat role, the manager) a question.
 
-        It is the same entry the GUI's Assistant tab writes, so the question
-        shows in the assistant conversation and the runner answers it.
+        Each new question opens its own thread: the runner answers it, and
+        each follow-up (``thread``), in a Claude session of its own. Only the
+        question shows in today's main record, as the thread's one line.
+        With ``[assistant] threads = false`` the question goes into the main
+        record and is answered there, as the GUI's Assistant tab did before.
 
         Parameters
         ----------
@@ -1888,17 +1915,165 @@ class Beamline:
             The question.
         source : str, optional
             Where it came from.
+        thread : str, optional
+            A follow-up in this thread.
+        entry : str, optional
+            Ask about one of today's assistant posts: ``HH:MM``, ``HH:MM:SS``,
+            epoch seconds or ``"last"``.
+        tile : str, optional
+            Ask about this role's tile.
+        by : str, optional
+            Who asks; the login name if omitted.
 
         Returns
         -------
         dict
-            ``agent_uid`` and the appended entry.
+            ``agent_uid`` (the main record), ``thread`` (its id) and the
+            appended ``entry`` (the main record's line) or ``message`` (a follow-up).
         """
         refuse_read_only(self.config, "ask-assistant")
         if not text.strip():
             raise CliError("empty question")
+        if sum(x is not None for x in (thread, entry, tile)) > 1:
+            raise CliError("a question is a follow-up (--thread), about an entry (--entry) or about a tile (--tile)")
+        by = by or login_name()
         uid = self.agent_log.ensure_assistant_record()
-        return {"agent_uid": uid, "entry": self.agent_log.message(uid, text.strip(), source=source)}
+        if thread:
+            try:
+                message = ThreadStore.for_agent_log(self.agent_log).ask(thread, text, by, source=source)
+            except ThreadError as exc:
+                raise CliError(str(exc)) from exc
+            return {"agent_uid": uid, "thread": thread, "message": message}
+        if not self.assistant.threads:
+            if entry or tile:
+                raise CliError("--entry and --tile open a thread, and [assistant] threads is off")
+            return {"agent_uid": uid, "entry": self.agent_log.message(uid, text.strip(), source=source)}
+        seed = None
+        if entry:
+            try:
+                post = find_assistant_post(self.agent_log.get(uid) or {}, entry)
+            except ValueError as exc:
+                raise CliError(str(exc)) from exc
+            seed = {"kind": "entry", "record": uid, "entry": post}
+        elif tile:
+            current = TileStore.for_agent_log(self.agent_log).get(tile)
+            if current is None:
+                raise CliError(f"no tile for role {tile!r}")
+            seed = {"kind": "tile", "role": tile, "tile": current}
+        out = open_thread(self.agent_log, text, by, source=source, seed=seed)
+        return {"agent_uid": uid, "thread": out["thread"]["id"], "entry": out["entry"]}
+
+    def _refuse_unless_person_or_assistant(self, verb: str) -> None:
+        """Assistant records stay out of drivers' reach (the firewall); people and the assistant read them."""
+        if not self.config.is_assistant and not is_person(self.config):
+            raise CliError(f"{verb} is for people and the assistant, not for driving agents")
+
+    def thread_list(self, since: Optional[str] = None) -> list[dict[str, Any]]:
+        """
+        The assistant's threads, newest first, without their messages.
+
+        Parameters
+        ----------
+        since : str, optional
+            Only threads active since then (as ``role show --since``).
+        """
+        self._refuse_unless_person_or_assistant("thread list")
+        start = parse_since(since, time.time()) if since else None
+        return ThreadStore.for_agent_log(self.agent_log).listing(start)
+
+    def thread_show(self, thread_id: str) -> dict[str, Any]:
+        """One thread with its messages."""
+        self._refuse_unless_person_or_assistant("thread show")
+        thread = ThreadStore.for_agent_log(self.agent_log).get(thread_id)
+        if thread is None:
+            raise CliError(f"no thread {thread_id}")
+        return thread
+
+    def directive_propose(self, role: str, text: str, expires: str = "beamtime") -> dict[str, Any]:
+        """
+        Propose a directive for an assistant role (the chat role only). It
+        waits for a person to confirm it.
+
+        Parameters
+        ----------
+        role : str
+            The role it is for.
+        text : str
+            What the role should do or stop doing.
+        expires : str, optional
+            ``beamtime``, a duration (``12h``, ``3d``) or a date (``YYYY-MM-DD``).
+
+        Returns
+        -------
+        dict
+            The ``directive`` and a ``note`` on what happens next.
+        """
+        self._refuse_unless_chat_role("directive propose")
+        self._named_role(role)
+        now = time.time()
+        proposal = None
+        if expires.strip() == "beamtime":
+            try:
+                proposal = (self.info.metadata(["proposal"]) or {}).get("proposal")
+            except Exception:
+                proposal = None
+        try:
+            when = parse_expiry(expires, now, proposal, self.assistant.beamtime_s)
+            thread = os.environ.get("NBS_ASSISTANT_THREAD") or None
+            directive = DirectiveStore.for_agent_log(self.agent_log).propose(
+                role, text, when, by=ASSISTANT_ROLE, thread=thread, t=now,
+            )
+        except DirectiveError as exc:
+            raise CliError(str(exc)) from exc
+        log_directive(
+            self.agent_log, directive,
+            f"proposed directive {directive['id']} for {role} (until {when['text']}): {directive['text']}",
+            source=ASSISTANT_ROLE, thread=thread, **writer_refs(),
+        )
+        if thread:
+            try:
+                ThreadStore.for_agent_log(self.agent_log).add(
+                    thread, "note", f"proposed directive {directive['id']} for the {role} role: {directive['text']}",
+                    directive=directive["id"], source=ASSISTANT_ROLE,
+                )
+            except ThreadError:
+                pass
+        return {"directive": directive,
+                "note": "a person must confirm it (web UI, or nbs-cli directive confirm ID); tell them in your answer"}
+
+    def directive_list(self, role: Optional[str] = None, all_: bool = False) -> list[dict[str, Any]]:
+        """Directives waiting for a person and active ones (every one with ``all_``), oldest first."""
+        self._refuse_unless_person_or_assistant("directive list")
+        statuses = DIRECTIVE_STATUSES if all_ else ("proposed", "active")
+        return DirectiveStore.for_agent_log(self.agent_log).listing(role, statuses)
+
+    def directive_decide(self, directive_id: str, action: str, reason: str = "", by: Optional[str] = None) -> dict[str, Any]:
+        """
+        A person confirms, rejects or revokes a directive; it is logged.
+
+        Parameters
+        ----------
+        directive_id : str
+            The directive.
+        action : {"confirm", "reject", "revoke"}
+            What to do.
+        reason : str, optional
+            Why (for a reject or revoke).
+        by : str, optional
+            Who; the login name if omitted.
+        """
+        if not is_person(self.config):
+            raise CliError("only a person confirms, rejects or revokes a directive")
+        by = by or login_name()
+        chat = self.assistant.chat_role().name
+        try:
+            if action == "revoke":
+                return revoke_directive(self.agent_log, directive_id, by, source="nbs-cli", reason=reason,
+                                        chat_role=chat)
+            return decide_directive(self.agent_log, directive_id, action == "confirm", by, source="nbs-cli",
+                                    reason=reason, chat_role=chat)
+        except DirectiveError as exc:
+            raise CliError(str(exc)) from exc
 
     def recheck(self, about: str, model: Optional[str] = None, text: str = "", source: str = "nbs-cli") -> dict[str, Any]:
         """
@@ -2034,24 +2209,24 @@ class Beamline:
         dict
             ``agent_uid`` (where it was logged), ``tile`` and ``entry``.
         """
-        if self.config.is_assistant or os.environ.get("NBS_AGENT_UID") or os.environ.get("NBS_DRIVER"):
+        if not is_person(self.config):
             raise CliError("only a person acknowledges an alert; an agent can mention it in a post instead")
         roles = self.assistant.resolved_roles()
         if role not in roles and TileStore.for_agent_log(self.agent_log).get(role) is None:
             raise CliError(f"no role {role!r} (roles: {sorted(roles)})")
-        if not by:
-            import getpass
-
-            by = getpass.getuser()
+        by = by or login_name()
         try:
             return acknowledge(self.agent_log, role, by, source="nbs-cli", chat=role in roles and roles[role].chat)
         except TileError as exc:
             raise CliError(str(exc)) from exc
 
     def _refuse_unless_chat(self, verb: str) -> None:
+        self._refuse_unless_chat_role(f"role {verb}")
+
+    def _refuse_unless_chat_role(self, verb: str) -> None:
         if not self.config.read_only or self.config.assistant_role is not None:
             raise CliError(
-                f"role {verb} is for the assistant's chat role (the manager: NBS_CLI_ROLE=assistant or --role assistant)"
+                f"{verb} is for the assistant's chat role (the manager: NBS_CLI_ROLE=assistant or --role assistant)"
             )
 
     def _named_role(self, name: str) -> RoleConfig:
@@ -2149,11 +2324,13 @@ class Beamline:
         if not text or not text.strip():
             raise CliError("request text is required")
         uid = self._role_record(role)
+        thread = os.environ.get("NBS_ASSISTANT_THREAD") or None
         entry = self.agent_log.append(
-            uid, "request", text.strip(), source=ASSISTANT_ROLE, reply_to=assistant_uid(),
+            uid, "request", text.strip(), source=ASSISTANT_ROLE, reply_to=assistant_uid(), thread=thread,
             run_uids=list(runs or []) or None, **writer_refs(),
         )
-        return {"agent_uid": uid, "entry": entry, "note": f"the {name} role's answer will come back as a reply entry"}
+        where = "into this thread" if thread else "as a reply entry"
+        return {"agent_uid": uid, "entry": entry, "note": f"the {name} role's answer will come back {where}"}
 
     def note(self, text: str, agent_uid: Optional[str] = None) -> dict[str, Any]:
         """

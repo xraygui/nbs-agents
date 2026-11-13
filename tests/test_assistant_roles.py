@@ -42,7 +42,7 @@ class RoleConfigTests(unittest.TestCase):
         role = roles["manager"]
         self.assertTrue(role.chat)
         self.assertEqual((role.model, role.alert_model, role.workdir), ("haiku", "opus", "/w/assistant"))
-        self.assertEqual(role.triggers, ["alert", "flag", "group_end", "checkin"])
+        self.assertEqual(role.triggers, ["alert", "flag", "group_end", "checkin", "digest"])
         self.assertEqual(role.sinks, ["record"])
         self.assertEqual(role.skill, "beamline-assistant")
 
@@ -57,7 +57,7 @@ class RoleConfigTests(unittest.TestCase):
         roles = AssistantConfig.load(path).resolved_roles()
         self.assertEqual(list(roles), ["manager", "integrity", "plotter"])
         # The chat role takes the default triggers no headless role took
-        self.assertEqual(roles["manager"].triggers, ["group_end", "checkin"])
+        self.assertEqual(roles["manager"].triggers, ["group_end", "checkin", "digest"])
         self.assertEqual(roles["integrity"].sinks, ["tile", "record"])
         self.assertEqual(roles["integrity"].workdir, "/w/assistant-integrity")
         self.assertEqual(roles["integrity"].model, "opus")

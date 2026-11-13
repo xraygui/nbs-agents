@@ -30,9 +30,10 @@ ROLE_SINKS = ("tile", "record")
 # Events that triage and the timers raise; each goes to the one role whose
 # ``triggers`` name it. Operator questions, re-checks and the replies to a
 # ``role request`` always go to the chat role, and a request to the role it names.
-ROLE_TRIGGERS = ("run", "alert", "flag", "group_end", "checkin")
+# ``digest`` replaces ``group_end`` for a driver's runs and ``checkin`` while a driver runs.
+ROLE_TRIGGERS = ("run", "alert", "flag", "group_end", "checkin", "digest")
 # What today's single assistant reacts to, and what the chat role takes by default
-DEFAULT_TRIGGERS = ("alert", "flag", "group_end", "checkin")
+DEFAULT_TRIGGERS = ("alert", "flag", "group_end", "checkin", "digest")
 # The chat role when no [assistant.roles] are configured
 DEFAULT_CHAT_ROLE = "manager"
 ROLE_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
@@ -416,6 +417,27 @@ class AssistantConfig:
         Most characters of each part of the snapshot (beamline state, the
         assistant's recent record, its notebook) put into every call's prompt;
         0 for no snapshot.
+    digest_min_s : float
+        While a driver runs, the end of one of its groups of runs asks for a
+        digest at most this often; later group ends wait for it (the hourly
+        digest and the one at the end of the session do not).
+    digest_chars : int
+        Most characters of the driver's record since the last digest put into
+        a digest call's prompt; all of it is also in ``digest/`` in the
+        working folder.
+    threads : bool
+        Every question to the assistant opens its own thread (a Claude session
+        resumed for each follow-up); False keeps questions in the main record.
+    thread_idle_s : float
+        Seconds a thread stays quiet before it closes with a summary in the
+        chat role's ``notebook/threads.md``.
+    thread_calls : int
+        Most thread calls running at once (beside each role's own call).
+    thread_keep_days : float
+        Closed threads are deleted from Redis after this many days.
+    beamtime_s : float
+        Longest a directive that expires with the ``beamtime`` lasts, if the
+        proposal does not change first.
     roles : dict
         ``{name: RoleConfig}`` from ``[assistant.roles]``; empty for one chat role.
     """
@@ -435,6 +457,13 @@ class AssistantConfig:
     poll_s: float = 5.0
     call_timeout_s: float = 900.0
     snapshot_chars: int = 12000
+    digest_min_s: float = 900.0
+    digest_chars: int = 40000
+    threads: bool = True
+    thread_idle_s: float = 1800.0
+    thread_calls: int = 2
+    thread_keep_days: float = 14.0
+    beamtime_s: float = 3 * 86400.0
     roles: dict[str, RoleConfig] = field(default_factory=dict)
 
     def resolved_roles(self) -> dict[str, RoleConfig]:
