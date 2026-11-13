@@ -121,6 +121,21 @@ def test_ask_assistant_posts_to_todays_record():
     assert log[-1]["kind"] == "operator" and log[-1]["text"] == "how is S1?"
 
 
+def test_recheck_asks_for_a_blind_second_look():
+    bl = FakeBeamline()
+    client = client_for(bl)
+    uid = bl.agent_log.ensure_assistant_record()
+    post = bl.agent_log.append(uid, "alert", "beam lost", source="assistant", model="sonnet")
+    r = client.post("/api/assistant/recheck", json={"t": post["t"], "model": "opus"}, headers=ORIGIN)
+    assert r.status_code == 200
+    entry = bl.agent_log.get(uid)["log"][-1]
+    assert entry["kind"] == "operator" and entry["source"] == "web"
+    assert entry["recheck"] == {"t": post["t"], "model": "opus", "note": None}
+    assert client.post("/api/assistant/recheck", json={"t": 1.0}, headers=ORIGIN).status_code == 404
+    snap = client.get("/api/snapshot").json()
+    assert snap["assistant"]["log"][0]["model"] == "sonnet"
+
+
 def test_new_agent_needs_runner_and_confirms_busy_sessions():
     bl = FakeBeamline()
     client = client_for(bl)

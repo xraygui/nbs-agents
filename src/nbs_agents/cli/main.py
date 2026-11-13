@@ -262,7 +262,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("ask-assistant", parents=[common],
                        help="operator: ask the beamline assistant a question (shows in its conversation)")
-    p.add_argument("text")
+    p.add_argument("text", nargs="?", default="", help="the question; with --about, what to look at in particular")
+    p.add_argument("--about", metavar="POST",
+                   help="re-check one of today's assistant posts with a fresh call that does not see it: "
+                   "its time (HH:MM, HH:MM:SS or the epoch seconds `log` shows) or 'last'")
+    p.add_argument("--model", help="with --about: the model for the re-check (default: the assistant's alert_model)")
     p = sub.add_parser("stop", parents=[common], help="operator: ask a running agent to wrap up")
     p.add_argument("--reason", default="")
 
@@ -704,6 +708,10 @@ def run_command(bl: Beamline, args: argparse.Namespace) -> Any:
                 raise CliError(f"cannot read --summary-file {args.summary_file}: {exc.strerror}") from exc
         return bl.finalize(summary, drop_pending=args.drop_pending, agent_uid=uid)
     if cmd == "ask-assistant":
+        if args.about:
+            return bl.recheck(args.about, model=args.model, text=args.text)
+        if args.model:
+            raise CliError("--model goes with --about (a re-check); a question uses the assistant's alert_model")
         return bl.ask_assistant(args.text)
     if cmd in ("tell", "stop"):
         refuse_read_only(bl.config, cmd)

@@ -1,7 +1,9 @@
 """The read-only assistant role in nbs-cli and the driver-side firewall."""
 
+import json
 import os
 import tempfile
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -119,6 +121,51 @@ class ReadOnlyRoleTests(unittest.TestCase):
         abl, _ = make("assistant")
         with self.assertRaises(CliError):
             run(abl, "ask-assistant", "x")
+
+    def test_post_records_the_model_and_call_the_runner_set(self):
+        bl, _ = make("assistant")
+        env = {"NBS_MODEL": "opus", "NBS_ASSISTANT_CALL": "3", "NBS_RECHECK_OF": "1800000000.5"}
+        with patch.dict(os.environ, env):
+            run(bl, "post", "--kind", "answer", "gold")
+        entry = bl.agent_log.get(assistant_uid())["log"][-1]
+        self.assertEqual((entry["model"], entry["call"], entry["recheck_of"]), ("opus", 3, 1800000000.5))
+        # Round trip through Redis: the stored JSON reads back the same entry
+        key = next(k for k in bl.agent_log.redis.store if k.endswith(assistant_uid()))
+        self.assertEqual(json.loads(bl.agent_log.redis.store[key])["log"][-1], entry)
+        with patch.dict(os.environ, {"NBS_MODEL": "", "NBS_ASSISTANT_CALL": "", "NBS_RECHECK_OF": ""}):
+            run(bl, "post", "--kind", "advice", "plain")
+        self.assertFalse({"model", "call", "recheck_of"} & set(bl.agent_log.get(assistant_uid())["log"][-1]))
+
+    def test_driver_entries_carry_the_model(self):
+        bl, _ = make("driver")
+        with patch.dict(os.environ, {"NBS_MODEL": "sonnet"}):
+            run(bl, "--agent-uid", "u1", "note", "plan posted")
+            run(bl, "--agent-uid", "u1", "ask", "go ahead?")
+        self.assertEqual([e["model"] for e in bl.agent_log.get("u1")["log"]], ["sonnet", "sonnet"])
+
+    def test_ask_assistant_about_a_post_asks_for_a_recheck(self):
+        bl, _ = make("driver")
+        uid = assistant_uid()
+        with patch("nbs_agents.agentlog.time.time", return_value=1_800_000_000.0):
+            bl.agent_log.append(uid, "summary", "first", source="assistant")
+        with patch("nbs_agents.agentlog.time.time", return_value=1_800_000_100.0):
+            bl.agent_log.append(uid, "answer", "second", source="assistant")
+        out = run(bl, "ask-assistant", "--about", "last", "--model", "opus", "check i0")
+        entry = out["entry"]
+        self.assertEqual(entry["kind"], "operator")
+        self.assertEqual(entry["recheck"], {"t": 1_800_000_100.0, "model": "opus", "note": "check i0"})
+        self.assertIn("answer with opus: check i0", entry["text"])
+        hhmmss = time.strftime("%H:%M:%S", time.localtime(1_800_000_000.0))
+        self.assertEqual(run(bl, "ask-assistant", "--about", hhmmss)["entry"]["recheck"]["t"], 1_800_000_000.0)
+        self.assertEqual(run(bl, "ask-assistant", "--about", "1800000000")["entry"]["recheck"]["model"], None)
+        for bad in ("12:34:56x", "nope", "1"):
+            with self.assertRaises(CliError):
+                run(bl, "ask-assistant", "--about", bad)
+        with self.assertRaises(CliError):
+            run(bl, "ask-assistant", "--model", "opus", "a question")
+        abl, _ = make("assistant")
+        with self.assertRaises(CliError):
+            run(abl, "ask-assistant", "--about", "last")
 
     def test_post_validates(self):
         bl, _ = make("assistant")

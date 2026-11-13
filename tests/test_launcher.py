@@ -9,7 +9,13 @@ from unittest.mock import MagicMock, patch
 from fakes import FakeRedis
 from nbs_agents.agentlog import AgentLog
 
-from nbs_agents.assistant.launcher import ClaudeLaunchHook, ClaudeLauncher, LaunchedAgent, claude_launch_parameters
+from nbs_agents.assistant.launcher import (
+    ClaudeLaunchHook,
+    ClaudeLauncher,
+    LaunchedAgent,
+    claude_launch_parameters,
+    requested_model,
+)
 from nbs_agents.catalog import ZMQRun
 from nbs_agents.constants import AGENT_NAME_KEY, AGENT_PARAMETERS_KEY, AGENT_UID_KEY
 from nbs_agents.supervisor import AgentSupervisor, default_registry
@@ -47,6 +53,8 @@ def _open_run(parameters, name="claude", uid="uid-12345678"):
 
 
 class FakeLauncher:
+    command = "claude-beamline"
+
     def __init__(self, fail=None):
         self.fail = fail
         self.on_exit = None
@@ -59,8 +67,10 @@ class FakeLauncher:
             raise self.fail
         self.launched.append((agent_uid, goal, driver))
         self.envs.append(env)
-        process = SimpleNamespace(pid=4242)
-        return LaunchedAgent(agent_uid, process, ["claude-beamline", "--headless"], "/w", "/logs/c.log")
+        process = SimpleNamespace(pid=4242, poll=lambda: 0)
+        return LaunchedAgent(agent_uid, process, ["claude-beamline", "--headless"], "/w", self.log_path)
+
+    log_path = "/logs/c.log"
 
     def terminate(self, agent_uid):
         self.terminated.append(agent_uid)
@@ -95,6 +105,27 @@ class ClaudeLaunchTests(unittest.TestCase):
         self.assertEqual(launcher.envs, [{"NBS_AGENT_OWNER": supervisor.owner["id"]}])
         self.assertEqual(self.log.get("uid-12345678")["runner"], supervisor.owner)
         supervisor.shutdown()
+
+    def test_model_is_recorded_from_the_command_and_the_log(self):
+        launcher = FakeLauncher()
+        launcher.command = "claude-beamline --model opus"
+        with tempfile.TemporaryDirectory() as tmp:
+            launcher.log_path = os.path.join(tmp, "c.log")
+            with open(launcher.log_path, "w") as f:
+                f.write('{"type":"system","subtype":"init","model":"claude-auto"}\n')
+            supervisor = self.make(launcher)
+            supervisor._activate_agent(_open_run({"goal": "g", "launch": True}))
+            self.assertEqual(launcher.envs[0]["NBS_MODEL"], "opus")
+            record = self.log.get("uid-12345678")
+            self.assertEqual((record["model"], record["launch"]["model"]), ("opus", "opus"))
+            self.assertEqual(record["log"][-1]["model"], "opus")
+            # The gateway's answer names the model it served; the exit reads it
+            with open(launcher.log_path, "a") as f:
+                f.write('{"type":"assistant","message":{"model":"claude-opus-5-5","content":[]}}\n')
+            launched = LaunchedAgent("uid-12345678", SimpleNamespace(pid=4242), [], "/w", launcher.log_path)
+            self.hook._on_exit(launched, 0)
+            self.assertEqual(self.log.get("uid-12345678")["served_model"], "claude-opus-5-5")
+            supervisor.shutdown()
 
     def test_no_launch_for_a_block_another_runner_owns(self):
         launcher = FakeLauncher()
@@ -228,6 +259,14 @@ class ClaudeLaunchTests(unittest.TestCase):
         self.assertEqual(entry["kind"], "error")
         self.assertIn("claude_command", entry["text"])
         supervisor.shutdown()
+
+
+class RequestedModelTests(unittest.TestCase):
+    def test_model_flag_forms(self):
+        self.assertIsNone(requested_model(["claude-beamline"]))
+        self.assertEqual(requested_model(["claude-beamline", "--model", "opus"]), "opus")
+        self.assertEqual(requested_model(["x", "--model=haiku", "--model", "sonnet"]), "sonnet")
+        self.assertIsNone(requested_model(["x", "--model"]))
 
 
 class ClaudeLauncherTests(unittest.TestCase):
