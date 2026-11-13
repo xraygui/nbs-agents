@@ -229,7 +229,8 @@ prints JSON (`--text` for people); errors exit 1.
 It never guesses which keys to use. The signal and normalization are each
 settled by the first of: `--signal`/`--norm`; a `[reduce.defaults.<plan or
 scantype>]` rule whose `when` matches the run's baseline at its start; the
-`[nbs_cli]` `signal`/`norm`; the run's hints (the one hinted key with the
+detector roles the run recorded (nbs-bl's `plot_hints`: `primary`,
+`normalization`, `reference`); the `[nbs_cli]` `signal`/`norm`; the run's hints (the one hinted key with the
 `intensity_detector` role is the normalization, and the one hinted detector left
 besides it and the `reference` key is the signal). Otherwise it exits 3 with
 `"ambiguous": true` and the candidates.

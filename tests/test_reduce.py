@@ -354,3 +354,33 @@ def test_no_queue_or_zmq_imports():
             "print(bad)")
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=os.environ, check=True)
     assert out.stdout.strip() == "[]"
+
+
+def test_recorded_plot_hints_roles_come_after_rules_and_before_nbs_cli():
+    data = {k: np.arange(10.0) for k in ("x", "sc", "i0", "ref", "diode")}
+    run = FakeRun(data, hinted=["sc", "i0", "ref", "diode"])
+    run.start["plot_hints"] = {"primary": ["diode"], "normalization": ["i0"], "reference": ["ref"],
+                               "auxiliary": ["sc"]}
+    keys = resolve_keys(run, ReduceConfig(), beamline_signal="sc", beamline_norm="ref")
+    assert keys["signal"] == ["diode"] and keys["norm"] == "i0"
+    assert keys["reasons"]["signal"] == "the run's plot_hints: primary"
+    config = ReduceConfig.from_table({"defaults": {"scan": {"signal": ["sc"], "norm": "i0"}}})
+    assert resolve_keys(run, config)["signal"] == ["sc"]
+
+
+def test_old_runs_with_only_auxiliary_plot_hints_fall_through():
+    data = {k: np.arange(10.0) for k in ("x", "sc", "i0", "ref")}
+    run = FakeRun(data, hinted=["sc", "i0", "ref"])
+    run.start["plot_hints"] = {"auxiliary": ["i0", "ref", "sc"]}
+    with pytest.raises(Ambiguous):
+        resolve_keys(run, ReduceConfig())
+    keys = resolve_keys(run, ReduceConfig(), beamline_signal="sc", beamline_norm="i0")
+    assert keys["reasons"]["signal"] == "[nbs_cli] signal"
+
+
+def test_recorded_reference_is_never_a_hinted_signal():
+    data = {k: np.arange(10.0) for k in ("x", "sc", "i0", "ref")}
+    run = FakeRun(data, hinted=["sc", "i0", "ref"])
+    run.start["plot_hints"] = {"normalization": ["i0"], "reference": ["ref"]}
+    keys = resolve_keys(run, ReduceConfig())
+    assert keys["signal"] == ["sc"] and keys["norm"] == "i0"

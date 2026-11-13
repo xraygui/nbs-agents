@@ -7,8 +7,11 @@ each on its own, by the first of:
 1. the caller (``--signal``, ``--norm``);
 2. a ``[reduce.defaults.<plan or scantype>]`` rule whose ``when`` matches the
    run's baseline at its start;
-3. the beamline-wide ``signal`` / ``norm`` of ``[nbs_cli]``;
-4. the run's hints: the normalization is the one hinted key whose device has
+3. the roles the run recorded: nbs-bl writes the active detector set's
+   ``primary``, ``normalization`` and ``reference`` detectors into the start
+   document's ``plot_hints``;
+4. the beamline-wide ``signal`` / ``norm`` of ``[nbs_cli]``;
+5. the run's hints: the normalization is the one hinted key whose device has
    the ``intensity_detector`` role, and the signal the one hinted detector
    left once that, the energy reference and the axes are set aside.
 
@@ -112,14 +115,18 @@ def describe_keys(run: Run, config: ReduceConfig, devices: Optional[dict[str, An
     Returns
     -------
     dict
-        ``{key: {"role", "hinted", "desc", "device_roles", "units", "shape", "check"}}``.
+        ``{key: {"role", "hinted", "plot_role", "desc", "device_roles", "units",
+        "shape", "check"}}``; ``plot_role`` is the role the run recorded for it.
     """
     devices = devices if devices is not None else {}
+    recorded = {k: role for role, keys in recorded_roles(run).items() for k in keys}
     out = {}
     for key, info in run.data_keys.items():
         device = info.get("object_name") or key
         static = devices.get(device) or devices.get(key) or {}
         entry: dict[str, Any] = {"role": run.role(key), "hinted": key in run.hinted}
+        if key in recorded:
+            entry["plot_role"] = recorded[key]
         if key.endswith("_setpoint"):
             entry["setpoint"] = True
         if device != key:
@@ -246,6 +253,10 @@ def resolve_keys(
                 reasons["signal"] = rule_text
                 return list(rule["signal"])
             reasons["signal_skipped"] = f"{rule_text} names {', '.join(missing)}, not in this run"
+        primary = [k for k in plot_roles.get("primary", []) if k in present]
+        if primary:
+            reasons["signal"] = "the run's plot_hints: primary"
+            return primary
         if beamline_signal and beamline_signal in present:
             reasons["signal"] = "[nbs_cli] signal"
             return [beamline_signal]
@@ -260,6 +271,10 @@ def resolve_keys(
                 reasons["norm"] = rule_text
                 return True, rule["norm"]
             reasons["norm_skipped"] = f"{rule_text} names {rule['norm']}, not in this run"
+        normalization = [k for k in plot_roles.get("normalization", []) if k in present]
+        if len(normalization) == 1:
+            reasons["norm"] = "the run's plot_hints: normalization"
+            return True, normalization[0]
         if beamline_norm and beamline_norm in present:
             reasons["norm"] = "[nbs_cli] norm"
             return True, beamline_norm
@@ -269,12 +284,14 @@ def resolve_keys(
             return True, hinted_norm[0]
         return False, None
 
+    plot_roles = recorded_roles(run)
     signal_keys = settle_signal()
     norm_known, norm_key = settle_norm()
     axes = set(run.dimensions)
     candidates = [
         k for k in (run.hinted or sorted(present))
         if k in present and k not in axes and k != norm_key and k != reference
+        and k not in plot_roles.get("reference", [])
         and run.role(k) == "detector" and not k.endswith("_setpoint")
     ]
     if signal_keys is None and len(candidates) == 1 and norm_known:
@@ -301,6 +318,24 @@ def resolve_keys(
         "x": run.dimensions[0] if run.dimensions else None,
         "reasons": reasons,
     }
+
+
+def recorded_roles(run: Run) -> dict[str, list[str]]:
+    """
+    Detector roles the run recorded in its start document's ``plot_hints``
+    (``{"primary": [...], "normalization": [...], "reference": [...]}``);
+    empty when it has none. ``auxiliary`` alone says nothing, so it is dropped.
+    """
+    hints = run.start.get("plot_hints")
+    if not isinstance(hints, dict):
+        return {}
+    out = {}
+    for role in ("primary", "normalization", "reference"):
+        keys = hints.get(role) or []
+        keys = [keys] if isinstance(keys, str) else [k for k in keys if isinstance(k, str)]
+        if keys:
+            out[role] = keys
+    return out
 
 
 def _roles(run: Run, key: str, devices: dict[str, Any]) -> list[str]:

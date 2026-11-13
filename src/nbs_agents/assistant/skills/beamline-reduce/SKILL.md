@@ -16,7 +16,8 @@ Detector names differ between beamlines and scans, and the main detector can
 be blocked (a screen or foil in the beam). So nbs-reduce settles the signal and
 normalization from, in order: your `--signal` / `--norm`; the beamline's
 `[reduce.defaults]` rules for the plan (which can depend on the recorded beam
-state); the beamline's default keys; the run's hints. If none settles them, it
+state); the detector roles the run recorded (`plot_role` in `keys`); the
+beamline's default keys; the run's hints. If none settles them, it
 exits with status 3 and `"ambiguous": true` plus the candidates. Then choose
 from `keys` and pass them explicitly. Every output says which keys it used and
 why (`keys.reasons`); repeat that when you report a result.
