@@ -34,7 +34,8 @@ from nbs_agents.constants import (
 )
 from ..queue import close_agent_owner, describe_owner
 from ..beamline_info import DEVICES, METADATA, SAMPLES, BeamlineInfo, load_beamline_info
-from .config import CliConfig
+from .config import ASSISTANT_ROLE, AssistantConfig, CliConfig, RoleConfig
+from ..tiles import TileError, TileStore, acknowledge
 from ..reduce.metrics import SummaryContext, summarize
 
 LOGGER = logging.getLogger(__name__)
@@ -71,6 +72,38 @@ def writer_refs() -> dict[str, Any]:
         except (KeyError, ValueError):
             pass
     return out
+
+
+def parse_since(text: str, now: float) -> float:
+    """
+    A start time from ``HH:MM`` or ``HH:MM:SS`` (today, local), epoch
+    seconds, or an age such as ``30m``, ``2h`` or ``90s``.
+
+    Raises
+    ------
+    CliError
+        For anything else.
+    """
+    text = str(text).strip()
+    units = {"s": 1, "m": 60, "h": 3600}
+    if text[-1:] in units:
+        try:
+            return now - float(text[:-1]) * units[text[-1]]
+        except ValueError:
+            pass
+    if text.count(":") in (1, 2):
+        fmt = "%H:%M:%S" if text.count(":") == 2 else "%H:%M"
+        try:
+            clock = time.strptime(text, fmt)
+        except ValueError:
+            pass
+        else:
+            day = time.localtime(now)
+            return time.mktime((day.tm_year, day.tm_mon, day.tm_mday, clock.tm_hour, clock.tm_min, clock.tm_sec, 0, 0, -1))
+    try:
+        return float(text)
+    except ValueError:
+        raise CliError(f"--since takes HH:MM, HH:MM:SS, epoch seconds or an age like 30m or 2h, not {text!r}") from None
 
 
 def refuse_read_only(config: CliConfig, verb: str) -> None:
@@ -248,12 +281,14 @@ class Beamline:
         Connection settings. Loaded from the environment if omitted.
     """
 
-    def __init__(self, config: Optional[CliConfig] = None) -> None:
-        self.config = config or CliConfig.load()
+    def __init__(self, config: Optional[CliConfig] = None, config_path: Optional[str] = None) -> None:
+        self.config = config or CliConfig.load(config_path)
+        self.config_path = config_path
         self._manager = None
         self._tiled = None
         self._info = None
         self._agent_log = None
+        self._assistant = None
 
     # ------------------------------------------------------------------ clients
 
@@ -290,6 +325,16 @@ class Beamline:
         if self._info is None:
             self._info = load_beamline_info(self)
         return self._info
+
+    @property
+    def assistant(self) -> AssistantConfig:
+        """The ``[assistant]`` settings, for its roles."""
+        if self._assistant is None:
+            try:
+                self._assistant = AssistantConfig.load(self.config_path)
+            except ValueError as exc:
+                raise CliError(f"bad [assistant] settings: {exc}") from exc
+        return self._assistant
 
     @property
     def agent_log(self) -> AgentLog:
@@ -1886,35 +1931,229 @@ class Beamline:
             raise CliError(str(exc)) from exc
         return {"agent_uid": uid, "entry": entry}
 
-    def post(self, kind: str, text: str, runs: Optional[list[str]] = None) -> dict[str, Any]:
+    def _own_role(self) -> RoleConfig:
         """
-        Post to the assistant's own record for today.
+        The assistant role this client posts for: the headless role
+        ``NBS_CLI_ROLE=assistant:NAME`` names, else the chat role.
+        """
+        roles = self.assistant.resolved_roles()
+        name = self.config.assistant_role
+        if name is None:
+            return next(r for r in roles.values() if r.chat)
+        role = roles.get(name)
+        if role is None or role.chat:
+            raise CliError(f"{name!r} is not a headless role in [assistant.roles] (roles: {sorted(roles)})")
+        return role
+
+    def _role_record(self, role: RoleConfig) -> str:
+        return self.agent_log.ensure_assistant_record(role=None if role.chat else role.name)
+
+    def post(
+        self,
+        kind: Optional[str],
+        text: str,
+        runs: Optional[list[str]] = None,
+        tile: bool = False,
+        severity: Optional[str] = None,
+        figure: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """
+        Post to the assistant role's own record for today, or to its tile.
+
+        A headless role (``NBS_CLI_ROLE=assistant:NAME``) writes its own
+        record and tile; the chat role writes today's main assistant record.
+        Each may post only where its ``sinks`` allow.
 
         Parameters
         ----------
-        kind : {"summary", "advice", "alert", "answer"}
-            Entry kind.
+        kind : {"summary", "advice", "alert", "answer"} or None
+            Entry kind; None with ``tile``.
         text : str
             What to tell the operator.
         runs : list of str, optional
             UIDs of the runs the post is about.
+        tile : bool, optional
+            Post to the role's tile instead (logged as a ``tile`` entry).
+        severity : {"ok", "info", "warn", "alert"}, optional
+            The tile's severity; needed with ``tile``. An alert stays on the
+            tile until a person acknowledges it.
+        figure : str, optional
+            The tile's figure, as ``att:ID`` from ``nbs-cli attach``.
 
         Returns
         -------
         dict
-            The log entry, with ``agent_uid``.
+            The log entry, with ``agent_uid`` (and ``tile`` for a tile post).
         """
         if not self.config.read_only:
             raise CliError("post is only for the assistant role (NBS_CLI_ROLE=assistant or --role assistant)")
-        if kind not in ASSISTANT_POST_KINDS:
-            raise CliError(f"unknown post kind {kind!r}; use one of {list(ASSISTANT_POST_KINDS)}")
         if not text or not text.strip():
             raise CliError("post text is required")
-        uid = self.agent_log.ensure_assistant_record()
+        role = self._own_role()
+        refs = writer_refs()
+        source = ASSISTANT_ROLE if role.chat else f"{ASSISTANT_ROLE}:{role.name}"
+        if tile:
+            if "tile" not in role.sinks:
+                raise CliError(f"the {role.name} role has no tile (its sinks are {role.sinks})")
+            try:
+                written = TileStore.for_agent_log(self.agent_log).post(
+                    role.name, severity or "", text, run_uids=runs, figure=figure, model=refs.get("model"),
+                )
+            except TileError as exc:
+                raise CliError(str(exc)) from exc
+            uid = self._role_record(role)
+            entry = self.agent_log.append(
+                uid, "tile", text.strip(), source=source, severity=severity,
+                run_uids=list(runs or []) or None, figure=figure or None, **refs,
+            )
+            return {"agent_uid": uid, **entry, "tile": written}
+        if "record" not in role.sinks:
+            raise CliError(f"the {role.name} role posts only to its tile (its sinks are {role.sinks}); use --tile")
+        if kind not in ASSISTANT_POST_KINDS:
+            raise CliError(f"unknown post kind {kind!r}; use one of {list(ASSISTANT_POST_KINDS)}")
+        uid = self._role_record(role)
         entry = self.agent_log.append(
-            uid, kind, text.strip(), source="assistant", run_uids=list(runs or []) or None, **writer_refs()
+            uid, kind, text.strip(), source=source, run_uids=list(runs or []) or None, **refs
         )
         return {"agent_uid": uid, **entry}
+
+    def ack(self, role: str, by: Optional[str] = None) -> dict[str, Any]:
+        """
+        Acknowledge an assistant role's alert, as a person; it is logged in
+        the role's record.
+
+        Parameters
+        ----------
+        role : str
+            The role whose tile holds the alert.
+        by : str, optional
+            Who acknowledges; the login name if omitted.
+
+        Returns
+        -------
+        dict
+            ``agent_uid`` (where it was logged), ``tile`` and ``entry``.
+        """
+        if self.config.is_assistant or os.environ.get("NBS_AGENT_UID") or os.environ.get("NBS_DRIVER"):
+            raise CliError("only a person acknowledges an alert; an agent can mention it in a post instead")
+        roles = self.assistant.resolved_roles()
+        if role not in roles and TileStore.for_agent_log(self.agent_log).get(role) is None:
+            raise CliError(f"no role {role!r} (roles: {sorted(roles)})")
+        if not by:
+            import getpass
+
+            by = getpass.getuser()
+        try:
+            return acknowledge(self.agent_log, role, by, source="nbs-cli", chat=role in roles and roles[role].chat)
+        except TileError as exc:
+            raise CliError(str(exc)) from exc
+
+    def _refuse_unless_chat(self, verb: str) -> None:
+        if not self.config.read_only or self.config.assistant_role is not None:
+            raise CliError(
+                f"role {verb} is for the assistant's chat role (the manager: NBS_CLI_ROLE=assistant or --role assistant)"
+            )
+
+    def _named_role(self, name: str) -> RoleConfig:
+        roles = self.assistant.resolved_roles()
+        if name not in roles:
+            raise CliError(f"no role {name!r} (roles: {sorted(roles)})")
+        return roles[name]
+
+    def role_list(self) -> dict[str, Any]:
+        """
+        Every assistant role with its settings, tile and status.
+
+        Returns
+        -------
+        dict
+            ``{name: {mode, skill, models, triggers, sinks, record, status, tile}}``.
+        """
+        self._refuse_unless_chat("list")
+        tiles = TileStore.for_agent_log(self.agent_log)
+        out = {}
+        for role in self.assistant.resolved_roles().values():
+            uid = assistant_uid(role=None if role.chat else role.name)
+            record = self.agent_log.get(uid) or {}
+            out[role.name] = {
+                "mode": role.mode, "skill": role.skill, "models": [role.model, role.alert_model],
+                "triggers": role.triggers, "sinks": role.sinks, "record": uid,
+                "status": record.get("status"), "tile": tiles.get(role.name),
+            }
+        return out
+
+    def role_show(self, name: str, since: Optional[str] = None, tail: int = 20) -> dict[str, Any]:
+        """
+        A role's tile, its record for today and its notebook (as of its last call).
+
+        Parameters
+        ----------
+        name : str
+            The role.
+        since : str, optional
+            Only entries from then on: ``HH:MM``, ``HH:MM:SS``, epoch seconds,
+            or an age such as ``30m`` or ``2h``.
+        tail : int, optional
+            Most entries; 0 for all.
+
+        Returns
+        -------
+        dict
+            ``role``, its settings, ``record``, ``status``, ``last_call``,
+            ``tile``, ``entries`` and ``notebook``.
+        """
+        self._refuse_unless_chat("show")
+        role = self._named_role(name)
+        uid = assistant_uid(role=None if role.chat else role.name)
+        record = self.agent_log.get(uid) or {}
+        entries = record.get("log") or []
+        if since:
+            start = parse_since(since, time.time())
+            entries = [e for e in entries if (e.get("t") or 0) >= start]
+        if tail:
+            entries = entries[-tail:]
+        return {
+            "role": role.name, "mode": role.mode, "skill": role.skill, "models": [role.model, role.alert_model],
+            "triggers": role.triggers, "sinks": role.sinks, "record": uid, "status": record.get("status"),
+            "last_call": record.get("last_call"), "tile": TileStore.for_agent_log(self.agent_log).get(role.name),
+            "entries": entries,
+            "notebook": "(your own notebook folder)" if role.chat else record.get("notebook"),
+        }
+
+    def role_request(self, name: str, text: str, runs: Optional[list[str]] = None) -> dict[str, Any]:
+        """
+        Ask a headless role to do something with its own tools and prompt.
+
+        The runner gives the request to the role in its next call and passes
+        the role's answer back to today's main assistant record as a
+        ``reply`` entry, which starts a call of the chat role.
+
+        Parameters
+        ----------
+        name : str
+            A headless role.
+        text : str
+            The request.
+        runs : list of str, optional
+            Run uids it is about.
+
+        Returns
+        -------
+        dict
+            ``agent_uid`` (the role's record) and the ``request`` entry.
+        """
+        self._refuse_unless_chat("request")
+        role = self._named_role(name)
+        if role.chat:
+            raise CliError(f"{name} is the chat role itself; requests go to headless roles")
+        if not text or not text.strip():
+            raise CliError("request text is required")
+        uid = self._role_record(role)
+        entry = self.agent_log.append(
+            uid, "request", text.strip(), source=ASSISTANT_ROLE, reply_to=assistant_uid(),
+            run_uids=list(runs or []) or None, **writer_refs(),
+        )
+        return {"agent_uid": uid, "entry": entry, "note": f"the {name} role's answer will come back as a reply entry"}
 
     def note(self, text: str, agent_uid: Optional[str] = None) -> dict[str, Any]:
         """

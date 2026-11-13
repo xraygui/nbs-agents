@@ -49,6 +49,13 @@ Posts also carry ``call`` (the number of the call that wrote them). An
 second look at the post at time ``t``, and the posts that call writes carry
 ``recheck_of``. The record's ``models`` holds the configured ``routine`` and
 ``alert`` models and ``call_events`` the events behind recent calls.
+
+With ``[assistant.roles]``, that record belongs to the chat role and each
+headless role keeps its own, ``assistant-ROLE-YYYYMMDD`` (top-level ``role``).
+A ``request`` entry there (``nbs-cli role request``) asks the role for
+something, and ``request_read`` marks the newest one the runner has taken; the
+role's answer comes back to the main record as a ``reply`` entry. ``ack``
+entries log people acknowledging the role's tile (``nbs_agents.tiles``).
 Driver agents never see these records.
 """
 
@@ -67,7 +74,7 @@ ASSISTANT_KIND = "assistant"
 ASSISTANT_POST_KINDS = ("summary", "advice", "alert", "answer")
 
 
-def assistant_uid(t: Optional[float] = None) -> str:
+def assistant_uid(t: Optional[float] = None, role: Optional[str] = None) -> str:
     """
     UID of the assistant's record for the local day containing ``t``.
 
@@ -75,13 +82,17 @@ def assistant_uid(t: Optional[float] = None) -> str:
     ----------
     t : float, optional
         Epoch seconds; now if omitted.
+    role : str, optional
+        A headless assistant role, for its own record; None for the main
+        record the chat role writes.
 
     Returns
     -------
     str
-        ``"assistant-YYYYMMDD"``.
+        ``"assistant-YYYYMMDD"``, or ``"assistant-ROLE-YYYYMMDD"``.
     """
-    return f"{ASSISTANT_NAME}-{time.strftime('%Y%m%d', time.localtime(t))}"
+    day = time.strftime('%Y%m%d', time.localtime(t))
+    return f"{ASSISTANT_NAME}-{role}-{day}" if role else f"{ASSISTANT_NAME}-{day}"
 
 
 def is_assistant_record(record: Optional[dict[str, Any]], agent_uid: str = "") -> bool:
@@ -588,7 +599,7 @@ class AgentLog:
         recheck = {"t": post["t"], "model": model or None, "note": text.strip() or None}
         return self.append(agent_uid, "operator", message, source=source, recheck=recheck)
 
-    def ensure_assistant_record(self, t: Optional[float] = None, **fields: Any) -> str:
+    def ensure_assistant_record(self, t: Optional[float] = None, role: Optional[str] = None, **fields: Any) -> str:
         """
         Create the assistant's record for the day containing ``t`` if missing.
 
@@ -596,6 +607,8 @@ class AgentLog:
         ----------
         t : float, optional
             Epoch seconds; now if omitted.
+        role : str, optional
+            A headless role, for its own record (``assistant_uid``).
         **fields
             Top-level fields for a new record.
 
@@ -604,13 +617,15 @@ class AgentLog:
         str
             The record's UID.
         """
-        uid = assistant_uid(t)
+        uid = assistant_uid(t, role)
         if self.get(uid) is None:
             fields.setdefault("status", "idle")
+            if role:
+                fields.setdefault("role", role)
             self.open(
                 uid,
                 ASSISTANT_NAME,
-                goal="Read-only beamline assistant",
+                goal=f"Read-only beamline assistant, {role} role" if role else "Read-only beamline assistant",
                 kind=ASSISTANT_KIND,
                 calls=0,
                 **fields,
@@ -645,6 +660,40 @@ class AgentLog:
         if unread_operator_entries(self.get(agent_uid) or {}):
             self._modify(agent_uid, update)
         return unread
+
+    def take_requests(self, agent_uid: str) -> list[dict[str, Any]]:
+        """
+        Return the ``request`` entries of a role's record the runner has not
+        taken yet, and mark them taken (``request_read``).
+
+        Parameters
+        ----------
+        agent_uid : str
+            A headless role's record.
+
+        Returns
+        -------
+        list of dict
+            New requests, oldest first.
+        """
+        taken: list[dict[str, Any]] = []
+
+        def new(record):
+            seen = record.get("request_read") or 0
+            return [e for e in record.get("log") or [] if e.get("kind") == "request" and (e.get("t") or 0) > seen]
+
+        def update(record):
+            taken.clear()
+            if record is None:
+                return {"agent_uid": agent_uid, "status": "unknown", "log": []}
+            taken.extend(new(record))
+            if taken:
+                record["request_read"] = taken[-1]["t"]
+            return record
+
+        if new(self.get(agent_uid) or {}):
+            self._modify(agent_uid, update)
+        return taken
 
 
 def find_assistant_post(record: dict[str, Any], about: Any) -> dict[str, Any]:

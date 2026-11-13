@@ -7,18 +7,35 @@ runner's assistant reads the ``[assistant]`` table of the same file.
 """
 
 import os
-from dataclasses import dataclass, field, fields
+import re
+from dataclasses import dataclass, field, fields, replace
 from typing import Any, Optional
 
 from nbs_agents.config import AGENT_LOG_TABLE, AgentLogConfig, AgentsConfig, plugin_defaults, read_config_file  # noqa: F401
 from nbs_agents.paths import paths
 
 ASSISTANT_TABLE = "assistant"
+ROLES_TABLE = "roles"
 REFERENCES_TABLE = "references"
 DEFAULT_CATALOG = "default"
 DRIVER_ROLE = "driver"
 ASSISTANT_ROLE = "assistant"
 ROLES = (DRIVER_ROLE, ASSISTANT_ROLE)
+# A headless assistant role's nbs-cli role is "assistant:NAME"
+ASSISTANT_ROLE_PREFIX = f"{ASSISTANT_ROLE}:"
+
+# [assistant.roles.NAME]
+ROLE_MODES = ("headless", "chat")
+ROLE_SINKS = ("tile", "record")
+# Events that triage and the timers raise; each goes to the one role whose
+# ``triggers`` name it. Operator questions, re-checks and the replies to a
+# ``role request`` always go to the chat role, and a request to the role it names.
+ROLE_TRIGGERS = ("run", "alert", "flag", "group_end", "checkin")
+# What today's single assistant reacts to, and what the chat role takes by default
+DEFAULT_TRIGGERS = ("alert", "flag", "group_end", "checkin")
+# The chat role when no [assistant.roles] are configured
+DEFAULT_CHAT_ROLE = "manager"
+ROLE_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 
 
 @dataclass
@@ -169,14 +186,42 @@ class CliConfig(AgentsConfig):
         config.ref_catalogs = read_catalogs(read_config_file(path).get(REFERENCES_TABLE))
         if os.environ.get("NBS_CLI_ROLE"):
             config.role = os.environ["NBS_CLI_ROLE"]
-        if config.role not in ROLES:
-            raise ValueError(f"Unknown nbs-cli role {config.role!r}; use one of {list(ROLES)}")
+        check_cli_role(config.role)
         return config
 
     @property
     def read_only(self) -> bool:
-        """Whether this client may only read: the assistant role, or any role with drivers off."""
-        return self.role == ASSISTANT_ROLE or not self.drivers
+        """Whether this client may only read: an assistant role, or any role with drivers off."""
+        return self.is_assistant or not self.drivers
+
+    @property
+    def is_assistant(self) -> bool:
+        """Whether this client is the assistant: its chat role or one of its headless roles."""
+        return self.role == ASSISTANT_ROLE or self.role.startswith(ASSISTANT_ROLE_PREFIX)
+
+    @property
+    def assistant_role(self) -> Optional[str]:
+        """The headless assistant role this client acts for (``assistant:NAME``), or None."""
+        if self.role.startswith(ASSISTANT_ROLE_PREFIX):
+            return self.role[len(ASSISTANT_ROLE_PREFIX):]
+        return None
+
+
+def check_cli_role(role: str) -> None:
+    """
+    Check an nbs-cli role: ``driver``, ``assistant`` (the assistant's chat
+    role) or ``assistant:NAME`` (one of its headless roles).
+
+    Raises
+    ------
+    ValueError
+        For anything else.
+    """
+    if role in ROLES:
+        return
+    if role.startswith(ASSISTANT_ROLE_PREFIX) and ROLE_NAME_RE.match(role[len(ASSISTANT_ROLE_PREFIX):]):
+        return
+    raise ValueError(f"Unknown nbs-cli role {role!r}; use one of {list(ROLES)} or assistant:NAME")
 
 
 def read_catalogs(table: Optional[dict[str, Any]]) -> dict[str, dict[str, str]]:
@@ -216,10 +261,126 @@ def read_catalogs(table: Optional[dict[str, Any]]) -> dict[str, dict[str, str]]:
 
 
 @dataclass
+class RoleConfig:
+    """
+    One assistant role, from an ``[assistant.roles.NAME]`` table.
+
+    Attributes
+    ----------
+    name : str
+        The role's name: lower case letters, digits and ``_``.
+    mode : {"headless", "chat"}
+        ``chat`` is the one role people talk to (the manager): it gets the
+        operator's questions and re-checks and writes today's main assistant
+        record. ``headless`` roles have no chat; they write a tile and their
+        own record, ``assistant-NAME-YYYYMMDD``.
+    skill : str
+        Skill (under ``nbs_agents/assistant/skills``) put in the role's system prompt.
+    model, alert_model : str
+        Models for routine events, and for alerts, questions, re-checks and
+        requests; empty for the ``[assistant]`` ones.
+    triggers : list of str or None
+        Events the role reacts to (``ROLE_TRIGGERS``). No two roles may share
+        one. None for the chat role means every default trigger no headless
+        role takes; for a headless role, none (it only answers requests).
+    sinks : list of str or None
+        Where the role may post: ``tile`` (``nbs-cli post --tile``) and
+        ``record`` (``nbs-cli post --kind``). None for ``["record"]`` on the
+        chat role and ``["tile", "record"]`` on a headless one.
+    workdir : str
+        The role's working folder; empty for ``[assistant] workdir`` (chat
+        role) or that folder with ``-NAME`` added (headless roles).
+    """
+
+    name: str
+    mode: str = "headless"
+    skill: str = "beamline-assistant"
+    model: str = ""
+    alert_model: str = ""
+    triggers: Optional[list[str]] = None
+    sinks: Optional[list[str]] = None
+    workdir: str = ""
+
+    @property
+    def chat(self) -> bool:
+        return self.mode == "chat"
+
+
+def read_roles(table: Optional[dict[str, Any]]) -> dict[str, RoleConfig]:
+    """
+    Check the ``[assistant.roles]`` tables.
+
+    Parameters
+    ----------
+    table : dict or None
+        ``{name: {mode, skill, model, alert_model, triggers, sinks, workdir}}``.
+
+    Returns
+    -------
+    dict
+        ``{name: RoleConfig}``, as written (defaults are filled by
+        ``AssistantConfig.resolved_roles``).
+
+    Raises
+    ------
+    ValueError
+        On a bad name or setting, unless exactly one role is ``chat``, or when
+        two roles share a trigger.
+    """
+    out: dict[str, RoleConfig] = {}
+    known = {f.name for f in fields(RoleConfig)} - {"name"}
+    for name, values in (table or {}).items():
+        where = f"[assistant.roles.{name}]"
+        if not ROLE_NAME_RE.match(name):
+            raise ValueError(f"{where}: role names are lower case letters, digits and _ (at most 32)")
+        if not isinstance(values, dict):
+            raise ValueError(f"{where} must be a table")
+        unknown = set(values) - known
+        if unknown:
+            raise ValueError(f"Unknown {where} settings: {sorted(unknown)}")
+        role = RoleConfig(name=name, **values)
+        if role.mode not in ROLE_MODES:
+            raise ValueError(f"{where} mode must be one of {list(ROLE_MODES)}, not {role.mode!r}")
+        for setting, allowed in (("triggers", ROLE_TRIGGERS), ("sinks", ROLE_SINKS)):
+            value = getattr(role, setting)
+            if value is None:
+                continue
+            if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+                raise ValueError(f"{where} {setting} must be a list of names")
+            bad = sorted(set(value) - set(allowed))
+            if bad:
+                hint = ""
+                if setting == "triggers":
+                    hint = " (questions, re-checks and replies always go to the chat role)"
+                raise ValueError(f"{where} unknown {setting} {bad}; use {list(allowed)}{hint}")
+        out[name] = role
+    if not out:
+        return out
+    chat = [r.name for r in out.values() if r.chat]
+    if len(chat) != 1:
+        raise ValueError(f"[assistant.roles] need exactly one role with mode = \"chat\", not {chat or 'none'}")
+    owner: dict[str, str] = {}
+    for role in out.values():
+        for trigger in role.triggers or []:
+            if trigger in owner:
+                raise ValueError(
+                    f"[assistant.roles] {owner[trigger]} and {role.name} both have trigger {trigger!r}; "
+                    "each event goes to exactly one role"
+                )
+            owner[trigger] = role.name
+    return out
+
+
+@dataclass
 class AssistantConfig:
     """
     Settings for the runner's read-only beamline assistant, from the
     ``[assistant]`` table of the nbs-cli TOML file.
+
+    Roles (``[assistant.roles.NAME]``, see ``RoleConfig``) split the
+    assistant into one chat role and headless roles that each take their own
+    events. Without any, the assistant is one chat role, ``manager``, with
+    the settings below: the assistant as it was before roles.
 
     Attributes
     ----------
@@ -255,6 +416,8 @@ class AssistantConfig:
         Most characters of each part of the snapshot (beamline state, the
         assistant's recent record, its notebook) put into every call's prompt;
         0 for no snapshot.
+    roles : dict
+        ``{name: RoleConfig}`` from ``[assistant.roles]``; empty for one chat role.
     """
 
     enabled: bool = False
@@ -272,6 +435,43 @@ class AssistantConfig:
     poll_s: float = 5.0
     call_timeout_s: float = 900.0
     snapshot_chars: int = 12000
+    roles: dict[str, RoleConfig] = field(default_factory=dict)
+
+    def resolved_roles(self) -> dict[str, RoleConfig]:
+        """
+        Every role with its defaults filled in, the chat role first.
+
+        Returns
+        -------
+        dict
+            ``{name: RoleConfig}``; ``{"manager": ...}`` with today's single
+            assistant's settings when no roles are configured.
+        """
+        roles = self.roles or {DEFAULT_CHAT_ROLE: RoleConfig(DEFAULT_CHAT_ROLE, mode="chat")}
+        taken = {t for r in roles.values() if not r.chat for t in r.triggers or []}
+        out = {}
+        for role in sorted(roles.values(), key=lambda r: not r.chat):
+            if role.chat:
+                triggers = role.triggers if role.triggers is not None else [t for t in DEFAULT_TRIGGERS if t not in taken]
+                sinks = role.sinks if role.sinks is not None else ["record"]
+                workdir = role.workdir or self.workdir
+            else:
+                triggers = list(role.triggers or [])
+                sinks = role.sinks if role.sinks is not None else ["tile", "record"]
+                workdir = role.workdir or f"{self.workdir.rstrip('/')}-{role.name}"
+            out[role.name] = replace(
+                role,
+                model=role.model or self.model,
+                alert_model=role.alert_model or self.alert_model,
+                triggers=list(triggers),
+                sinks=list(sinks),
+                workdir=workdir,
+            )
+        return out
+
+    def chat_role(self) -> RoleConfig:
+        """The chat role, with its defaults filled in."""
+        return next(r for r in self.resolved_roles().values() if r.chat)
 
     @classmethod
     def load(cls, path: Optional[str] = None) -> "AssistantConfig":
@@ -295,4 +495,6 @@ class AssistantConfig:
         if unknown:
             raise ValueError(f"Unknown [assistant] settings: {sorted(unknown)}")
         defaults = {k: v for k, v in plugin_defaults(ASSISTANT_TABLE).items() if k in known}
-        return cls(**{**defaults, **values})
+        merged = {**defaults, **values}
+        merged[ROLES_TABLE] = read_roles(merged.get(ROLES_TABLE))
+        return cls(**merged)

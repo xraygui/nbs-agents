@@ -53,6 +53,8 @@ and say what you could not check.
 | `kb search WORDS`, `kb show ID`, `kb add [--draft]`, `kb append ID` | The beamline knowledge base: hardware, known problems, calibrations, quirks. You may add notes and append to any note; human notes are append-only. When staff ask for help writing a note, interview them and save a draft. See the beamline-knowledge skill. |
 | `ref search WORDS`, `ref list [--device D]`, `ref show ID`, `ref create RUN --title T --file F`, `ref edit ID`, `ref catalogs` | Engineering reference scans: past runs that show part of the beamline working. A reference shows a past state, never the current one. You only write drafts. See the beamline-knowledge skill. |
 | `run UID --attach [--alt "..."]`, `attach FILE --alt "..." [--run UID]` | Store a figure (nbs-cli keeps it in its own store, not your workdir) and get the `![alt](att:ID)` link to put in a post. |
+| `post --tile --severity ok\|info\|warn\|alert --file notebook/tile.md [--figure att:ID]` | Headless roles only (the prompt says so): your one- or two-line tile beside every page. An alert stays on the tile until a person acknowledges it, even after you post ok, so alert only when someone must act. |
+| `role list`, `role show NAME [--since 30m]`, `role request NAME "..."` | When other assistant roles run beside you (health, integrity, plotter): read a role's tile, record and notebook first; file a request only when you need its own tools (a re-plot, a re-check). Its answer comes back to your record as a `reply` entry and starts a new call. Only you, the chat role, have these. |
 
 You may run `sandbox-python` (numpy, scipy, matplotlib) for quick analysis of
 `nbs-cli` JSON: fetch the data first with

@@ -10,7 +10,9 @@
 #   claude-beamline --headless   unattended: claude -p, stream-json to stdout
 #   claude-beamline --headless --role assistant
 #                                one read-only beamline-assistant call; the runner
-#                                passes the triggering events in NBS_ASSISTANT_PROMPT
+#                                passes the triggering events in NBS_ASSISTANT_PROMPT,
+#                                and for a headless role NBS_CLI_ROLE=assistant:NAME
+#                                and its skill in NBS_ASSISTANT_SKILL
 #
 # Extra arguments are passed to claude. NBS_CLI_CONFIG selects the nbs-cli config
 # (default config/nbs-cli.toml under $NBS_AGENTS_HOME). Run it from the folder you want the agent to
@@ -233,18 +235,22 @@ case "$role" in
         ;;
     assistant)
         # Read-only: nbs-cli refuses every verb that changes the queue or a driver's session.
-        export NBS_CLI_ROLE=assistant
+        # The chat role is "assistant", a headless role "assistant:NAME" (set by the runner)
+        [[ "${NBS_CLI_ROLE:-}" == assistant:* ]] || export NBS_CLI_ROLE=assistant
         unset NBS_AGENT_UID NBS_AGENT_GOAL NBS_AGENT_OWNER
         prompt="${NBS_ASSISTANT_PROMPT:-Follow the beamline assistant instructions in your system prompt. Review the latest runs and post anything the operator should know.}"
         # The assistant's skill goes into the system prompt rather than being
         # loaded as a skill: it is then part of the prefix every call shares,
         # which the API caches, and no turn is spent loading it.
-        system=(--append-system-prompt-file "$("$python" -m nbs_agents.assistant.resources prompt beamline-assistant)")
+        # NBS_ASSISTANT_SKILL is the role's skill ([assistant.roles.NAME] skill).
+        system=(--append-system-prompt-file "$("$python" -m nbs_agents.assistant.resources prompt "${NBS_ASSISTANT_SKILL:-beamline-assistant}")")
         # Analysis only in sandbox-python, as for the driver; plain python is not allowed.
         export PATH="$here:$PATH"
         tools=("Read" "Skill" "Glob" "Grep" "Edit(./notebook/**)"
                "Bash(sandbox-python:*)" "Bash(nbs-cli post:*)" "Bash(nbs-reduce:*)")
-        for verb in state beam plans samples metadata devices device diagnose run runs log attach kb ref; do
+        # role: the chat role reads the other roles and files requests to them (nbs-cli
+        # refuses it to headless roles)
+        for verb in state beam plans samples metadata devices device diagnose run runs log attach kb ref role; do
             tools+=("Bash(nbs-cli $verb:*)")
         done
         ;;
