@@ -73,7 +73,7 @@ main { flex: 1; min-height: 0; display: flex; }
 .session.sel { background: var(--accent-soft); }
 .session.waiting { box-shadow: inset 3px 0 0 var(--warn-border); }
 .session .name { font-weight: 600; }
-.session .meta { font-size: 12px; color: var(--muted); }
+.session .meta { font-size: 12px; color: var(--muted); white-space: normal; }
 .session .goal { font-size: 12px; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .status { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: var(--b-note); color: var(--muted); }
 .status.active, .status.opening { background: var(--b-finalize); color: var(--ok); }
@@ -118,6 +118,9 @@ main { flex: 1; min-height: 0; display: flex; }
 .bubble.open { outline: 2px solid var(--warn-border); }
 .bubble.open .tag { color: var(--warn); }
 .empty { color: var(--faint); padding: 8px 0; }
+.badge { display: inline-block; font: 11px/1.5 var(--mono); padding: 0 5px; border: 1px solid var(--border); border-radius: 4px; color: var(--muted); white-space: nowrap; }
+.bubble .acts { margin-top: 4px; text-align: right; }
+.bubble .acts button { font-size: 12px; padding: 1px 8px; }
 
 #steer { display: flex; gap: 6px; padding: 8px 14px; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
 #activity-wrap { display: flex; flex-direction: column; min-height: 0; }
@@ -264,6 +267,8 @@ select { background: var(--panel); border: 1px solid var(--border); border-radiu
       <div class="col-head">
         <h2 id="assistant-state" style="text-transform:none;letter-spacing:0;font-size:14px">Assistant</h2>
         <span id="calls" style="color:var(--muted);font-size:12px;flex:2"></span>
+        <label style="font-size:13px" title="Model a re-check of a post runs on; it does not see the post, so it is a real second look">Re-check with
+          <select id="recheck-model"></select></label>
         <label style="font-size:13px"><input type="checkbox" id="show-runs" checked> Show every run</label>
       </div>
       <div id="feed" class="scroll"></div>
@@ -340,6 +345,7 @@ const POSTS = {
   operator: ["right", "--b-note", ""], error: ["left", "--b-question", "Assistant error"],
 };
 const ASSISTANT_STALE_S = 120;
+const POST_KINDS = ["summary", "advice", "alert", "answer"];
 const ATT_RE = /!\[([^\]]*)\]\(att:([0-9A-Za-z_-]+)(?:\s+"[^"]*")?\)/g;
 const attUrl = (id) => `/api/attachments/${encodeURIComponent(id)}`;
 
@@ -523,7 +529,18 @@ function collectEntries(records, uid) {
   return out;
 }
 
-function bubble(lbl, e, open, showAgent) {
+// The model behind an entry: the one that answered, else the one asked for, else the session's
+function entryModel(e, r) {
+  return e.served_model || e.model || (r && (r.served_model || r.model)) || "";
+}
+function badge(model, title) {
+  return model ? ` <span class="badge" title="${esc(title || "Model")}">${esc(model)}</span>` : "";
+}
+function modelTitle(e) {
+  return e.served_model && e.model && e.served_model !== e.model ? `Asked for ${e.model}; ${e.served_model} answered` : "Model";
+}
+
+function bubble(lbl, e, open, showAgent, r) {
   let [side, bg, tag] = BUBBLES[e.kind] || BUBBLES.note;
   let who = lbl;
   if (side === "right") {
@@ -532,8 +549,10 @@ function bubble(lbl, e, open, showAgent) {
   }
   if (open) { tag = "Waiting for your answer"; bg = "--b-question"; }
   const tagHtml = tag ? ` · <span class="tag">${esc(tag)}</span>` : "";
+  // Only what a Claude wrote: a launched session's own entries, never the operator's
+  const model = side === "left" && (e.model || e.served_model || (r && r.launch)) ? badge(entryModel(e, r), modelTitle(e)) : "";
   return `<div class="row ${side}"><div class="bubble${open ? " open" : ""}" style="background:var(${bg})">` +
-    `<div class="hd"><b>${esc(who)}</b> · ${fmtTime(e.t)}${tagHtml}</div>${rich(e.text)}</div></div>`;
+    `<div class="hd"><b>${esc(who)}</b> · ${fmtTime(e.t)}${tagHtml}${model}</div>${rich(e.text)}</div></div>`;
 }
 
 function renderSessions(records) {
@@ -546,7 +565,7 @@ function renderSessions(records) {
     const cls = waiting(r) ? "waiting" : esc(r.status || "");
     html += `<button class="session${uid === selected ? " sel" : ""}${waiting(r) ? " waiting" : ""}" data-uid="${esc(uid)}" title="${esc(r.goal || "")}">` +
       `<div class="name">${esc(label(uid, r))}</div>` +
-      `<div class="meta"><span class="status ${cls}">${esc(st)}</span> ${fmtTime(r.opened, true)}</div>` +
+      `<div class="meta"><span class="status ${cls}">${esc(st)}</span> ${fmtTime(r.opened, true)}${badge(entryModel({}, r), "Model this session's Claude runs on")}</div>` +
       (r.goal ? `<div class="goal">${esc(r.goal)}</div>` : "") + `</button>`;
   }
   if (rendered.sessions !== html) { rendered.sessions = html; $("sessions").innerHTML = html; }
@@ -574,6 +593,8 @@ function renderSummary(records) {
       parts.push(`budget: ${esc(JSON.stringify(r.budget))}`);
     }
     if (r.runner && r.runner.host) parts.push(`runner: ${esc(r.runner.host)} pid ${esc(r.runner.pid ?? "?")}`);
+    const model = entryModel({}, r);
+    if (model) parts.push(`model:${badge(model, r.model && r.served_model && r.model !== r.served_model ? `Asked for ${r.model}; ${r.served_model} answered` : "Model this session's Claude runs on")}`);
     html = parts.join(" · ");
     if (r.goal) html += `<div class="goal"><span class="label">goal:</span> ${esc(r.goal)}</div>`;
     if (budget.time_s && r.opened) {
@@ -608,7 +629,7 @@ function renderLog(records) {
   const act = pairs.filter(([, e]) => !CONVERSATION_KINDS.includes(e.kind));
   const showAgent = selected === ALL;
   setHtml("conversation", conv.length
-    ? conv.map(([lbl, e, u]) => bubble(lbl, e, e.kind === "question" && openTimes.has(`${u}|${e.t}`), showAgent)).join("")
+    ? conv.map(([lbl, e, u]) => bubble(lbl, e, e.kind === "question" && openTimes.has(`${u}|${e.t}`), showAgent, records[u])).join("")
     : `<div class="empty">No messages yet.</div>`);
   const head = `<tr><th>Time</th>${showAgent ? "<th>Agent</th>" : ""}<th>Kind</th><th>Text</th><th>Details</th></tr>`;
   const rows = act.map(([lbl, e]) => {
@@ -784,11 +805,27 @@ function callSummary(r) {
   if (Object.keys(last).length) {
     text += ` · last at ${fmtTime(last.t)}`;
     if (last.reasons && last.reasons.length) text += ` for ${last.reasons.join(", ")}`;
-    if (last.model) text += ` (${last.model})`;
+    if (last.model || last.served_model) text += ` (${last.served_model && last.served_model !== last.model ? `${last.model || "default"} → ${last.served_model}` : last.model || last.served_model})`;
     if (![undefined, null, 0].includes(last.returncode)) text += `, exit ${last.returncode}`;
   }
   if (r.pending) text += ` · ${r.pending} event(s) waiting`;
+  const m = r.models || {};
+  if (m.routine || m.alert) text += ` · models: ${m.routine || "default"} routine, ${m.alert || "default"} for alerts and questions`;
   return text;
+}
+// Re-check choices: the configured models, the strong one first, and any model seen today
+function renderRecheckModels(r) {
+  const sel = $("recheck-model");
+  const m = (r && r.models) || {};
+  const seen = ((r && r.log) || []).map((e) => e.model).filter(Boolean);
+  const names = [...new Set([m.alert, m.routine, ...seen].filter(Boolean))];
+  const key = names.join("|");
+  if (sel.dataset.key === key) return;
+  const keep = sel.value;
+  sel.dataset.key = key;
+  sel.innerHTML = (names.length ? "" : `<option value="">default</option>`) +
+    names.map((n) => `<option value="${esc(n)}">${esc(n)}${n === m.alert ? " (alert model)" : ""}</option>`).join("");
+  if (names.includes(keep)) sel.value = keep;
 }
 const runLink = (uid) => `<a class="run" data-run="${esc(uid)}">${esc(String(uid).slice(0, 8))}</a>`;
 function assistantEntry(e) {
@@ -800,10 +837,13 @@ function assistantEntry(e) {
   }
   const [side, bg, tag] = POSTS[e.kind] || ["left", "--b-note", String(e.kind)];
   const who = side === "right" ? "Operator" : "Assistant";
+  const post = POST_KINDS.includes(e.kind);
   let body = rich(e.text);
   if (e.run_uids && e.run_uids.length) body += `<div class="hd" style="margin-top:4px">runs: ${e.run_uids.map(runLink).join(", ")}</div>`;
+  if (post) body += `<div class="acts"><button data-recheck="${e.t}" title="Ask again on the model chosen above, in a fresh call that does not see this post">Re-check</button></div>`;
+  const recheck = e.recheck_of ? ` · <span class="tag">re-check of ${fmtTime(e.recheck_of)}</span>` : "";
   return `<div class="row ${side}"><div class="bubble" style="background:var(${bg})"><div class="hd"><b>${who}</b> · ${fmtTime(e.t)}` +
-    `${tag ? ` · <span class="tag">${esc(tag)}</span>` : ""}</div>${body}</div></div>`;
+    `${tag ? ` · <span class="tag">${esc(tag)}</span>` : ""}${recheck}${post ? badge(entryModel(e), modelTitle(e)) : ""}</div>${body}</div></div>`;
 }
 function renderAssistant() {
   const r = snap.assistant;
@@ -812,6 +852,7 @@ function renderAssistant() {
   st.textContent = text;
   st.style.color = `var(${color})`;
   $("calls").textContent = callSummary(r);
+  renderRecheckModels(r);
   const showRuns = $("show-runs").checked;
   const entries = ((r && r.log) || []).filter((e) => showRuns || e.kind !== "run");
   setHtml("feed", entries.length ? entries.map(assistantEntry).join("") : `<div class="empty">Nothing from the assistant yet today.</div>`);
@@ -820,6 +861,17 @@ function renderAssistant() {
 }
 $("show-runs").addEventListener("change", () => snap && renderAssistant());
 $("feed").addEventListener("click", async (ev) => {
+  const b = ev.target.closest("button[data-recheck]");
+  if (b) {
+    const model = $("recheck-model").value;
+    b.disabled = true;
+    try {
+      await post("/api/assistant/recheck", {t: Number(b.dataset.recheck), model});
+      follow.feed = true;
+      $("ask-status").textContent = `Re-check sent${model ? ` (${model})` : ""}; the assistant answers below without seeing the original post`;
+    } catch (e) { toast(`Could not ask for a re-check: ${e.message}`); b.disabled = false; }
+    return;
+  }
   const a = ev.target.closest("a[data-run]");
   if (!a) return;
   const uid = a.dataset.run;

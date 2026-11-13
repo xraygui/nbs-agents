@@ -130,6 +130,54 @@ def analyze(lines: Iterable[str], launched: Optional[datetime] = None) -> dict[s
     return out
 
 
+def served_model(lines: Iterable[str], answered_only: bool = False) -> Optional[str]:
+    """
+    The model a call actually ran on, from its stream-json lines.
+
+    A gateway alias such as ``claude-auto`` shows in the ``init`` event, while
+    each assistant message names the model that answered it, so the last
+    assistant message wins.
+
+    Parameters
+    ----------
+    lines : iterable of str
+        The log's lines; lines that are not JSON are skipped.
+    answered_only : bool, optional
+        Ignore the ``init`` event: None until a message has been answered.
+
+    Returns
+    -------
+    str or None
+        The model of the last assistant message, else the ``init`` event's
+        model, else None.
+    """
+    init = answered = None
+    for line in lines:
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("type") == "system" and msg.get("subtype") == "init" and msg.get("model"):
+            init = msg["model"]
+        elif msg.get("type") == "assistant":
+            model = (msg.get("message") or {}).get("model")
+            # Claude Code writes "<synthetic>" for messages it made up itself, such as API errors
+            if model and not str(model).startswith("<"):
+                answered = model
+    return answered if answered_only else answered or init
+
+
+def served_model_file(path: str, answered_only: bool = False) -> Optional[str]:
+    """``served_model`` of one log file, or None when it cannot be read."""
+    try:
+        with open(path, errors="replace") as f:
+            return served_model(f, answered_only)
+    except OSError:
+        return None
+
+
 def analyze_file(path: Path) -> dict[str, Any]:
     """``analyze`` one log file, taking the launch time from its name."""
     with open(path, errors="replace") as f:

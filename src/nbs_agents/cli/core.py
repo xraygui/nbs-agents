@@ -51,6 +51,28 @@ class CliError(RuntimeError):
     """An error to report to the CLI user without a traceback."""
 
 
+def writer_refs() -> dict[str, Any]:
+    """
+    What the runner told this Claude about itself, for the entries it writes.
+
+    Returns
+    -------
+    dict
+        ``model`` (``NBS_MODEL``), and for the assistant ``call``
+        (``NBS_ASSISTANT_CALL``) and ``recheck_of`` (``NBS_RECHECK_OF``),
+        each only when set.
+    """
+    out: dict[str, Any] = {}
+    if os.environ.get("NBS_MODEL"):
+        out["model"] = os.environ["NBS_MODEL"]
+    for key, var in (("call", "NBS_ASSISTANT_CALL"), ("recheck_of", "NBS_RECHECK_OF")):
+        try:
+            out[key] = int(os.environ[var]) if key == "call" else float(os.environ[var])
+        except (KeyError, ValueError):
+            pass
+    return out
+
+
 def refuse_read_only(config: CliConfig, verb: str) -> None:
     """
     Refuse a verb that changes the queue or another agent's record.
@@ -1845,6 +1867,37 @@ class Beamline:
         uid = self.agent_log.ensure_assistant_record()
         return {"agent_uid": uid, "entry": self.agent_log.message(uid, text.strip(), source=source)}
 
+    def recheck(self, about: str, model: Optional[str] = None, text: str = "", source: str = "nbs-cli") -> dict[str, Any]:
+        """
+        Ask the assistant for a blind second look at one of today's posts.
+
+        The runner starts a fresh call (on ``model``, else the assistant's
+        ``alert_model``) that sees the events behind the post but not the post.
+
+        Parameters
+        ----------
+        about : str
+            The post: ``HH:MM``, ``HH:MM:SS``, epoch seconds or ``"last"``.
+        model : str, optional
+            Model for the re-check.
+        text : str, optional
+            What to look at in particular.
+        source : str, optional
+            Where the request came from.
+
+        Returns
+        -------
+        dict
+            ``agent_uid`` and the appended entry.
+        """
+        refuse_read_only(self.config, "ask-assistant")
+        uid = self.agent_log.ensure_assistant_record()
+        try:
+            entry = self.agent_log.request_recheck(uid, about, model=model, text=text, source=source)
+        except ValueError as exc:
+            raise CliError(str(exc)) from exc
+        return {"agent_uid": uid, "entry": entry}
+
     def post(self, kind: str, text: str, runs: Optional[list[str]] = None) -> dict[str, Any]:
         """
         Post to the assistant's own record for today.
@@ -1870,7 +1923,9 @@ class Beamline:
         if not text or not text.strip():
             raise CliError("post text is required")
         uid = self.agent_log.ensure_assistant_record()
-        entry = self.agent_log.append(uid, kind, text.strip(), source="assistant", run_uids=list(runs or []) or None)
+        entry = self.agent_log.append(
+            uid, kind, text.strip(), source="assistant", run_uids=list(runs or []) or None, **writer_refs()
+        )
         return {"agent_uid": uid, **entry}
 
     def note(self, text: str, agent_uid: Optional[str] = None) -> dict[str, Any]:
@@ -1895,7 +1950,7 @@ class Beamline:
         record = self.find_session(agent_uid)
         if record is None:
             raise CliError("no open session to note on")
-        return self.agent_log.append(record["agent_uid"], "note", text, source="nbs-cli")
+        return self.agent_log.append(record["agent_uid"], "note", text, source="nbs-cli", **writer_refs())
 
     def ask(self, text: str, agent_uid: Optional[str] = None) -> dict[str, Any]:
         """
@@ -1919,7 +1974,7 @@ class Beamline:
         record = self.find_session(agent_uid)
         if record is None:
             raise CliError("no open session to ask from")
-        return self.agent_log.ask(record["agent_uid"], text, source="nbs-cli")
+        return self.agent_log.ask(record["agent_uid"], text, source="nbs-cli", **writer_refs())
 
     def finalize(self, summary: str, drop_pending: bool = False, agent_uid: Optional[str] = None) -> dict[str, Any]:
         """
@@ -1956,7 +2011,7 @@ class Beamline:
             for item in split["block"]:
                 _check(self.manager.item_remove(uid=item["item_uid"]), "item_remove")
                 dropped.append(item["item_uid"])
-        self.agent_log.append(uid, "finalize", summary, source="nbs-cli")
+        self.agent_log.append(uid, "finalize", summary, source="nbs-cli", **writer_refs())
         self.agent_log.set_status(uid, "finalizing")
         if split["queue_stop"] is not None:
             _check(self.manager.item_remove(uid=split["queue_stop"]["item_uid"]), "item_remove")

@@ -76,6 +76,12 @@ class MessageBody(BaseModel):
     text: str = ""
 
 
+class RecheckBody(BaseModel):
+    t: float
+    model: str = ""
+    text: str = ""
+
+
 class NewAgentBody(BaseModel):
     goal: str
     budget: str = ""
@@ -317,6 +323,14 @@ class WebState:
             raise HTTPException(400, "empty question")
         uid = self.log.ensure_assistant_record()
         return self.log.message(uid, text, source=SOURCE)
+
+    def recheck(self, t: float, model: str = "", text: str = "") -> dict[str, Any]:
+        """Ask the assistant for a blind second look at its post at time ``t``."""
+        uid = self.log.ensure_assistant_record()
+        try:
+            return self.log.request_recheck(uid, t, model=model.strip() or None, text=text, source=SOURCE)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc))
 
     def kb_call(self, method: str, *args: Any, **kwargs: Any) -> Any:
         """Run a knowledge-base method, turning its refusals into HTTP 400."""
@@ -577,6 +591,10 @@ def create_app(
     @app.post("/api/assistant/ask")
     async def ask(body: MessageBody):
         return await write(state.ask_assistant, body.text)
+
+    @app.post("/api/assistant/recheck")
+    async def recheck(body: RecheckBody):
+        return await write(state.recheck, body.t, body.model, body.text)
 
     # Knowledge base. Note IDs contain "/", so they travel in the body or query.
 

@@ -37,13 +37,16 @@ from ..cli.summaries import SummaryContext, summarize
 from nbs_agents.constants import AGENT_UID_KEY, CLOSE_AGENT_PLAN, OPEN_AGENT_PLAN
 from .launcher import ClaudeLauncher, LaunchedAgent
 from .resources import SKILLS_DIR, WORKDIR_TEMPLATE
+from .timing import served_model_file
 from nbs_agents.agents.base import BaseAgent
 
 LOGGER = logging.getLogger(__name__)
 
 SENTINEL_PLANS = (OPEN_AGENT_PLAN, CLOSE_AGENT_PLAN)
 # Events that need the stronger model
-URGENT_EVENTS = ("alert", "question")
+URGENT_EVENTS = ("alert", "question", "recheck")
+# Calls whose events the record keeps, so a post can be re-checked later
+CALL_EVENTS_KEPT = 30
 HEARTBEAT_S = 30.0
 STATUS_REFRESH_S = 600.0
 SKILL_DIR = SKILLS_DIR / "beamline-assistant"
@@ -392,7 +395,10 @@ class AssistantAgent(BaseAgent):
     def open_log(self) -> None:
         """Create today's record if needed and mark the assistant as watching."""
         self.agent_log.ensure_assistant_record(self.clock())
-        self.set_status("watching", heartbeat=self.clock(), pending=len(self.pending))
+        self.set_status(
+            "watching", heartbeat=self.clock(), pending=len(self.pending),
+            models={"routine": self.config.model or None, "alert": self.config.alert_model or None},
+        )
 
     def _roll_day(self) -> None:
         uid = assistant_uid(self.clock())
@@ -444,16 +450,17 @@ class AssistantAgent(BaseAgent):
             except Exception:
                 LOGGER.exception("Assistant tick failed")
 
-    def _check_answered(self, call: dict[str, Any], log_path: str) -> None:
-        """Say so in the record when a call for an operator question posted no answer."""
+    def _check_answered(self, call: dict[str, Any], log_path: str, kinds=("answer",),
+                        what: str = "an answer to the operator's question") -> None:
+        """Say so in the record when a call for an operator question (or re-check) posted no answer."""
         try:
             entries = (self.agent_log.get(call["uid"]) or {}).get("log") or []
         except Exception:
             LOGGER.exception("Could not read the assistant record after call %s", call["n"])
             return
-        if any(e.get("kind") == "answer" for e in entries[call.get("log_len", 0):]):
+        if any(e.get("kind") in kinds for e in entries[call.get("log_len", 0):]):
             return
-        text = f"call {call['n']} ended without posting an answer to the operator's question; see {log_path}"
+        text = f"call {call['n']} ended without posting {what}; see {log_path}"
         reply = last_reply(log_path)
         if reply:
             text += f"\n\nIts last reply was:\n\n{reply.strip()}"
@@ -558,8 +565,29 @@ class AssistantAgent(BaseAgent):
             LOGGER.exception("Could not read operator messages for the assistant")
             return
         for message in messages:
-            if message.get("kind") == "operator":
+            if message.get("kind") != "operator":
+                continue
+            if isinstance(message.get("recheck"), dict):
+                self._add_recheck(message)
+            else:
                 self._add_event("question", f"operator asked: {message.get('text', '')}")
+
+    def _add_recheck(self, message: dict[str, Any]) -> None:
+        """Queue a blind re-check of the post an operator ``recheck`` entry names."""
+        want = message["recheck"]
+        record = self.agent_log.get(self.agent_uid) or {}
+        post = next(
+            (e for e in record.get("log") or [] if e.get("t") == want.get("t") and e.get("kind") in ASSISTANT_POST_KINDS),
+            None,
+        )
+        if post is None:
+            self.log("error", f"cannot re-check: no post at {want.get('t')} in {self.agent_uid}")
+            return
+        event = {
+            "kind": "recheck", "text": message.get("text", ""), "run_uids": list(post.get("run_uids") or []),
+            "t": self.clock(), "model": want.get("model") or None, "note": want.get("note"), "post": post,
+        }
+        self.pending.append(event)
 
     def _check_idle(self) -> None:
         try:
@@ -610,12 +638,18 @@ class AssistantAgent(BaseAgent):
 
     # ------------------------------------------------------------------ calls
 
-    def snapshot(self) -> list[str]:
+    def snapshot(self, hide=None) -> list[str]:
         """
         Prompt lines with what each call used to fetch first: the beamline
         state (with the beam map and status PVs), the newest entries of
         today's record, and the notebook. Each part is cut at
         ``snapshot_chars``; a part that cannot be read says why.
+
+        Parameters
+        ----------
+        hide : callable, optional
+            Called with each record entry; true for entries to leave out,
+            such as the post a re-check must not see.
 
         Returns
         -------
@@ -644,6 +678,8 @@ class AssistantAgent(BaseAgent):
 
         def record():
             entries = (self.agent_log.get(self.agent_uid) or {}).get("log", [])
+            if hide is not None:
+                entries = [e for e in entries if not hide(e)]
             return entries[-SNAPSHOT_LOG_ENTRIES:]
 
         def notebook():
@@ -678,6 +714,8 @@ class AssistantAgent(BaseAgent):
         str
             Prompt text.
         """
+        if events and events[0]["kind"] == "recheck":
+            return self.recheck_prompt(events[0])
         lines = [
             "Follow the beamline assistant instructions in your system prompt. You are the read-only beamline assistant;",
             f"today's record is {self.agent_uid}. You observe and advise only: never try to control",
@@ -698,6 +736,67 @@ class AssistantAgent(BaseAgent):
         lines.append("Post only what the operator needs, then end your turn.")
         return "\n".join(lines)
 
+    def recheck_prompt(self, event: dict[str, Any]) -> str:
+        """
+        The prompt for a blind re-check of one post.
+
+        The call gets the events behind the post (kept in the record's
+        ``call_events``) and a snapshot without the posts of that call or
+        earlier re-checks of it, so it forms its own view.
+
+        Parameters
+        ----------
+        event : dict
+            A ``recheck`` event, with the ``post`` to re-check.
+
+        Returns
+        -------
+        str
+            Prompt text.
+        """
+        post = event["post"]
+        when = time.strftime("%H:%M:%S", time.localtime(post["t"]))
+        record = self.agent_log.get(self.agent_uid) or {}
+        behind = (record.get("call_events") or {}).get(str(post.get("call"))) or []
+        lines = [
+            "Follow the beamline assistant instructions in your system prompt. You are the read-only beamline assistant;",
+            f"today's record is {self.agent_uid}. You observe and advise only: never try to control",
+            "the beamline (no queue changes, no device moves, no queue server, 0MQ or Redis access",
+            "from python or anything else; python is for analysing data only).",
+            "",
+            f"The operator asked for a blind re-check of the {post['kind']} the assistant posted at {when}.",
+            "You do not see that post, on purpose: form your own view from the data. Do not look it up in the",
+            "record (`nbs-cli log`) before you have posted yours.",
+        ]
+        if behind:
+            lines.append("The events behind that post were:")
+            for e in behind:
+                line = f"- [{e.get('kind')}] {e.get('text')}"
+                if e.get("run_uids"):
+                    line += f" (runs: {' '.join(e['run_uids'])})"
+                lines.append(line)
+        elif post.get("run_uids"):
+            lines.append(f"It was about runs {' '.join(post['run_uids'])}.")
+        else:
+            lines.append("Its events are no longer known: look at the runs and the state around that time.")
+        note = event.get("note")
+        if note:
+            lines.append(f"The operator added: {note}")
+
+        def hide(e):
+            if e.get("kind") not in ASSISTANT_POST_KINDS:
+                return False
+            if post.get("call") is not None and e.get("call") == post.get("call"):
+                return True
+            return e.get("t") == post["t"] or e.get("recheck_of") == post["t"]
+
+        lines += self.snapshot(hide=hide)
+        lines.append(
+            f"Post your own view once with `nbs-cli post --kind {post['kind']} --file notebook/post.md`"
+            " (as an alert if the operator must act), then end your turn."
+        )
+        return "\n".join(lines)
+
     def _dispatch(self) -> None:
         if self.call is not None or not self.pending or not self._active:
             return
@@ -706,9 +805,17 @@ class AssistantAgent(BaseAgent):
                 LOGGER.warning("Assistant has events but no launcher: %s", [e["text"] for e in self.pending])
             self.pending.clear()
             return
-        events, self.pending = self.pending, []
+        # A re-check runs on its own, so its call sees nothing but the post's events
+        recheck = next((e for e in self.pending if e["kind"] == "recheck"), None)
+        if recheck is not None:
+            events = [recheck]
+            self.pending.remove(recheck)
+        else:
+            events, self.pending = self.pending, []
         urgent = any(e["kind"] in URGENT_EVENTS for e in events)
         model = self.config.alert_model if urgent else self.config.model
+        if recheck is not None and recheck.get("model"):
+            model = recheck["model"]
         prompt = self.build_prompt(events)
         record = self.agent_log.get(self.agent_uid) or {}
         n = int(record.get("calls") or 0) + 1
@@ -716,14 +823,13 @@ class AssistantAgent(BaseAgent):
         args = ["--role", "assistant"]
         if model:
             args += ["--model", model]
+        env = {
+            "NBS_CLI_ROLE": "assistant", "NBS_AGENT_UID": "", "NBS_ASSISTANT_PROMPT": prompt,
+            "NBS_MODEL": model or "", "NBS_ASSISTANT_CALL": str(n),
+            "NBS_RECHECK_OF": repr(recheck["post"]["t"]) if recheck is not None else "",
+        }
         try:
-            launched = self.launcher.launch(
-                self.agent_uid,
-                None,
-                f"assistant-call-{n}",
-                extra_args=args,
-                env={"NBS_CLI_ROLE": "assistant", "NBS_AGENT_UID": "", "NBS_ASSISTANT_PROMPT": prompt},
-            )
+            launched = self.launcher.launch(self.agent_uid, None, f"assistant-call-{n}", extra_args=args, env=env)
         except Exception as exc:
             LOGGER.exception("Could not start an assistant call")
             self.log("error", f"could not start a call: {exc}")
@@ -733,13 +839,17 @@ class AssistantAgent(BaseAgent):
             "log_len": len(record.get("log") or []),
         }
         run_uids = sorted({u for e in events for u in e["run_uids"]})
+        kept = dict(list((record.get("call_events") or {}).items())[-(CALL_EVENTS_KEPT - 1):])
+        if recheck is None:
+            kept[str(n)] = [{k: e[k] for k in ("kind", "text", "run_uids") if e.get(k)} for e in events]
         try:
             self.agent_log.set_status(
                 self.agent_uid,
                 "calling",
                 calls=n,
                 heartbeat=self.clock(),
-                pending=0,
+                pending=len(self.pending),
+                call_events=kept,
                 last_call={
                     "n": n,
                     "t": self.call["t"],
@@ -749,6 +859,7 @@ class AssistantAgent(BaseAgent):
                     "run_uids": run_uids,
                     "pid": launched.pid,
                     "log_path": launched.log_path,
+                    **({"recheck_of": recheck["post"]["t"]} if recheck is not None else {}),
                 },
             )
         except Exception:
@@ -760,11 +871,21 @@ class AssistantAgent(BaseAgent):
             call, self.call = self.call, None
             if call is not None:
                 duration = round(self.clock() - call["t"], 1)
+                served = served_model_file(launched.log_path)
                 try:
                     record = self.agent_log.get(call["uid"]) or {}
                     last = dict(record.get("last_call") or {})
                     last.update(returncode=returncode, duration_s=duration)
+                    if last.get("n") == call["n"] and served:
+                        last["served_model"] = served
                     self.agent_log.update(call["uid"], last_call=last)
+                    if served:
+                        # Only where it says more than the model asked for (a gateway alias, or none)
+                        self.agent_log.annotate(
+                            call["uid"],
+                            lambda e: e.get("call") == call["n"] and e.get("model") != served,
+                            served_model=served,
+                        )
                 except Exception:
                     LOGGER.exception("Failed to record the assistant call exit")
                 if returncode != 0:
@@ -772,5 +893,7 @@ class AssistantAgent(BaseAgent):
                     self.log("error", f"call {call['n']} {why}; see {launched.log_path}")
                 elif "question" in call["reasons"]:
                     self._check_answered(call, launched.log_path)
+                elif "recheck" in call["reasons"]:
+                    self._check_answered(call, launched.log_path, ASSISTANT_POST_KINDS, "its re-check")
             self._dispatch()
             self._beat(force=True)
