@@ -153,6 +153,15 @@ print(os.path.expanduser(CliConfig.load().beam_map_file) or "-")')"
             mounts+=(--ro-path "$beam_map_file")
             export NBS_BEAM_MAP_FILE="$beam_map_file"
         fi
+        # The profile's devices.toml, where nbs-reduce reads each device's _desc and _role
+        devices_file="$("$python" -c 'import os
+from nbs_agents.reduce.config import ReduceConfig
+print(os.path.expanduser(ReduceConfig.load().devices_file) or "-")')"
+        if [[ "$devices_file" != - && -f "$devices_file" ]]; then
+            devices_file="$(readlink -f "$devices_file")"
+            mounts+=(--ro-path "$devices_file")
+            export NBS_DEVICES_FILE="$devices_file"
+        fi
         config="${NBS_CLI_CONFIG:-$default_config}"
         [[ -f "$config" ]] && config="$(readlink -f "$config")" && mounts+=(--ro-path "$config")
         # Name it explicitly inside, where $HOME looks different
@@ -196,6 +205,8 @@ command -v nbs-cli >/dev/null 2>&1 || { echo "nbs-cli not found in $NBS_ENV_DIR/
 # Both roles read and add to the beamline knowledge base (nbs-cli kb). Skills are
 # written into the workdir with any beamline addenda appended.
 "$python" -m nbs_agents.assistant.resources skill beamline-knowledge
+# Both may reduce and plot runs from Tiled (nbs-reduce)
+"$python" -m nbs_agents.assistant.resources skill beamline-reduce
 
 system=()
 case "$role" in
