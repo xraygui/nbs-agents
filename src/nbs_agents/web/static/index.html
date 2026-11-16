@@ -226,6 +226,15 @@ select { background: var(--panel); border: 1px solid var(--border); border-radiu
 .tile.ok .sev { color: var(--ok); } .tile.info .sev { color: var(--accent); } .tile.warn .sev { color: var(--warn); } .tile.alert .sev { color: var(--bad); }
 .tile .msg { margin-top: 3px; overflow-wrap: anywhere; }
 .tile .note { margin-top: 3px; font-size: 12px; color: var(--muted); }
+dialog.fig-dialog { width: min(1100px, calc(100vw - 32px)); padding: 12px; }
+.fig-head { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; }
+.fig-head b { flex: 1; }
+.fig-head a { color: var(--accent); font-size: 13px; }
+.fig-head button { border: none; font-size: 18px; padding: 0 6px; background: none; }
+.fig-body { display: flex; align-items: center; gap: 8px; }
+.fig-body img { flex: 1; min-width: 0; max-height: calc(100vh - 180px); object-fit: contain; background: #fff; border-radius: 4px; }
+.fig-nav { font-size: 28px; padding: 4px 12px; }
+#fig-cap { margin-top: 8px; font-size: 13px; color: var(--muted); white-space: pre-wrap; }
 .tile .flip { display: flex; align-items: center; gap: 4px; margin-top: 3px; font-size: 12px; color: var(--muted); }
 .tile .flip span { flex: 1; text-align: center; }
 .tile .flip button { font-size: 12px; padding: 0 8px; }
@@ -370,6 +379,17 @@ nav #roles-toggle { margin-left: auto; }
       <button type="submit" id="new-ok" class="primary">Queue agent</button>
     </div>
   </form>
+</dialog>
+<dialog id="fig-dialog" class="fig-dialog">
+  <div class="fig-head"><b id="fig-title"></b>
+    <a id="fig-open" target="_blank" rel="noopener" title="Open the image on its own">Open</a>
+    <button type="button" id="fig-close" title="Close (Esc)">×</button></div>
+  <div class="fig-body">
+    <button type="button" id="fig-prev" class="fig-nav" title="Earlier figure (←)">‹</button>
+    <img id="fig-img" alt="">
+    <button type="button" id="fig-next" class="fig-nav" title="Later figure (→)">›</button>
+  </div>
+  <div id="fig-cap"></div>
 </dialog>
 <div id="toast" role="status"></div>
 
@@ -994,6 +1014,43 @@ function roleTile(name, tile, role) {
   if (acts.length) html += `<div class="acts">${acts.join("")}</div>`;
   return html + roleDetails(name, role, dirs) + `</div>`;
 }
+// The figure viewer: one role's figures large, with arrows (and arrow keys) to step through them
+let viewer = null;
+function openViewer(name, at) {
+  viewer = {name, at};
+  showViewer();
+  if (!$("fig-dialog").open) $("fig-dialog").showModal();
+}
+function showViewer() {
+  const figs = roleFigs(viewer.name);
+  if (!figs.length) { $("fig-dialog").close(); return; }
+  viewer.at = Math.max(0, Math.min(viewer.at, figs.length - 1));
+  const f = figs[viewer.at], url = attUrl(String(f.figure).replace(/^att:/, ""));
+  const latest = viewer.at === figs.length - 1;
+  $("fig-title").textContent = `${viewer.name}: ${viewer.at + 1} / ${figs.length}${latest ? " (latest)" : ""} · ${fmtTime(f.t)}`;
+  $("fig-img").src = url;
+  $("fig-img").alt = plainText(f.text || "");
+  $("fig-open").href = url;
+  $("fig-cap").textContent = plainText(f.text || "");
+  $("fig-prev").disabled = viewer.at === 0;
+  $("fig-next").disabled = latest;
+}
+function stepViewer(by) {
+  if (!viewer) return;
+  viewer.at += by;
+  showViewer();
+}
+$("fig-prev").addEventListener("click", () => stepViewer(-1));
+$("fig-next").addEventListener("click", () => stepViewer(1));
+$("fig-close").addEventListener("click", () => $("fig-dialog").close());
+$("fig-dialog").addEventListener("keydown", (ev) => {
+  if (ev.key === "ArrowLeft") { ev.preventDefault(); stepViewer(-1); }
+  if (ev.key === "ArrowRight") { ev.preventDefault(); stepViewer(1); }
+});
+// A click on the backdrop closes it
+$("fig-dialog").addEventListener("click", (ev) => { if (ev.target === $("fig-dialog")) $("fig-dialog").close(); });
+$("fig-dialog").addEventListener("close", () => { viewer = null; });
+
 // Each role's figures from today, newest last; figAt holds the one shown when not the newest
 const figAt = new Map();
 function roleFigs(name) {
@@ -1008,7 +1065,7 @@ function tileFigure(name) {
   if (!figs.length) return "";
   const at = figAt.has(name) ? Math.min(figAt.get(name), figs.length - 1) : figs.length - 1;
   const f = figs[at], id = String(f.figure).replace(/^att:/, "");
-  let html = `<a href="${attUrl(id)}" target="_blank" rel="noopener" title="Open the full figure"><img class="thumb" src="${attUrl(id)}" alt="${esc(name)} figure"></a>`;
+  let html = `<a href="${attUrl(id)}" data-zoom="${esc(name)}" title="Show the figure large"><img class="thumb" src="${attUrl(id)}" alt="${esc(name)} figure"></a>`;
   if (figs.length > 1) {
     html += `<div class="flip"><button data-flip="${esc(name)}" data-to="${at - 1}" ${at === 0 ? "disabled" : ""} title="Earlier figure">‹</button>` +
       `<span>${at + 1} / ${figs.length}${at === figs.length - 1 ? " (latest)" : ` · ${fmtTime(f.t)}`}</span>` +
@@ -1065,6 +1122,13 @@ $("roles").addEventListener("click", async (ev) => {
   const decide = ev.target.closest("button[data-decide]");
   const revoke = ev.target.closest("button[data-revoke]");
   const flip = ev.target.closest("button[data-flip]");
+  const zoom = ev.target.closest("a[data-zoom]");
+  if (zoom && !(ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.button)) {
+    ev.preventDefault();
+    const figs = roleFigs(zoom.dataset.zoom);
+    openViewer(zoom.dataset.zoom, figAt.has(zoom.dataset.zoom) ? Math.min(figAt.get(zoom.dataset.zoom), figs.length - 1) : figs.length - 1);
+    return;
+  }
   if (flip) {
     // Paging back stays put as new figures come; Latest follows the newest again
     if (flip.dataset.to === "latest") figAt.delete(flip.dataset.flip);
