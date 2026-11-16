@@ -56,6 +56,7 @@ and say what you could not check.
 | `note "text"` | Tell the operator something that needs no answer. |
 | `ask "text"` | Ask the operator something. The GUI shows you as waiting for input until they reply. |
 | `add PLAN [v ...] [k=v ...] --reason "..." [--dry-run]` | Queue a plan inside the session. `--reason` is shown to the operator. |
+| `add PLAN ... group_name="NAME"` | Label scans that belong together: repeats of one measurement (queue them as single scans, each with the same `group_name`), or one dose or position series. The assistant's plotter overlays a group with its average and flags a scan that does not match the rest. Use a new name for each series, such as `U6-spot2-repeats`. |
 | `remove ITEM_UID --reason "..."` | Drop a pending item from the session. |
 | `abort --reason "..." [--resume]` | Abort your own running plan, for example one running without beam. Its re-queued copy is removed. `--resume` restarts the queue for your other pending items. |
 | `runs --mine`, `run REF [--data] [--plot out.png]` | Look at the data you took. |

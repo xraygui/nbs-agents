@@ -40,7 +40,9 @@ DEFAULT_CHAT_ROLE = "manager"
 ROLE_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 # Deterministic work the runner does for a headless role (``worker``), and
 # the triggers each one needs
-ROLE_WORKERS = {"plotter": ("run", "group_end"), "integrity": (), "health": ("beam",)}
+ROLE_WORKERS = {"plotter": ("run",), "integrity": (), "health": ("beam",)}
+# Triggers a worker must leave to the chat role: the end of a group is the manager's to summarize
+WORKER_REFUSES = {"plotter": ("group_end",)}
 
 
 @dataclass
@@ -297,8 +299,9 @@ class RoleConfig:
         role) or that folder with ``-NAME`` added (headless roles).
     worker : str
         What the runner does for a headless role besides its calls (``ROLE_WORKERS``):
-        ``plotter`` reduces and plots each run with nbs-reduce and keeps the
-        tile without a model call, calling the model only to choose keys;
+        ``plotter`` reduces and plots each run and its repeats with
+        nbs-reduce and keeps the tile without a model call, calling the
+        model only to choose keys;
         ``health`` keeps the tile from the beam map and status PVs, calling
         the model only to explain a change for the worse; ``integrity`` gets
         the prompt for a differential diagnosis of alerts and flags. Empty
@@ -375,6 +378,9 @@ def read_roles(table: Optional[dict[str, Any]]) -> dict[str, RoleConfig]:
             missing = [t for t in ROLE_WORKERS[role.worker] if t not in (role.triggers or [])]
             if missing:
                 raise ValueError(f"{where} the {role.worker} worker needs triggers {missing}")
+            taken = [t for t in WORKER_REFUSES.get(role.worker, ()) if t in (role.triggers or [])]
+            if taken:
+                raise ValueError(f"{where} the {role.worker} worker does not take {taken}; leave them to the chat role")
             if role.worker in ("plotter", "health") and "tile" not in (role.sinks or ["tile"]):
                 raise ValueError(f"{where} the {role.worker} worker needs the tile sink")
         out[name] = role
@@ -470,7 +476,7 @@ class AssistantConfig:
         How long the plotter worker keeps trying a run that nbs-reduce cannot
         read yet (Tiled may lag the document stream).
     plot_runs : int
-        Most runs of the same plan, sample and edge in the plotter's overlay.
+        Most runs of one series (repeats) in the plotter's overlay.
     health_poll_s : float
         Seconds between the health worker's reads of the beam map and status PVs.
     roles : dict
@@ -502,7 +508,7 @@ class AssistantConfig:
     reduce_command: str = "nbs-reduce"
     reduce_timeout_s: float = 120.0
     reduce_wait_s: float = 60.0
-    plot_runs: int = 5
+    plot_runs: int = 10
     health_poll_s: float = 60.0
     roles: dict[str, RoleConfig] = field(default_factory=dict)
 

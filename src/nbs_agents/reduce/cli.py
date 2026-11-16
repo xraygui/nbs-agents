@@ -26,7 +26,7 @@ from nbs_agents.paths import BeamlineError, add_beamline_argument, use_beamline
 from .analysis import compare, spectrum, summary, table
 from .config import ReduceConfig
 from .keys import Ambiguous, describe_keys, key_warnings, resolve_keys
-from .plot import KINDS, plot
+from .plot import KINDS, MISMATCH_RMS, plot
 from .runs import ReduceError, Run, find_run
 
 AMBIGUOUS_STATUS = 3
@@ -257,9 +257,12 @@ def cmd_plot(r: Reducer, args) -> dict[str, Any]:
     for ref in args.runs:
         run = r.run(ref, args.catalog)
         entries.append((run, r.keys_for(run, args)))
-    result = plot(entries, str(path), kind=args.kind, title=args.title)
+    result = plot(entries, str(path), kind=args.kind, title=args.title, average=args.average, mismatch=args.mismatch)
     out = {"file": str(path), "caption": result["caption"],
            "runs": [{**run.ident(), "keys": _keys_out(keys)} for run, keys in entries]}
+    for key in ("repeats", "mismatch"):
+        if key in result:
+            out[key] = result[key]
     if result["warnings"]:
         out["warnings"] = result["warnings"]
     return out
@@ -322,6 +325,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--kind", choices=KINDS, default="ratio",
                    help="ratio (signal/norm), normalized (edge step) or raw (signal and norm apart)")
     p.add_argument("--title", default="")
+    p.add_argument("--average", action="store_true",
+                   help="also draw the runs' average, and report each run's distance from their median (repeats)")
+    p.add_argument("--mismatch", type=float, default=MISMATCH_RMS, metavar="FRACTION",
+                   help="with --average: a run further than this fraction of the range from the median does not match")
     return parser
 
 

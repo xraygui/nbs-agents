@@ -385,3 +385,27 @@ def test_recorded_reference_is_never_a_hinted_signal():
     run.start["plot_hints"] = {"normalization": ["i0"], "reference": ["ref"]}
     keys = resolve_keys(run, ReduceConfig())
     assert keys["signal"] == ["sc"] and keys["norm"] == "i0"
+
+
+def test_plot_average_reports_each_repeat(config_file, capsys, tmp_path):
+    status, out = reduce(capsys, "plot", "1", "2", "-o", "rep.png", "--kind", "normalized", "--average",
+                         "--signal", "sc", "--norm", "i0")
+    assert status == 0, out
+    assert [r["label"] for r in out["repeats"]] == ["scan 1 STD sc/i0", "scan 2 STD sc/i0"]
+    assert all(r["residual"] >= 0 for r in out["repeats"])
+    # Nothing matches when any distance is too much
+    status, out = reduce(capsys, "plot", "1", "2", "-o", "rep.png", "--kind", "normalized", "--average",
+                         "--signal", "sc", "--norm", "i0", "--mismatch", "-1")
+    assert out["mismatch"] == ["scan 1 STD sc/i0", "scan 2 STD sc/i0"]
+
+
+def test_repeat_check_finds_the_odd_one():
+    from nbs_agents.reduce.plot import repeat_check
+
+    x = np.linspace(0, 10, 50)
+    edge = 1 / (1 + np.exp(-(x - 5)))
+    run = lambda uid: type("R", (), {"uid": uid})()  # noqa: E731
+    curves = [(run("a"), "a", x, edge), (run("b"), "b", x, edge + 0.005), (run("c"), "c", x, 0.5 * edge)]
+    out = repeat_check(curves)
+    assert out["mismatch"] == ["c"]
+    assert len(out["mean"]) == 50

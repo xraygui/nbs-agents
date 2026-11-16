@@ -64,7 +64,7 @@ from nbs_agents.constants import AGENT_UID_KEY, CLOSE_AGENT_PLAN, OPEN_AGENT_PLA
 from .launcher import ClaudeLauncher, LaunchedAgent
 from .resources import SKILLS_DIR, WORKDIR_TEMPLATE
 from .timing import served_model_file
-from .workers import Health, Plotter
+from .workers import Health, Plotter, series_key
 from nbs_agents.agents.base import BaseAgent
 from nbs_agents.agents.external import ExternalAgent
 
@@ -953,6 +953,7 @@ class AssistantAgent(BaseAgent):
             summary = {"error": f"{type(exc).__name__}: {exc}"}
         facts = run_facts(run, summary, self.norm)
         facts["data_keys"] = sorted(run.keys)
+        facts["series"] = series_key(run.start)
         if facts.get("points") is None:
             facts["points"] = max((len(data[k]) for k in data), default=0)
         # With a health role, beam loss is its alert, not a run's
@@ -1002,7 +1003,7 @@ class AssistantAgent(BaseAgent):
             role = self.roles[name]
         event = {"kind": kind, "text": text, "run_uids": run_uids or [], "t": self.clock(), **extra}
         plotter = self.plotters.get(role.name)
-        if plotter is not None and kind in ("run", "group_end"):
+        if plotter is not None and kind == "run":
             plotter.submit(event)
             return
         event.pop("run", None)

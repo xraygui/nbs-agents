@@ -181,6 +181,13 @@ So write Markdown that still reads well as plain text:
   the figure belongs. Plain views show `[figure: alt]`, so make the alt text say
   what the figure shows. Attach a figure when it shows something the numbers do
   not (a shape, a comparison, an anomaly), not for every scan.
+- Series figures are yours (the chat role's): the plotter role only overlays
+  repeats (one `repeat` or `group_name`, or the same plan and sample in a row).
+  When a group ends or you write a digest and a figure tells the story of the
+  series (a trend against dose, position or scan, a comparison to a
+  reference, a zoom on what changed), make it with `nbs-reduce`, attach it in
+  your post, and ask the plotter to show it beside every page: `nbs-cli role
+  request plotter "put att:ID on your tile: <one line saying what it shows>"`.
 
 ## Rules
 

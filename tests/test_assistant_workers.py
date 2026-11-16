@@ -21,7 +21,7 @@ from test_assistant_agent import Clock, FakeLauncher, xas_run
 ROLES = {
     "manager": {"mode": "chat"},
     "integrity": {"triggers": ["alert", "flag"], "worker": "integrity", "model": "opus"},
-    "plotter": {"triggers": ["run", "group_end"], "worker": "plotter", "model": "haiku"},
+    "plotter": {"triggers": ["run"], "worker": "plotter", "model": "haiku"},
     "health": {"triggers": ["beam"], "worker": "health", "model": "haiku"},
 }
 PNG = b"\x89PNG\r\n\x1a\nfake"
@@ -45,6 +45,7 @@ class FakeReduce:
         self.summary = summary or summary_out()
         self.status = status
         self.plot_error = None
+        self.mismatch = []
         self.calls = []
 
     def __call__(self, args, cwd):
@@ -58,6 +59,12 @@ class FakeReduce:
             path = Path(cwd) / out
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(PNG + out.encode())
+            if "--average" in args:
+                runs = args[1:args.index("--kind")]
+                return 0, {"file": str(path), "caption": "c",
+                           "repeats": [{"label": f"run {r}", "uid": r, "residual": 0.2 if f"run {r}" in self.mismatch else 0.01}
+                                       for r in runs],
+                           "mismatch": [m for m in self.mismatch if m[4:] in runs]}
             return 0, {"file": str(path), "caption": f"caption for {out}"}
         return 1, {"error": "unexpected"}
 
@@ -97,7 +104,8 @@ class ConfigTests(unittest.TestCase):
         chat = {"manager": {"mode": "chat"}}
         bad = [
             ({"p": {"worker": "painter", "triggers": ["run"]}}, "worker must be one of"),
-            ({"p": {"worker": "plotter", "triggers": ["run"]}}, r"needs triggers \['group_end'\]"),
+            ({"p": {"worker": "plotter", "triggers": ["checkin"]}}, r"needs triggers \['run'\]"),
+            ({"p": {"worker": "plotter", "triggers": ["run", "group_end"]}}, "leave them to the chat role"),
             ({"h": {"worker": "health"}}, r"needs triggers \['beam'\]"),
             ({"h": {"worker": "health", "triggers": ["beam"], "sinks": ["record"]}}, "needs the tile sink"),
         ]
@@ -148,18 +156,48 @@ class PlotterTests(WorkerTestCase):
         self.assertIsNone(tile["figure"])
         self.assertIn("normalized plot failed: FileNotFoundError", tile["message"])
 
-    def test_the_overlay_holds_the_recent_runs_of_the_same_sample(self):
-        for uid, n in (("r1", 1), ("r2", 2), ("r3", 3)):
+    def series_plots(self):
+        return [c for c in self.reduce.calls if c[0] == "plot" and "--average" in c]
+
+    def test_consecutive_runs_of_the_same_plan_and_sample_are_one_series(self):
+        for uid, n in (("r1", 1), ("r2", 2)):
             self.agent.on_run_stop(xas_run(uid, n))
-        overlay = [c for c in self.reduce.calls if c[0] == "plot" and "normalized" in c][-1]
-        self.assertEqual(overlay[1:4], ["r1", "r2", "r3"])
+        self.assertEqual(self.series_plots()[-1][1:3], ["r1", "r2"])
+        self.assertIn("2 runs in its series (same plan, sample and edge)", self.tiles.get("plotter")["message"])
+        # Another sample in between starts the series again
+        self.agent.on_run_stop(xas_run("x1", 3, sample="s2"))
+        self.agent.on_run_stop(xas_run("r3", 4))
+        self.assertEqual(len(self.series_plots()), 1)
         self.agent.config.plot_runs = 2
-        self.plotter.recent.clear()
-        for uid, n in (("r4", 4), ("r5", 5), ("r6", 6)):
+        for uid, n in (("r4", 5), ("r5", 6)):
             self.agent.on_run_stop(xas_run(uid, n))
-        overlay = [c for c in self.reduce.calls if c[0] == "plot" and "normalized" in c][-1]
-        self.assertEqual(overlay[1:3], ["r5", "r6"])
-        self.assertEqual(overlay[3], "--kind")
+        self.assertEqual(self.series_plots()[-1][1:3], ["r4", "r5"])
+        self.assertEqual(self.series_plots()[-1][3], "--kind")
+
+    def test_repeat_and_group_name_make_series_across_other_runs(self):
+        def tagged(uid, n, **md):
+            run = xas_run(uid, n)
+            run.start.update(md)
+            return run
+
+        self.agent.on_run_stop(tagged("a1", 1, group_name="U6 dose"))
+        self.agent.on_run_stop(tagged("b1", 2, sample="s9", repeat={"uid": "rep", "len": 2, "index": 0}))
+        self.agent.on_run_stop(tagged("a2", 3, group_name="U6 dose", sample="s2"))
+        self.assertEqual(self.series_plots()[-1][1:3], ["a1", "a2"])
+        self.assertIn("(group U6 dose)", self.tiles.get("plotter")["message"])
+        self.agent.on_run_stop(tagged("b2", 4, sample="s9", repeat={"uid": "rep", "len": 2, "index": 1}))
+        self.assertEqual(self.series_plots()[-1][1:3], ["b1", "b2"])
+        self.assertIn("(repeat of 2)", self.tiles.get("plotter")["message"])
+
+    def test_a_repeat_that_does_not_match_is_flagged(self):
+        self.reduce.mismatch = ["run r2"]
+        self.agent.on_run_stop(xas_run("r1", 1))
+        self.agent.on_run_stop(xas_run("r2", 2))
+        tile = self.tiles.get("plotter")
+        self.assertEqual(tile["severity"], "warn")
+        self.assertIn("repeats that do not match the others: run r2 (residual 0.2)", tile["message"])
+        prompt = self.calls("integrity")[0]["env"]["NBS_ASSISTANT_PROMPT"]
+        self.assertIn("repeats that do not match the others", prompt)
 
     def test_reducer_flags_go_to_the_integrity_role(self):
         self.reduce.summary = summary_out(flags=["sc/i0: inverted_edge"])
@@ -226,16 +264,12 @@ class PlotterTests(WorkerTestCase):
         self.assertIn("no run r1", tile["message"])
         self.assertEqual(self.calls("plotter"), [])
 
-    def test_a_group_end_overlays_the_group(self):
+    def test_the_end_of_a_group_is_the_managers(self):
         self.agent.on_run_stop(xas_run("r1", 1))
         self.agent.on_run_stop(xas_run("r2", 2))
         self.agent.on_run_stop(xas_run("r3", 3, sample="s2"))
-        group = [c for c in self.reduce.calls if c[0] == "plot" and any(a.startswith("plots/group-") for a in c)]
-        self.assertEqual(len(group), 1)
-        self.assertEqual(group[0][1:3], ["r1", "r2"])
-        self.assertEqual(self.calls("manager"), [])
-        group_tiles = [e for e in self.record("plotter")["log"] if e["kind"] == "tile" and "group finished" in e["text"]]
-        self.assertEqual(len(group_tiles), 1)
+        self.assertEqual(len(self.calls("manager")), 1)
+        self.assertIn("[group_end]", self.calls("manager")[0]["env"]["NBS_ASSISTANT_PROMPT"])
 
 
 class HealthTests(WorkerTestCase):

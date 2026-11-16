@@ -1,13 +1,17 @@
 """
 Deterministic work the runner does for headless assistant roles.
 
-A role with ``worker = "plotter"`` gets no model call for its ``run`` and
-``group_end`` events. The ``Plotter`` reduces each run with ``nbs-reduce
-summary``, plots it with ``nbs-reduce plot`` (the normalized overlay of the
-recent runs on the same plan, sample and edge, and the raw signal and
-normalization), stores the figures (``att:ID``), keeps the role's tile and
-record, and passes the reducer's surprise flags on as ``flag`` events (to
-the integrity role, if one takes them). It calls the role's model only when
+A role with ``worker = "plotter"`` gets no model call for its ``run``
+events. The ``Plotter`` reduces each run with ``nbs-reduce summary`` and
+plots it with ``nbs-reduce plot``: on the tile, the run's series (its
+repeats: the runs of one ``repeat.uid``, else of one ``group_name``, else
+consecutive runs of the same plan, sample, edge and plan arguments)
+overlaid with their average, naming any repeat that does not match; in the
+record, also the raw signal and normalization. It stores the figures
+(``att:ID``), keeps the role's tile and record, and passes the reducer's
+surprise flags and repeat mismatches on as ``flag`` events (to the
+integrity role, if one takes them). Series across samples, doses or
+positions are the chat role's to judge, at the end of each group. It calls the role's model only when
 the keys come back ambiguous or the chosen signal is flat; that call picks
 the keys, and its choice is kept per plan and set of data keys, so the next
 such run is plotted without a call.
@@ -30,7 +34,6 @@ import shlex
 import subprocess
 import threading
 import time
-from collections import deque
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -115,6 +118,28 @@ def weak_signals(summary: dict[str, Any]) -> list[str]:
     return out
 
 
+def series_key(start: dict[str, Any]) -> tuple[tuple, str]:
+    """
+    Which series a run belongs to, from its start document.
+
+    Returns
+    -------
+    tuple of (tuple, str)
+        The key (``("repeat", uid)``, ``("group", name)`` or ``("same",
+        plan, sample, edge, plan arguments)``; only consecutive runs share a
+        ``same`` series) and how to name it.
+    """
+    repeat = start.get("repeat") or {}
+    if isinstance(repeat, dict) and repeat.get("uid"):
+        return ("repeat", str(repeat["uid"])), f"repeat of {repeat.get('len') or '?'}"
+    if start.get("group_name"):
+        return ("group", str(start["group_name"])), f"group {start['group_name']}"
+    sample = start.get("sample_id") or start.get("sample_name")
+    args = json.dumps(start.get("plan_args") or {}, sort_keys=True, default=str)
+    return (("same", start.get("plan_name"), sample, start.get("edge"), args),
+            "same plan, sample and edge")
+
+
 def summary_line(job: dict[str, Any], summary: dict[str, Any]) -> str:
     """One line of what was reduced: the run, the keys and why, and each signal's edge jump and J/N."""
     keys = summary.get("keys") or {}
@@ -167,8 +192,9 @@ class Plotter:
         self.reduce = reduce or (lambda args, cwd: run_reduce(config.reduce_command, args, cwd, config.reduce_timeout_s))
         self.sleep = sleep
         self.jobs: "queue.Queue[Optional[dict[str, Any]]]" = queue.Queue()
-        # Recent plotted runs: (plan, sample, edge) -> uids, newest last
-        self.recent: dict[tuple, deque] = {}
+        # Each series' plotted runs (series_key), newest last, and the last run's series
+        self.series: dict[tuple, list[str]] = {}
+        self.last_series: Optional[tuple] = None
         self._thread: Optional[threading.Thread] = None
 
     @property
@@ -185,7 +211,7 @@ class Plotter:
         self.jobs.put(None)
 
     def submit(self, event: dict[str, Any]) -> None:
-        """Queue a ``run`` or ``group_end`` event (with ``run`` facts or ``runs``) for the worker."""
+        """Queue a ``run`` event (with its ``run`` facts) for the worker."""
         self.jobs.put(event)
 
     def _loop(self) -> None:
@@ -202,8 +228,20 @@ class Plotter:
         """Do one event (on the worker thread, or directly in tests)."""
         if event["kind"] == "run":
             self.plot_run(event["run"])
-        elif event["kind"] == "group_end":
-            self.plot_group(event.get("runs") or [])
+
+    def add_to_series(self, run: dict[str, Any]) -> tuple[list[str], str]:
+        """Put a run in its series; the series' runs to plot (at most ``plot_runs``) and its name."""
+        key, label = run.get("series") or series_key({"plan_name": run.get("plan"), "sample_id": run.get("sample"),
+                                                      "edge": run.get("edge")})
+        key = tuple(key)
+        if key[0] == "same" and key != self.last_series:
+            self.series.pop(key, None)
+        self.last_series = key
+        members = self.series.setdefault(key, [])
+        if run["uid"] not in members:
+            members.append(run["uid"])
+        del members[:-max(1, self.agent.config.plot_runs)]
+        return list(members), label
 
     # ----------------------------------------------------------------- cache
 
@@ -289,15 +327,16 @@ class Plotter:
             return
         keys = summary.get("keys") or {}
         chosen = key_args({"signal": keys.get("signal"), "norm": keys.get("norm")})
-        group = (run.get("plan"), run.get("sample"), run.get("edge"))
-        recent = self.recent.setdefault(group, deque(maxlen=max(1, self.agent.config.plot_runs)))
-        if uid not in recent:
-            recent.append(uid)
+        members, label = self.add_to_series(run)
         name = f"scan{run.get('scan_id') or uid[:8]}"
-        figures, failed = [], []
-        for kind, uids, what in (("normalized", list(recent), "normalized overlay"), ("raw", [uid], "raw signal and norm")):
-            out_file = f"{PLOTS_DIR}/{name}-{kind}.png"
-            status, plotted = self._reduce(["plot"] + uids + ["--kind", kind, "-o", out_file] + chosen)
+        figures, failed, mismatch = [], [], []
+        if len(members) > 1:
+            first = (f"{len(members)} runs ({label}) with their average", members, "normalized", ["--average"])
+        else:
+            first = ("normalized", members, "normalized", [])
+        for what, uids, kind, extra in (first, ("raw signal and norm", [uid], "raw", [])):
+            out_file = f"{PLOTS_DIR}/{name}-{kind}{'-series' if extra else ''}.png"
+            status, plotted = self._reduce(["plot"] + uids + ["--kind", kind, "-o", out_file] + extra + chosen)
             if status != 0:
                 LOGGER.warning("Plotter %s: %s plot of %s failed: %s", self.state.name, kind, uid, plotted.get("error"))
                 failed.append(f"{kind} plot failed: {plotted.get('error')}")
@@ -311,45 +350,26 @@ class Plotter:
                 LOGGER.warning("Plotter %s could not store %s: %s", self.state.name, out_file, exc)
                 continue
             figures.append((what, att["id"]))
+            residuals = {r["label"]: r["residual"] for r in plotted.get("repeats") or []}
+            mismatch += [f"{m} (residual {residuals.get(m)})" for m in plotted.get("mismatch") or []]
         flags = summary.get("flags") or []
         line = summary_line(run, summary)
         severity = "info" if flags or weak else "ok"
-        if failed and not figures:
+        if (failed and not figures) or mismatch:
             severity = "warn"
+        if len(members) > 1:
+            line += f"; {len(members)} runs in its series ({label})"
         tile = line + (f"; flags: {', '.join(flags)}" if flags else "") + (f"; weak: {', '.join(weak)}" if weak else "")
+        if mismatch:
+            tile += f"; repeats that do not match the others: {', '.join(mismatch)}"
         tile += "".join(f"; {f}" for f in failed)
         text = tile + "".join(f"\n\n![{what}](att:{att})" for what, att in figures)
         self.post(severity, tile, text, [uid], figures[0][1] if figures else None)
-        if flags:
-            self.agent.worker_events(
-                [("flag", f"{line}: reducer flag {flag}", [uid]) for flag in flags]
-            )
-
-    def plot_group(self, runs: list[dict[str, Any]]) -> None:
-        """Overlay a finished group's runs (normalized), with the keys of its last run."""
-        runs = [r for r in runs if r.get("points")][-max(1, self.agent.config.plot_runs):]
-        if len(runs) < 2:
-            return
-        last = runs[-1]
-        choice = self.choice(cache_key(last.get("plan"), last.get("data_keys")))
-        name = f"group-scan{runs[0].get('scan_id')}-{runs[-1].get('scan_id')}"
-        out_file = f"{PLOTS_DIR}/{name}.png"
-        uids = [r["uid"] for r in runs]
-        status, plotted = self._reduce(["plot"] + uids + ["--kind", "normalized", "-o", out_file] + key_args(choice))
-        from .agent import describe_group
-
-        what = describe_group(runs)
-        if status != 0:
-            LOGGER.warning("Plotter %s: group plot failed: %s", self.state.name, plotted.get("error"))
-            return
-        try:
-            att = self.attachments.put(self.workdir / out_file, alt=f"{what}: normalized overlay",
-                                       run_uids=uids, caption=plotted.get("caption"), role=self.state.name)
-        except (OSError, ValueError) as exc:
-            LOGGER.warning("Plotter %s could not store %s: %s", self.state.name, out_file, exc)
-            return
-        tile = f"group finished: {what}, normalized overlay"
-        self.post("ok", tile, f"{tile}\n\n![{what}](att:{att['id']})", uids, att["id"])
+        events = [("flag", f"{line}: reducer flag {flag}", [uid]) for flag in flags]
+        if mismatch:
+            events.append(("flag", f"{line}: repeats that do not match the others: {', '.join(mismatch)}", members))
+        if events:
+            self.agent.worker_events(events)
 
     def ask_for_keys(self, run: dict[str, Any], key: str, why: str, output: dict[str, Any]) -> None:
         """Queue a ``keys`` call for the role's model, with nbs-reduce's output."""
