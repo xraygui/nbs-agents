@@ -148,7 +148,8 @@ def split_keys(values: Optional[list[str]]) -> Optional[list[str]]:
 
 def cwd_path(name: str, flag: str) -> Path:
     """
-    Resolve an output file name, refusing anything outside the current folder.
+    Resolve an output file name, refusing anything outside the current folder,
+    and create its folder.
 
     Raises
     ------
@@ -159,6 +160,7 @@ def cwd_path(name: str, flag: str) -> Path:
     path = (cwd / name).resolve()
     if Path(name).is_absolute() or path == cwd or cwd not in path.parents:
         raise ReduceError(f"{flag} needs a relative path inside {cwd}")
+    path.parent.mkdir(parents=True, exist_ok=True)
     return path
 
 

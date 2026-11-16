@@ -253,9 +253,10 @@ def test_compare_to_a_reference_entry(config_file, capsys, tiled_runs, tmp_path)
 
 
 def test_plot_records_keys_in_the_caption(config_file, capsys, tmp_path):
-    status, out = reduce(capsys, "plot", "1", "2", "4", "-o", "overlay.png", "--kind", "normalized")
+    # Into a folder that does not exist yet, as the plotter role asks
+    status, out = reduce(capsys, "plot", "1", "2", "4", "-o", "plots/overlay.png", "--kind", "normalized")
     assert status == 0, out
-    assert (tmp_path / "overlay.png").stat().st_size > 1000
+    assert (tmp_path / "plots" / "overlay.png").stat().st_size > 1000
     caption = out["caption"].splitlines()
     assert caption[0].startswith("scan 1 STD (c_xas): sc/i0, normalized; keys from [reduce.defaults.c_xas] rule 2")
     assert caption[2].startswith("scan 4 STD (c_xas): screen_diode/i0")

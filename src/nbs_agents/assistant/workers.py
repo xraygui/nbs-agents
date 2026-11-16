@@ -294,12 +294,13 @@ class Plotter:
         if uid not in recent:
             recent.append(uid)
         name = f"scan{run.get('scan_id') or uid[:8]}"
-        figures = []
+        figures, failed = [], []
         for kind, uids, what in (("normalized", list(recent), "normalized overlay"), ("raw", [uid], "raw signal and norm")):
             out_file = f"{PLOTS_DIR}/{name}-{kind}.png"
             status, plotted = self._reduce(["plot"] + uids + ["--kind", kind, "-o", out_file] + chosen)
             if status != 0:
                 LOGGER.warning("Plotter %s: %s plot of %s failed: %s", self.state.name, kind, uid, plotted.get("error"))
+                failed.append(f"{kind} plot failed: {plotted.get('error')}")
                 continue
             try:
                 att = self.attachments.put(
@@ -313,7 +314,10 @@ class Plotter:
         flags = summary.get("flags") or []
         line = summary_line(run, summary)
         severity = "info" if flags or weak else "ok"
+        if failed and not figures:
+            severity = "warn"
         tile = line + (f"; flags: {', '.join(flags)}" if flags else "") + (f"; weak: {', '.join(weak)}" if weak else "")
+        tile += "".join(f"; {f}" for f in failed)
         text = tile + "".join(f"\n\n![{what}](att:{att})" for what, att in figures)
         self.post(severity, tile, text, [uid], figures[0][1] if figures else None)
         if flags:

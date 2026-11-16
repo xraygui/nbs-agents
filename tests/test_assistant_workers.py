@@ -44,6 +44,7 @@ class FakeReduce:
     def __init__(self, summary=None, status=0):
         self.summary = summary or summary_out()
         self.status = status
+        self.plot_error = None
         self.calls = []
 
     def __call__(self, args, cwd):
@@ -51,6 +52,8 @@ class FakeReduce:
         if args[0] == "summary":
             return self.status, self.summary
         if args[0] == "plot":
+            if self.plot_error:
+                return 1, {"error": self.plot_error}
             out = args[args.index("-o") + 1]
             path = Path(cwd) / out
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -136,6 +139,14 @@ class PlotterTests(WorkerTestCase):
         summary = [e for e in entries if e["kind"] == "summary"][0]
         self.assertEqual(summary["text"].count("](att:"), 2)
         self.assertEqual(summary["run_uids"], ["r1"])
+
+    def test_failed_plots_show_on_the_tile(self):
+        self.reduce.plot_error = "FileNotFoundError: plots/scan1-normalized.png"
+        self.agent.on_run_stop(xas_run("r1", 1))
+        tile = self.tiles.get("plotter")
+        self.assertEqual(tile["severity"], "warn")
+        self.assertIsNone(tile["figure"])
+        self.assertIn("normalized plot failed: FileNotFoundError", tile["message"])
 
     def test_the_overlay_holds_the_recent_runs_of_the_same_sample(self):
         for uid, n in (("r1", 1), ("r2", 2), ("r3", 3)):
