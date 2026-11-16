@@ -40,15 +40,18 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
-from nbs_agents.agentlog import assistant_uid, is_assistant_record
+from nbs_agents.agentlog import assistant_uid, find_assistant_post, is_assistant_record
 from ..assistant.attachments import AttachmentStore
 from ..assistant.auth import check_token
-from ..cli.core import compact_item
+from ..cli.core import compact_item, login_name
 from ..cli.kb import KBError, KnowledgeBase
 from ..cli.refs import ReferenceLibrary, RefError, catalogs, resolve_refs
 from nbs_agents.constants import AGENT_UID_KEY
 from ..assistant.launcher import claude_launch_parameters
 from nbs_agents.queue import submit_agent_block
+from ..directives import DirectiveError, DirectiveStore, decide_directive, revoke_directive
+from ..threads import ThreadError, ThreadStore, open_thread
+from ..tiles import TileError, TileStore, acknowledge
 
 STATIC_DIR = Path(__file__).parent / "static"
 # Same as the Qt agent log tab
@@ -59,6 +62,11 @@ POLL_S = 1.0
 # After a failed QueueServer call, skip it this long so one dead server does not stall every snapshot
 QUEUE_RETRY_S = 15.0
 KEEPALIVE_S = 15.0
+# Closed threads shown in the manager chat: those active this recently, at most THREADS_SHOWN in all
+THREADS_SHOWN_S = 86400.0
+THREADS_SHOWN = 40
+# Newest entries of each headless role's record in the snapshot
+ROLE_ENTRIES = 20
 LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
 COOKIE = "nbs_agents_token"
 LOGIN_PAGE = """<!doctype html><meta charset="utf-8"><title>nbs-agents sign in</title>
@@ -74,6 +82,22 @@ placeholder="token"><button>Sign in</button></form>{error}
 
 class MessageBody(BaseModel):
     text: str = ""
+
+
+class AskBody(MessageBody):
+    thread: str = ""
+    entry: Optional[float] = None
+    tile: str = ""
+    by: str = ""
+
+
+class ByBody(BaseModel):
+    by: str = ""
+    reason: str = ""
+
+
+class DecideBody(ByBody):
+    confirm: bool
 
 
 class RecheckBody(BaseModel):
@@ -210,7 +234,12 @@ class WebState:
             ``manager``, ``running``, ``blocks``
             (each steerable session's queued items), ``read_only``,
             ``kb_pending`` (knowledge-base items waiting for review),
-            ``ref_pending`` (reference drafts and open draft requests) and
+            ``ref_pending`` (reference drafts and open draft requests),
+            ``tiles`` (each assistant role's tile), ``roles`` (each
+            headless role's record for today: status, heartbeat, calls and
+            its newest entries), ``threads`` (the manager's open threads and
+            those closed in the last day, with their messages, newest first),
+            ``directives`` (proposed and active), ``threads_on`` and
             ``errors``.
         """
         errors: dict[str, str] = {}
@@ -229,6 +258,11 @@ class WebState:
             "drivers": bool(getattr(self.beamline.config, "drivers", True)),
             "kb_pending": None,
             "ref_pending": None,
+            "tiles": {},
+            "roles": {},
+            "threads": [],
+            "directives": [],
+            "threads_on": self.threads_on(),
         }
         try:
             out["kb_pending"] = self.kb.review_queue()["count"]
@@ -249,8 +283,15 @@ class WebState:
             if is_assistant_record(record, uid):
                 if uid == out["assistant_uid"]:
                     out["assistant"] = record
+                elif record.get("role") and uid == assistant_uid(role=record["role"]):
+                    out["roles"][record["role"]] = {
+                        k: record.get(k) for k in ("status", "heartbeat", "calls", "last_call", "models", "role_config")
+                    }
+                    out["roles"][record["role"]]["uid"] = uid
+                    out["roles"][record["role"]]["log"] = (record.get("log") or [])[-ROLE_ENTRIES:]
             else:
                 out["sessions"][uid] = record
+        self._assistant_parts(out, errors)
         try:
             out["runner_alive"] = self.log.runner_alive()
             out["tiled_login"] = self.log.tiled_login() if out["runner_alive"] else None
@@ -291,6 +332,54 @@ class WebState:
         out["errors"] = errors
         return out
 
+    def _assistant_parts(self, out: dict[str, Any], errors: dict[str, str]) -> None:
+        """Tiles, threads and directives, each read on its own."""
+        try:
+            out["tiles"] = TileStore.for_agent_log(self.log).all()
+        except Exception as exc:
+            errors["tiles"] = str(exc)
+        try:
+            store = ThreadStore.for_agent_log(self.log)
+            since = time.time() - THREADS_SHOWN_S
+            threads = [t for t in store.all().values()
+                       if t.get("status") != "closed" or (t.get("last_t") or 0) >= since]
+            threads.sort(key=lambda t: t.get("created_t") or 0, reverse=True)
+            out["threads"] = threads[:THREADS_SHOWN]
+        except Exception as exc:
+            errors["threads"] = str(exc)
+        try:
+            out["directives"] = DirectiveStore.for_agent_log(self.log).listing(statuses=("proposed", "active"))
+        except Exception as exc:
+            errors["directives"] = str(exc)
+
+    # ----------------------------------------------------------------- assistant
+
+    def _assistant_config(self) -> Any:
+        """The beamline's ``[assistant]`` settings, or None if this client has none."""
+        return getattr(self.beamline, "assistant", None)
+
+    def threads_on(self) -> bool:
+        """Whether questions open manager threads (``[assistant] threads``)."""
+        config = self._assistant_config()
+        return bool(config is not None and getattr(config, "threads", False))
+
+    def _chat_role(self) -> Optional[str]:
+        config = self._assistant_config()
+        try:
+            return config.chat_role().name if config is not None else None
+        except Exception:
+            return None
+
+    def _chat_roles(self) -> tuple[Optional[str], set]:
+        """The chat role's name and every configured role's name."""
+        config = self._assistant_config()
+        try:
+            roles = config.resolved_roles() if config is not None else {}
+        except Exception:
+            roles = {}
+        chat = next((r.name for r in roles.values() if r.chat), None)
+        return chat, set(roles)
+
     # ----------------------------------------------------------------- writes
 
     def _steerable(self, uid: str) -> dict[str, Any]:
@@ -316,13 +405,80 @@ class WebState:
             raise HTTPException(409, "stop already requested")
         return self.log.request_stop(uid, text.strip(), source=SOURCE)
 
-    def ask_assistant(self, text: str) -> dict[str, Any]:
-        """Post a question to today's assistant record."""
+    def ask_assistant(self, text: str, thread: str = "", entry: Optional[float] = None, tile: str = "",
+                      by: str = "") -> dict[str, Any]:
+        """
+        Ask the assistant (its chat role, the manager) a question.
+
+        With ``[assistant] threads`` on, a new question opens a thread, seeded
+        with one of today's assistant posts (``entry``, its time) or a role's
+        tile (``tile``); ``thread`` adds a follow-up to an open thread. With
+        threads off the question goes into today's main record, as before.
+
+        Returns
+        -------
+        dict
+            ``thread`` and the main record's ``entry`` for a new thread, the
+            thread's new ``message`` for a follow-up, or the record entry
+            itself with threads off.
+        """
         text = text.strip()
         if not text:
             raise HTTPException(400, "empty question")
+        if sum(bool(x) for x in (thread, entry is not None, tile)) > 1:
+            raise HTTPException(400, "a question is a follow-up, about an entry or about a tile, not several")
+        by = by.strip() or login_name()
+        if thread:
+            try:
+                return {"thread": thread, "message": ThreadStore.for_agent_log(self.log).ask(thread, text, by, source=SOURCE)}
+            except ThreadError as exc:
+                raise HTTPException(404, str(exc))
         uid = self.log.ensure_assistant_record()
-        return self.log.message(uid, text, source=SOURCE)
+        if not self.threads_on():
+            if entry is not None or tile:
+                raise HTTPException(409, "asking about an entry or a tile opens a thread, and [assistant] threads is off")
+            return self.log.message(uid, text, source=SOURCE)
+        seed = None
+        if entry is not None:
+            try:
+                post = find_assistant_post(self.log.get(uid) or {}, entry)
+            except ValueError as exc:
+                raise HTTPException(404, str(exc))
+            seed = {"kind": "entry", "record": uid, "entry": post}
+        elif tile:
+            current = TileStore.for_agent_log(self.log).get(tile)
+            if current is None:
+                raise HTTPException(404, f"no tile for role {tile!r}")
+            seed = {"kind": "tile", "role": tile, "tile": current}
+        out = open_thread(self.log, text, by, source=SOURCE, seed=seed)
+        return {"thread": out["thread"]["id"], "entry": out["entry"]}
+
+    def acknowledge(self, role: str, by: str = "") -> dict[str, Any]:
+        """A person acknowledges a role's sticky alert; it is logged in the role's record."""
+        chat, roles = self._chat_roles()
+        store = TileStore.for_agent_log(self.log)
+        if role not in roles and store.get(role) is None:
+            raise HTTPException(404, f"no role {role!r}")
+        try:
+            return acknowledge(self.log, role, by.strip() or login_name(), source=SOURCE, chat=role == chat)
+        except TileError as exc:
+            raise HTTPException(409, str(exc))
+
+    def decide_directive(self, directive_id: str, confirm: bool, by: str = "", reason: str = "") -> dict[str, Any]:
+        """A person confirms or rejects a directive the manager proposed."""
+        try:
+            return decide_directive(self.log, directive_id, confirm, by.strip() or login_name(), source=SOURCE,
+                                    reason=reason.strip(), chat_role=self._chat_role())
+        except DirectiveError as exc:
+            raise HTTPException(409, str(exc))
+
+    def revoke_directive(self, directive_id: str, by: str = "", reason: str = "") -> dict[str, Any]:
+        """A person ends an active directive before it expires."""
+        try:
+            return revoke_directive(self.log, directive_id, by.strip() or login_name(), source=SOURCE,
+                                    reason=reason.strip(), chat_role=self._chat_role())
+        except DirectiveError as exc:
+            raise HTTPException(409, str(exc))
 
     def recheck(self, t: float, model: str = "", text: str = "") -> dict[str, Any]:
         """Ask the assistant for a blind second look at its post at time ``t``."""
@@ -589,8 +745,20 @@ def create_app(
         return await write(state.new_agent, body.goal, body.budget, body.start, body.confirm_busy)
 
     @app.post("/api/assistant/ask")
-    async def ask(body: MessageBody):
-        return await write(state.ask_assistant, body.text)
+    async def ask(body: AskBody):
+        return await write(state.ask_assistant, body.text, body.thread, body.entry, body.tile, body.by)
+
+    @app.post("/api/tiles/{role}/ack")
+    async def ack(role: str, body: ByBody):
+        return await write(state.acknowledge, role, body.by)
+
+    @app.post("/api/directives/{directive_id}/decide")
+    async def decide(directive_id: str, body: DecideBody):
+        return await write(state.decide_directive, directive_id, body.confirm, body.by, body.reason)
+
+    @app.post("/api/directives/{directive_id}/revoke")
+    async def revoke(directive_id: str, body: ByBody):
+        return await write(state.revoke_directive, directive_id, body.by, body.reason)
 
     @app.post("/api/assistant/recheck")
     async def recheck(body: RecheckBody):

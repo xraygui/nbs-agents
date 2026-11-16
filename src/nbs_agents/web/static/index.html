@@ -212,6 +212,45 @@ select { background: var(--panel); border: 1px solid var(--border); border-radiu
 .ref-table td { padding: 2px 12px 2px 0; font-family: var(--mono); font-size: 12.5px; word-break: break-all; }
 .ref-past { background: var(--warn-bg); border: 1px solid var(--warn-border); border-radius: 6px; padding: 6px 10px; margin: 8px 0; font-size: 13px; }
 #ref-detail pre { font-family: var(--mono); font-size: 12px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 8px; overflow-x: auto; }
+/* Role sidebar: one tile per assistant role, on every view */
+#roles-side { width: 280px; flex: none; border-left: 1px solid var(--border); background: var(--panel); overflow: auto; min-height: 0; }
+#roles-side[hidden] { display: none; }
+#roles-side .col-head { position: sticky; top: 0; background: var(--panel); z-index: 1; }
+.tile { margin: 8px; border: 1px solid var(--border); border-left: 4px solid var(--faint); border-radius: 6px; padding: 6px 8px; background: var(--bg); font-size: 13px; }
+.tile.ok { border-left-color: var(--ok); } .tile.info { border-left-color: var(--accent); }
+.tile.warn { border-left-color: var(--warn); } .tile.alert { border-left-color: var(--bad); background: var(--b-alert); }
+.tile.alert.acked { background: var(--bg); }
+.tile .hd { display: flex; gap: 6px; align-items: baseline; font-size: 12px; color: var(--muted); }
+.tile .hd b { color: var(--text); font-size: 13px; flex: 1; }
+.tile .sev { font-size: 11px; font-weight: 600; text-transform: uppercase; }
+.tile.ok .sev { color: var(--ok); } .tile.info .sev { color: var(--accent); } .tile.warn .sev { color: var(--warn); } .tile.alert .sev { color: var(--bad); }
+.tile .msg { margin-top: 3px; overflow-wrap: anywhere; }
+.tile .note { margin-top: 3px; font-size: 12px; color: var(--muted); }
+.tile img.thumb { display: block; width: 100%; max-height: 160px; object-fit: contain; border: 1px solid var(--border); border-radius: 4px; background: #fff; margin-top: 4px; }
+.tile .acts { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+.tile .acts button, .card .acts button { font-size: 12px; padding: 1px 8px; }
+.tile details { margin-top: 4px; font-size: 12px; }
+.tile details .entry { border-top: 1px solid var(--border); padding: 3px 0; color: var(--muted); }
+.tile details .entry b { color: var(--text); font-weight: 600; }
+.card { margin: 8px; border: 2px solid var(--warn-border); border-radius: 6px; padding: 6px 8px; background: var(--warn-bg); font-size: 13px; }
+.card .hd { font-size: 12px; color: var(--muted); }
+.card .acts { display: flex; gap: 4px; margin-top: 5px; }
+.dirline { margin: 2px 8px; font-size: 12px; color: var(--muted); }
+nav #roles-toggle { margin-left: auto; }
+/* Manager threads in the assistant feed */
+.thread { margin: 2px 0 10px 12%; border-left: 3px solid var(--accent); padding: 2px 0 2px 10px; }
+.thread > summary { cursor: pointer; font-size: 12px; color: var(--muted); list-style: none; }
+.thread > summary::-webkit-details-marker { display: none; }
+.thread > summary::before { content: "▸ "; } .thread[open] > summary::before { content: "▾ "; }
+.thread .row { margin: 4px 0; }
+.thread .bubble { max-width: 100%; }
+.thread .acts { text-align: left; }
+.thinking { color: var(--accent); font-size: 12px; }
+#ask-about { display: none; padding: 6px 14px 0; font-size: 12px; color: var(--muted); }
+#ask-about .chip { display: inline-flex; gap: 6px; align-items: center; padding: 1px 8px; border: 1px solid var(--accent); border-radius: 999px; color: var(--text); }
+#ask-about button { border: none; padding: 0 2px; background: none; }
+@media (max-width: 1100px) { #roles-side { width: 230px; } }
+@media (max-width: 720px) { #roles-side { width: auto; border-left: none; border-top: 1px solid var(--border); } }
 #tiled-login { display: none; padding: 8px 16px; background: var(--warn-bg); border-bottom: 1px solid var(--warn-border); }
 #tiled-login code { font-weight: 600; }
 </style>
@@ -230,6 +269,7 @@ select { background: var(--panel); border: 1px solid var(--border); border-radiu
   <button id="tab-assistant" data-view="assistant-view">Assistant</button>
   <button id="tab-kb" data-view="kb-view">Knowledge</button>
   <button id="tab-refs" data-view="ref-view">References</button>
+  <button id="roles-toggle" type="button" title="Show or hide the assistant roles' tiles">Roles</button>
 </nav>
 <main>
   <section id="agents-view" class="view active">
@@ -272,6 +312,7 @@ select { background: var(--panel); border: 1px solid var(--border); border-radiu
         <label style="font-size:13px"><input type="checkbox" id="show-runs" checked> Show every run</label>
       </div>
       <div id="feed" class="scroll"></div>
+      <div id="ask-about"></div>
       <form id="ask-row" autocomplete="off">
         <input type="text" id="question" placeholder="Ask the assistant (it reads the data; it never changes the queue)">
         <button type="submit" id="ask">Ask</button>
@@ -303,6 +344,11 @@ select { background: var(--panel); border: 1px solid var(--border); border-radiu
       <div id="ref-detail" class="scroll" style="flex:1"></div>
     </div>
   </section>
+  <!-- The assistant roles' tiles and the directives waiting for a person, beside every view -->
+  <aside id="roles-side" hidden>
+    <div class="col-head"><h2>Assistant roles</h2></div>
+    <div id="roles"></div>
+  </aside>
 </main>
 
 <dialog id="new-dialog">
@@ -343,7 +389,16 @@ const POSTS = {
   summary: ["left", "--b-summary", "Summary"], advice: ["left", "--b-advice", "Advice"],
   alert: ["left", "--b-alert", "Alert"], answer: ["left", "--b-answer", "Answer"],
   operator: ["right", "--b-note", ""], error: ["left", "--b-question", "Assistant error"],
+  reply: ["left", "--b-advice", "Role reply"], directive: ["left", "--b-note", "Directive"],
+  ack: ["right", "--b-note", "Acknowledged"],
 };
+// Thread messages: kind -> [side, background variable, tag]
+const THREAD_MSGS = {
+  question: ["right", "--b-operator", ""], answer: ["left", "--b-answer", "Answer"],
+  reply: ["left", "--b-advice", "Role reply"], note: ["left", "--b-note", "Note"],
+  error: ["left", "--b-question", "Error"],
+};
+const SEVERITY_ORDER = {alert: 0, warn: 1, info: 2, ok: 3};
 const ASSISTANT_STALE_S = 120;
 const POST_KINDS = ["summary", "advice", "alert", "answer"];
 const ATT_RE = /!\[([^\]]*)\]\(att:([0-9A-Za-z_-]+)(?:\s+"[^"]*")?\)/g;
@@ -835,16 +890,181 @@ function assistantEntry(e) {
     for (const f of e.flags || []) line += `<br>&nbsp;&nbsp;<span class="flag">flag:</span> ${esc(f)}`;
     return `<div class="runline">${line}</div>`;
   }
-  const [side, bg, tag] = POSTS[e.kind] || ["left", "--b-note", String(e.kind)];
-  const who = side === "right" ? "Operator" : "Assistant";
+  let [side, bg, tag] = POSTS[e.kind] || ["left", "--b-note", String(e.kind)];
+  if (e.digest) tag = "Digest";
+  let who = side === "right" ? (e.by || "Operator") : "Assistant";
+  if (e.kind === "reply" && e.role) who = `${e.role} role`;
   const post = POST_KINDS.includes(e.kind);
   let body = rich(e.text);
   if (e.run_uids && e.run_uids.length) body += `<div class="hd" style="margin-top:4px">runs: ${e.run_uids.map(runLink).join(", ")}</div>`;
-  if (post) body += `<div class="acts"><button data-recheck="${e.t}" title="Ask again on the model chosen above, in a fresh call that does not see this post">Re-check</button></div>`;
+  if (post) {
+    const about = snap.threads_on ? `<button data-about-entry="${e.t}" title="Open a thread with the manager about this post">Ask about this</button> ` : "";
+    body += `<div class="acts">${about}<button data-recheck="${e.t}" title="Ask again on the model chosen above, in a fresh call that does not see this post">Re-check</button></div>`;
+  }
   const recheck = e.recheck_of ? ` · <span class="tag">re-check of ${fmtTime(e.recheck_of)}</span>` : "";
-  return `<div class="row ${side}"><div class="bubble" style="background:var(${bg})"><div class="hd"><b>${who}</b> · ${fmtTime(e.t)}` +
+  const html = `<div class="row ${side}"><div class="bubble" style="background:var(${bg})"><div class="hd"><b>${esc(who)}</b> · ${fmtTime(e.t)}` +
     `${tag ? ` · <span class="tag">${esc(tag)}</span>` : ""}${recheck}${post ? badge(entryModel(e), modelTitle(e)) : ""}</div>${body}</div></div>`;
+  return e.kind === "operator" && e.thread ? html + threadBlock(e) : html;
 }
+
+// ---------------------------------------------------------------- manager threads
+// A question opens a thread: its one line is in the record, the rest expands under it
+const threadOpen = new Map();
+function seedLine(seed) {
+  if (!seed || !seed.kind || seed.kind === "snapshot") return "";
+  if (seed.kind === "tile") return `about the ${seed.role} tile`;
+  if (seed.kind === "entry") return `about the ${(seed.entry || {}).kind || "post"} at ${fmtTime((seed.entry || {}).t)}`;
+  return "";
+}
+function threadMsg(m) {
+  const [side, bg, tag] = THREAD_MSGS[m.kind] || THREAD_MSGS.note;
+  const who = side === "right" ? (m.by || "Operator") : m.role ? `${m.role} role` : "Manager";
+  const model = m.kind === "answer" ? badge(m.served_model || m.model, modelTitle(m)) : "";
+  const runs = m.run_uids && m.run_uids.length ? `<div class="hd" style="margin-top:4px">runs: ${m.run_uids.map(runLink).join(", ")}</div>` : "";
+  return `<div class="row ${side}"><div class="bubble" style="background:var(${bg})"><div class="hd"><b>${esc(who)}</b> · ${fmtTime(m.t)}` +
+    `${tag ? ` · <span class="tag">${esc(tag)}</span>` : ""}${model}</div>${rich(m.text)}${runs}</div></div>`;
+}
+function threadBlock(e) {
+  const th = (snap.threads || []).find((t) => t.id === e.thread);
+  if (!th) {
+    const summary = e.thread_summary ? `: ${esc(e.thread_summary)}` : "";
+    return `<div class="thread"><div class="hd" style="font-size:12px;color:var(--muted)">Thread ${esc(e.thread)} ${e.thread_status === "closed" ? "closed" : "not shown"}${summary}</div></div>`;
+  }
+  const closed = th.status === "closed";
+  const open = threadOpen.has(th.id) ? threadOpen.get(th.id) : !closed;
+  const msgs = (th.messages || []).slice(1);
+  const answers = msgs.filter((m) => m.kind === "answer").length;
+  let head = `${closed ? "Closed thread" : "Thread"} ${esc(th.id)}`;
+  const about = seedLine(th.seed);
+  if (about) head += ` · ${esc(about)}`;
+  head += ` · ${answers} answer(s)`;
+  if (th.calling) head += ` · <span class="thinking">the manager is answering…</span>`;
+  let inner = msgs.map(threadMsg).join("");
+  if (!msgs.length && !th.calling) inner += `<div class="empty">Waiting for the manager.</div>`;
+  if (th.calling && msgs.length) inner += `<div class="thinking">the manager is answering…</div>`;
+  if (closed && th.summary) inner += `<div class="hd" style="font-size:12px;color:var(--muted);margin-top:4px"><b>Summary:</b> ${esc(th.summary)}</div>`;
+  if (!closed) inner += `<div class="acts"><button data-reply="${esc(th.id)}" title="Ask a follow-up in this thread">Follow up</button></div>`;
+  return `<details class="thread" data-thread="${esc(th.id)}"${open ? " open" : ""}><summary>${head}</summary>${inner}</details>`;
+}
+
+// What the next question is about: a thread to follow up, a post, or a role's tile
+let askAbout = null;
+function setAskAbout(about) {
+  askAbout = about;
+  const el = $("ask-about");
+  el.style.display = about ? "block" : "none";
+  el.innerHTML = about ? `<span class="chip">${esc(about.label)}<button type="button" id="ask-about-clear" title="Ask a new question instead">×</button></span>` : "";
+  if (about) {
+    $("ask-about-clear").addEventListener("click", () => setAskAbout(null));
+    $("question").placeholder = about.thread ? "Follow up in the thread" : "Your question";
+    $("question").focus();
+  } else {
+    $("question").placeholder = "Ask the assistant (it reads the data; it never changes the queue)";
+  }
+}
+function showAssistant() {
+  $("tab-assistant").click();
+}
+const who = () => { try { return localStorage.getItem("kb-who") || ""; } catch (e) { return ""; } };
+
+// ---------------------------------------------------------------- role sidebar
+let rolesHidden = false;
+try { rolesHidden = localStorage.getItem("roles-hidden") === "1"; } catch (e) {}
+const heldAlert = (t) => !!t && t.severity === "alert" && !t.ack;
+function roleTile(name, tile, role) {
+  const dirs = (snap.directives || []).filter((d) => d.role === name && d.status === "active");
+  const state = role && role.status === "calling" ? ` · <span class="thinking">thinking…</span>` : "";
+  if (!tile) {
+    return `<div class="tile"><div class="hd"><b>${esc(name)}</b>${state}</div><div class="note">No word yet today.</div>${roleDetails(name, role, dirs)}</div>`;
+  }
+  const held = heldAlert(tile);
+  let html = `<div class="tile ${esc(tile.severity)}${tile.severity === "alert" && !held ? " acked" : ""}">` +
+    `<div class="hd"><b>${esc(name)}</b><span class="sev">${esc(tile.severity)}</span> ${fmtTime(tile.ts)}${state}</div>` +
+    `<div class="msg">${esc(plainText(tile.message))}</div>`;
+  if (tile.cleared && tile.latest) html += `<div class="note">Cleared since ${fmtTime(tile.latest.ts)}: ${esc(plainText(tile.latest.message))}</div>`;
+  if (tile.ack) html += `<div class="note">Acknowledged by ${esc(tile.ack.by)} at ${fmtTime(tile.ack.ts)}</div>`;
+  else if (tile.last_ack && !held) html += `<div class="note">Last alert acknowledged by ${esc(tile.last_ack.by)} at ${fmtTime(tile.last_ack.ts)}</div>`;
+  const fig = String(tile.figure || "").replace(/^att:/, "");
+  if (fig) html += `<a href="${attUrl(fig)}" target="_blank" rel="noopener" title="Open the full figure"><img class="thumb" src="${attUrl(fig)}" alt="${esc(name)} figure"></a>`;
+  const acts = [];
+  if (held) acts.push(`<button class="primary" data-ack="${esc(name)}" title="You have seen this alert; it stays until someone acknowledges it">Acknowledge</button>`);
+  if (snap.threads_on) acts.push(`<button data-about-tile="${esc(name)}" title="Open a thread with the manager about this tile">Ask about this</button>`);
+  if (acts.length) html += `<div class="acts">${acts.join("")}</div>`;
+  return html + roleDetails(name, role, dirs) + `</div>`;
+}
+function roleDetails(name, role, dirs) {
+  const entries = ((role && role.log) || []).slice(-8).reverse();
+  if (!entries.length && !dirs.length) return "";
+  let html = `<details data-role="${esc(name)}"${roleOpen.get(name) ? " open" : ""}><summary>${entries.length} recent entr${entries.length === 1 ? "y" : "ies"}${dirs.length ? `, ${dirs.length} directive(s)` : ""}</summary>`;
+  for (const d of dirs) html += `<div class="entry"><b>directive</b> ${esc(d.text)} <button data-revoke="${esc(d.id)}" title="End this directive now">Revoke</button></div>`;
+  for (const e of entries) html += `<div class="entry"><b>${esc(e.kind)}</b> ${fmtTime(e.t)} ${esc(plainText(e.text).slice(0, 300))}</div>`;
+  return html + `</details>`;
+}
+const roleOpen = new Map();
+function directiveCard(d) {
+  const until = d.expires && d.expires.until ? `until ${fmtTime(d.expires.until, true)}` : "";
+  const expires = d.expires ? `${esc(d.expires.kind || "")} ${until}` : "";
+  return `<div class="card"><div class="hd"><b>Directive for ${esc(d.role)}</b> · proposed ${fmtTime(d.proposed_t)}` +
+    `${d.thread ? ` in thread ${esc(d.thread)}` : ""}${expires ? ` · expires: ${expires}` : ""}</div>` +
+    `<div>${rich(d.text)}</div><div class="acts"><button class="primary" data-decide="${esc(d.id)}" data-confirm="1" title="The role follows it until it expires">Confirm</button>` +
+    `<button data-decide="${esc(d.id)}" data-confirm="0">Reject</button></div></div>`;
+}
+function renderRoles() {
+  const tiles = snap.tiles || {}, roles = snap.roles || {};
+  const proposed = (snap.directives || []).filter((d) => d.status === "proposed");
+  const names = [...new Set([...Object.keys(roles), ...Object.keys(tiles)])];
+  const any = names.length > 0 || proposed.length > 0;
+  const nHeld = Object.values(tiles).filter(heldAlert).length;
+  $("roles-toggle").hidden = !any;
+  $("roles-toggle").classList.toggle("waiting", nHeld + proposed.length > 0);
+  $("roles-toggle").textContent = `Roles${nHeld + proposed.length ? ` (${nHeld + proposed.length})` : ""}`;
+  $("roles-side").hidden = !any || rolesHidden;
+  if (!any) return;
+  names.sort((a, b) => (heldAlert(tiles[b]) - heldAlert(tiles[a])) ||
+    ((SEVERITY_ORDER[(tiles[a] || {}).severity] ?? 4) - (SEVERITY_ORDER[(tiles[b] || {}).severity] ?? 4)) || a.localeCompare(b));
+  setHtml("roles", proposed.map(directiveCard).join("") + names.map((n) => roleTile(n, tiles[n], roles[n])).join(""));
+}
+$("roles-toggle").addEventListener("click", () => {
+  rolesHidden = !rolesHidden;
+  try { localStorage.setItem("roles-hidden", rolesHidden ? "1" : "0"); } catch (e) {}
+  if (snap) renderRoles();
+});
+$("roles").addEventListener("toggle", (ev) => {
+  const d = ev.target;
+  if (d.matches && d.matches("details[data-role]")) roleOpen.set(d.dataset.role, d.open);
+}, true);
+$("roles").addEventListener("click", async (ev) => {
+  const ack = ev.target.closest("button[data-ack]");
+  const about = ev.target.closest("button[data-about-tile]");
+  const decide = ev.target.closest("button[data-decide]");
+  const revoke = ev.target.closest("button[data-revoke]");
+  try {
+    if (ack) {
+      ack.disabled = true;
+      await post(`/api/tiles/${encodeURIComponent(ack.dataset.ack)}/ack`, {by: who()});
+      toast(`Acknowledged the ${ack.dataset.ack} alert`);
+    } else if (about) {
+      setAskAbout({tile: about.dataset.aboutTile, label: `About the ${about.dataset.aboutTile} tile`});
+      showAssistant();
+    } else if (decide) {
+      const confirmIt = decide.dataset.confirm === "1";
+      const reason = confirmIt ? "" : prompt("Why reject it? (optional; the manager sees this)");
+      if (reason === null) return;
+      decide.disabled = true;
+      await post(`/api/directives/${encodeURIComponent(decide.dataset.decide)}/decide`, {confirm: confirmIt, by: who(), reason});
+      toast(confirmIt ? "Directive confirmed" : "Directive rejected");
+    } else if (revoke) {
+      const reason = prompt("Revoke this directive now? Why (optional):");
+      if (reason === null) return;
+      revoke.disabled = true;
+      await post(`/api/directives/${encodeURIComponent(revoke.dataset.revoke)}/revoke`, {by: who(), reason});
+      toast("Directive revoked");
+    }
+  } catch (e) {
+    toast(e.message);
+    for (const b of [ack, decide, revoke]) if (b) b.disabled = false;
+  }
+});
 function renderAssistant() {
   const r = snap.assistant;
   const [text, color] = snap.errors && snap.errors.agent_log ? [`Assistant unavailable: ${snap.errors.agent_log}`, "--bad"] : assistantState(r);
@@ -860,7 +1080,19 @@ function renderAssistant() {
   $("question").disabled = !ok; $("ask").disabled = !ok;
 }
 $("show-runs").addEventListener("change", () => snap && renderAssistant());
+$("feed").addEventListener("toggle", (ev) => {
+  const d = ev.target;
+  if (d.matches && d.matches("details.thread")) threadOpen.set(d.dataset.thread, d.open);
+}, true);
 $("feed").addEventListener("click", async (ev) => {
+  const reply = ev.target.closest("button[data-reply]");
+  if (reply) { setAskAbout({thread: reply.dataset.reply, label: `Follow-up in thread ${reply.dataset.reply}`}); return; }
+  const about = ev.target.closest("button[data-about-entry]");
+  if (about) {
+    const t = Number(about.dataset.aboutEntry);
+    setAskAbout({entry: t, label: `About the post at ${fmtTime(t)}`});
+    return;
+  }
   const b = ev.target.closest("button[data-recheck]");
   if (b) {
     const model = $("recheck-model").value;
@@ -882,11 +1114,17 @@ $("ask-row").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const text = $("question").value.trim();
   if (!text) return;
+  const body = {text, by: who()};
+  if (askAbout && askAbout.thread) body.thread = askAbout.thread;
+  else if (askAbout && askAbout.entry != null) body.entry = askAbout.entry;
+  else if (askAbout && askAbout.tile) body.tile = askAbout.tile;
   try {
-    await post("/api/assistant/ask", {text});
+    const out = await post("/api/assistant/ask", body);
     $("question").value = "";
+    if (out.thread) threadOpen.set(out.thread, true);
+    setAskAbout(null);
     follow.feed = true;
-    $("ask-status").textContent = "";
+    $("ask-status").textContent = out.thread ? `Asked in thread ${out.thread}; the manager answers there` : "";
   } catch (e) { toast(`Could not send the question: ${e.message}`); }
 });
 
@@ -1442,6 +1680,7 @@ function render() {
   renderHeader();
   renderAgents();
   renderAssistant();
+  renderRoles();
   renderKbTab();
   renderRefTab();
 }
