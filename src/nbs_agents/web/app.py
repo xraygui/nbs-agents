@@ -67,6 +67,8 @@ THREADS_SHOWN_S = 86400.0
 THREADS_SHOWN = 40
 # Newest entries of each headless role's record in the snapshot
 ROLE_ENTRIES = 20
+# Most of each role's figures from today kept for flipping back on its tile
+ROLE_FIGURES = 50
 LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
 COOKIE = "nbs_agents_token"
 LOGIN_PAGE = """<!doctype html><meta charset="utf-8"><title>nbs-agents sign in</title>
@@ -236,8 +238,8 @@ class WebState:
             ``kb_pending`` (knowledge-base items waiting for review),
             ``ref_pending`` (reference drafts and open draft requests),
             ``tiles`` (each assistant role's tile), ``roles`` (each
-            headless role's record for today: status, heartbeat, calls and
-            its newest entries), ``threads`` (the manager's open threads and
+            headless role's record for today: status, heartbeat, calls, its
+            newest entries and ``figures``, its tile posts with a figure), ``threads`` (the manager's open threads and
             those closed in the last day, with their messages, newest first),
             ``directives`` (proposed and active), ``threads_on`` and
             ``errors``.
@@ -289,6 +291,10 @@ class WebState:
                     }
                     out["roles"][record["role"]]["uid"] = uid
                     out["roles"][record["role"]]["log"] = (record.get("log") or [])[-ROLE_ENTRIES:]
+                    out["roles"][record["role"]]["figures"] = [
+                        {k: e.get(k) for k in ("t", "figure", "text", "severity", "run_uids")}
+                        for e in record.get("log") or [] if e.get("kind") == "tile" and e.get("figure")
+                    ][-ROLE_FIGURES:]
             else:
                 out["sessions"][uid] = record
         self._assistant_parts(out, errors)

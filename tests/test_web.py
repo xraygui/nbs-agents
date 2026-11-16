@@ -474,3 +474,14 @@ def test_directives_are_confirmed_rejected_and_revoked_by_a_person():
     assert any("jamie confirmed" in t for t in texts) and any("jamie revoked" in t for t in texts)
     snap = client.get("/api/snapshot").json()
     assert snap["directives"] == []
+
+
+def test_snapshot_keeps_each_roles_figures_for_flipping_back():
+    bl = roles_beamline()
+    uid = bl.agent_log.ensure_assistant_record(role="plotter")
+    bl.agent_log.append(uid, "tile", "scan 1", source="assistant:plotter", figure="att:00000000000000a1")
+    bl.agent_log.append(uid, "tile", "no figure", source="assistant:plotter")
+    bl.agent_log.append(uid, "summary", "scan 2 ![x](att:00000000000000a2)", source="assistant:plotter")
+    bl.agent_log.append(uid, "tile", "scan 2", source="assistant:plotter", figure="att:00000000000000a2")
+    figs = client_for(bl).get("/api/snapshot").json()["roles"]["plotter"]["figures"]
+    assert [(f["figure"], f["text"]) for f in figs] == [("att:00000000000000a1", "scan 1"), ("att:00000000000000a2", "scan 2")]
