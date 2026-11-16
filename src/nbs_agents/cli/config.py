@@ -31,12 +31,16 @@ ROLE_SINKS = ("tile", "record")
 # ``triggers`` name it. Operator questions, re-checks and the replies to a
 # ``role request`` always go to the chat role, and a request to the role it names.
 # ``digest`` replaces ``group_end`` for a driver's runs and ``checkin`` while a driver runs.
-ROLE_TRIGGERS = ("run", "alert", "flag", "group_end", "checkin", "digest")
+# ``beam`` is a change of the beam map or a status PV, which only the health worker watches.
+ROLE_TRIGGERS = ("run", "alert", "flag", "group_end", "checkin", "digest", "beam")
 # What today's single assistant reacts to, and what the chat role takes by default
 DEFAULT_TRIGGERS = ("alert", "flag", "group_end", "checkin", "digest")
 # The chat role when no [assistant.roles] are configured
 DEFAULT_CHAT_ROLE = "manager"
 ROLE_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+# Deterministic work the runner does for a headless role (``worker``), and
+# the triggers each one needs
+ROLE_WORKERS = {"plotter": ("run", "group_end"), "integrity": (), "health": ("beam",)}
 
 
 @dataclass
@@ -291,6 +295,14 @@ class RoleConfig:
     workdir : str
         The role's working folder; empty for ``[assistant] workdir`` (chat
         role) or that folder with ``-NAME`` added (headless roles).
+    worker : str
+        What the runner does for a headless role besides its calls (``ROLE_WORKERS``):
+        ``plotter`` reduces and plots each run with nbs-reduce and keeps the
+        tile without a model call, calling the model only to choose keys;
+        ``health`` keeps the tile from the beam map and status PVs, calling
+        the model only to explain a change for the worse; ``integrity`` gets
+        the prompt for a differential diagnosis of alerts and flags. Empty
+        for none.
     """
 
     name: str
@@ -301,6 +313,7 @@ class RoleConfig:
     triggers: Optional[list[str]] = None
     sinks: Optional[list[str]] = None
     workdir: str = ""
+    worker: str = ""
 
     @property
     def chat(self) -> bool:
@@ -354,6 +367,16 @@ def read_roles(table: Optional[dict[str, Any]]) -> dict[str, RoleConfig]:
                 if setting == "triggers":
                     hint = " (questions, re-checks and replies always go to the chat role)"
                 raise ValueError(f"{where} unknown {setting} {bad}; use {list(allowed)}{hint}")
+        if role.worker:
+            if role.worker not in ROLE_WORKERS:
+                raise ValueError(f"{where} worker must be one of {sorted(ROLE_WORKERS)}, not {role.worker!r}")
+            if role.chat:
+                raise ValueError(f"{where} the chat role has no worker")
+            missing = [t for t in ROLE_WORKERS[role.worker] if t not in (role.triggers or [])]
+            if missing:
+                raise ValueError(f"{where} the {role.worker} worker needs triggers {missing}")
+            if role.worker in ("plotter", "health") and "tile" not in (role.sinks or ["tile"]):
+                raise ValueError(f"{where} the {role.worker} worker needs the tile sink")
         out[name] = role
     if not out:
         return out
@@ -438,6 +461,18 @@ class AssistantConfig:
     beamtime_s : float
         Longest a directive that expires with the ``beamtime`` lasts, if the
         proposal does not change first.
+    reduce_command : str
+        The ``nbs-reduce`` command the plotter worker runs (in the role's
+        working folder).
+    reduce_timeout_s : float
+        Seconds before one nbs-reduce command is stopped.
+    reduce_wait_s : float
+        How long the plotter worker keeps trying a run that nbs-reduce cannot
+        read yet (Tiled may lag the document stream).
+    plot_runs : int
+        Most runs of the same plan, sample and edge in the plotter's overlay.
+    health_poll_s : float
+        Seconds between the health worker's reads of the beam map and status PVs.
     roles : dict
         ``{name: RoleConfig}`` from ``[assistant.roles]``; empty for one chat role.
     """
@@ -464,6 +499,11 @@ class AssistantConfig:
     thread_calls: int = 2
     thread_keep_days: float = 14.0
     beamtime_s: float = 3 * 86400.0
+    reduce_command: str = "nbs-reduce"
+    reduce_timeout_s: float = 120.0
+    reduce_wait_s: float = 60.0
+    plot_runs: int = 5
+    health_poll_s: float = 60.0
     roles: dict[str, RoleConfig] = field(default_factory=dict)
 
     def resolved_roles(self) -> dict[str, RoleConfig]:

@@ -25,6 +25,11 @@ follow-up resumes and that closes with a summary in ``notebook/threads.md``.
 Directives a person confirmed (``nbs_agents.directives``) go into their
 role's prompt until they expire.
 
+A headless role may have a ``worker`` (``nbs_agents.assistant.workers``):
+the plotter reduces and plots each run without a model call, the health
+watcher keeps its tile from the beam map and status PVs, and the integrity
+role gets a differential-diagnosis prompt without the driver's view.
+
 The assistant never queues, removes, aborts or starts anything and never
 messages driver agents. It is not opened with ``open_agent`` and never sits in
 the queue.
@@ -59,6 +64,7 @@ from nbs_agents.constants import AGENT_UID_KEY, CLOSE_AGENT_PLAN, OPEN_AGENT_PLA
 from .launcher import ClaudeLauncher, LaunchedAgent
 from .resources import SKILLS_DIR, WORKDIR_TEMPLATE
 from .timing import served_model_file
+from .workers import Health, Plotter
 from nbs_agents.agents.base import BaseAgent
 from nbs_agents.agents.external import ExternalAgent
 
@@ -525,6 +531,9 @@ class AssistantAgent(BaseAgent):
         self.directives = DirectiveStore.for_agent_log(agent_log)
         self._proposal: Any = None
         self._proposal_t = 0.0
+        # Workers of headless roles, by role name
+        self.plotters = {s.name: Plotter(self, s) for s in self.roles.values() if s.role.worker == "plotter"}
+        self.health = {s.name: Health(self, s) for s in self.roles.values() if s.role.worker == "health"}
 
     @property
     def launcher(self) -> Optional[ClaudeLauncher]:
@@ -830,16 +839,20 @@ class AssistantAgent(BaseAgent):
             LOGGER.exception("Could not reset the threads' running calls")
         self._thread = threading.Thread(target=self._loop, name="assistant", daemon=True)
         self._thread.start()
+        for worker in list(self.plotters.values()) + list(self.health.values()):
+            worker.start()
 
     def stop(self, reason: str) -> None:
         """Stop the timer thread and any running call."""
         self._stop_event.set()
-        for state in self.roles.values():
-            if state.call is not None and state.launcher is not None:
-                state.launcher.terminate(state.call["uid"])
+        for worker in list(self.plotters.values()) + list(self.health.values()):
+            worker.stop()
         for thread_id in list(self.thread_calls):
             if self.chat.launcher is not None:
                 self.chat.launcher.terminate(thread_id)
+        for state in self.roles.values():
+            if state.call is not None and state.launcher is not None:
+                state.launcher.terminate(state.call["uid"])
             if not state.chat:
                 try:
                     self.agent_log.set_status(state.uid, "stopped", close_reason=reason)
@@ -920,7 +933,11 @@ class AssistantAgent(BaseAgent):
         except Exception as exc:
             summary = {"error": f"{type(exc).__name__}: {exc}"}
         facts = run_facts(run, summary, self.norm)
-        beam = self._beam_expected()
+        facts["data_keys"] = sorted(run.keys)
+        if facts.get("points") is None:
+            facts["points"] = max((len(data[k]) for k in data), default=0)
+        # With a health role, beam loss is its alert, not a run's
+        beam = None if "beam" in self.routes else self._beam_expected()
         with self._lock:
             self._roll_day()
             result = self.triage.observe(facts, beam)
@@ -940,7 +957,7 @@ class AssistantAgent(BaseAgent):
                 driver_run=result["driver_run"] or None,
                 **refs,
             )
-            self._add_event("run", run_line(facts), [facts["uid"]])
+            self._add_event("run", run_line(facts), [facts["uid"]], run=facts)
             if result["ended_group"]:
                 self._group_ended(result["ended_group"], "the next run changed plan, sample or edge")
             for alert in result["alerts"]:
@@ -951,7 +968,7 @@ class AssistantAgent(BaseAgent):
 
     def _group_event(self, runs: list[dict[str, Any]], why: str) -> None:
         text = f"group finished ({why}): {describe_group(runs)}"
-        self._add_event("group_end", text, [r["uid"] for r in runs])
+        self._add_event("group_end", text, [r["uid"] for r in runs], runs=runs)
 
     def _add_event(self, kind: str, text: str, run_uids: Optional[list[str]] = None,
                    role: Optional[RoleState] = None, **extra: Any) -> None:
@@ -964,7 +981,24 @@ class AssistantAgent(BaseAgent):
             if name is None:
                 return
             role = self.roles[name]
-        role.pending.append({"kind": kind, "text": text, "run_uids": run_uids or [], "t": self.clock(), **extra})
+        event = {"kind": kind, "text": text, "run_uids": run_uids or [], "t": self.clock(), **extra}
+        plotter = self.plotters.get(role.name)
+        if plotter is not None and kind in ("run", "group_end"):
+            plotter.submit(event)
+            return
+        event.pop("run", None)
+        event.pop("runs", None)
+        role.pending.append(event)
+
+    def worker_events(self, events: list[tuple], role: Optional[RoleState] = None, **extra: Any) -> None:
+        """
+        Queue events from a worker thread: ``(kind, text, run_uids)`` each,
+        for ``role`` or the role that takes the kind, and start the calls.
+        """
+        with self._lock:
+            for kind, text, run_uids in events:
+                self._add_event(kind, text, run_uids, role=role, **extra)
+            self._dispatch()
 
     # ------------------------------------------------------------------ timer
 
@@ -1214,7 +1248,9 @@ class AssistantAgent(BaseAgent):
             "is missing here, cut short, or may have changed since.",
         ]
         lines += part("Beamline state (nbs-cli state)", state)
-        lines += part("Driver sessions", self.driver_state)
+        if role.role.worker != "integrity":
+            # The integrity role forms its view without the driver's
+            lines += part("Driver sessions", self.driver_state)
         lines += part(f"Today's record, last {SNAPSHOT_LOG_ENTRIES} entries (nbs-cli log)", record)
         lines += part("Your notebook", notebook)
         return lines
@@ -1283,6 +1319,7 @@ class AssistantAgent(BaseAgent):
                 "Answer each request with `nbs-cli post --kind answer --file notebook/post.md`;"
                 " the runner passes your answer back to whoever asked."
             )
+        lines += self.worker_lines(role, events)
         if "tile" in role.role.sinks and not role.chat:
             lines.append(
                 "Keep your tile current with `nbs-cli post --tile --severity ok|info|warn|alert --file notebook/tile.md`"
@@ -1290,6 +1327,42 @@ class AssistantAgent(BaseAgent):
             )
         lines.append("Post only what the operator needs, then end your turn.")
         return "\n".join(lines)
+
+    def worker_lines(self, role: RoleState, events: list[dict[str, Any]]) -> list[str]:
+        """What a worker role's call must do, for the events it got."""
+        worker = role.role.worker
+        kinds = {e["kind"] for e in events}
+        lines: list[str] = []
+        if worker == "plotter" and "keys" in kinds:
+            lines += ["", "The runner plots every run itself with nbs-reduce; it called you because it could not "
+                      "settle the keys for these runs. For each:",
+                      "1. Run `nbs-reduce keys RUN` and choose the signal(s) and normalization from what each key"
+                      " is and its signal check. Never pick a key with no signal; if no key shows the edge, say so.",
+                      "2. Plot with `nbs-reduce plot RUN --signal K --norm K --kind normalized -o plots/NAME.png`,"
+                      " store it with `nbs-cli attach plots/NAME.png --alt \"...\" --run RUN`, and post your tile with"
+                      " `nbs-cli post --tile --severity info --figure att:ID --file notebook/tile.md`: the keys and why.",
+                      "3. Write your choice as JSON, `{\"signal\": [\"K\"], \"norm\": \"K\" or null, \"why\": \"...\"}`,"
+                      " to the file named for that run below. The runner then uses those keys for the next runs of the"
+                      " same plan and detectors without calling you."]
+            lines += [f"- run {e['run_uids'][0]}: write `{e['choice_file']}`" for e in events
+                      if e["kind"] == "keys" and e.get("choice_file") and e["run_uids"]]
+        if worker == "integrity" and kinds & {"alert", "flag"}:
+            lines += ["", "You check the data's integrity. For each alert or flag:",
+                      "- Give a differential diagnosis: at least three causes that could explain it (for example"
+                      " sample charging or damage, a detector or amplifier problem, beam or i0 trouble, the wrong"
+                      " keys, a real feature of the sample), and what would tell them apart.",
+                      "- Check every cause you name that a read verb can check (nbs-reduce summary, keys and compare"
+                      " against earlier runs or references; nbs-cli run, beam, device) before you post.",
+                      "- Form your view from the data. Do not read the driver's record or reasoning (`nbs-cli log`"
+                      " of a driver session) before you post; the manager weighs both views.",
+                      "- Post the diagnosis to your record (`nbs-cli post --kind advice`, or `--kind alert` when"
+                      " someone must act) with `--runs` for the runs, and keep your tile to one line."]
+        if worker == "health" and "beam" in kinds:
+            lines += ["", "The runner has already written your tile from the beam map and status PVs. Explain the"
+                      " change in one or two lines: what it means for running and queued scans, the likely cause"
+                      " (nbs-cli beam --full shows the map), and whether a person must act. Post that to your tile"
+                      " with the same severity, or alert only if a person must act now."]
+        return lines
 
     def recheck_prompt(self, event: dict[str, Any]) -> str:
         """
@@ -1397,6 +1470,7 @@ class AssistantAgent(BaseAgent):
             "log_len": len(record.get("log") or []),
             "requests": [e["request"] for e in events if e.get("request")],
             "digest": digest and {"marks": digest["marks"], "ended": digest["ended"]},
+            "keys": [e for e in events if e["kind"] == "keys"],
         }
         run_uids = sorted({u for e in events for u in e["run_uids"]})
         kept = dict(list((record.get("call_events") or {}).items())[-(CALL_EVENTS_KEPT - 1):])
@@ -1497,6 +1571,8 @@ class AssistantAgent(BaseAgent):
                     LOGGER.exception("Failed to record the assistant call exit")
                 if not state.chat:
                     self._save_notebook(state)
+                if call.get("keys") and state.name in self.plotters:
+                    self.plotters[state.name].collect_choices(call["keys"])
                 if call.get("requests"):
                     self._forward_replies(state, call, launched.log_path)
                 if returncode != 0:
