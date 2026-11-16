@@ -339,7 +339,7 @@ def final_result(log_path: str) -> Optional[dict[str, Any]]:
     return None
 
 
-def prepare_workdir(workdir: str, refresh: bool = False) -> Path:
+def prepare_workdir(workdir: str, refresh: bool = False, cli_role: str = ASSISTANT_ROLE) -> Path:
     """
     Create the assistant's working folder from the template, keeping any
     existing files (the notebook is its memory between calls).
@@ -352,6 +352,10 @@ def prepare_workdir(workdir: str, refresh: bool = False) -> Path:
         Also overwrite files that differ from the template, such as an old
         ``.claude/settings.json``, keeping each old copy as ``*.bak``. The
         notebook is never overwritten.
+    cli_role : str, optional
+        ``NBS_CLI_ROLE`` that ``.claude/settings.json`` gives the folder's
+        commands: ``assistant:NAME`` for a headless role, whose settings
+        would otherwise make its nbs-cli post as the chat role.
 
     Returns
     -------
@@ -376,6 +380,7 @@ def prepare_workdir(workdir: str, refresh: bool = False) -> Path:
     else:
         LOGGER.warning("Assistant workdir template %s is missing", WORKDIR_TEMPLATE)
     (path / "notebook").mkdir(exist_ok=True)
+    set_settings_role(path / ".claude" / "settings.json", cli_role)
     # The skill now comes in the system prompt (claude-beamline), so drop the
     # link older versions made; it would offer the same text again as a skill.
     # Never remove a real folder.
@@ -383,6 +388,20 @@ def prepare_workdir(workdir: str, refresh: bool = False) -> Path:
     if skill_link.is_symlink():
         skill_link.unlink()
     return path
+
+
+def set_settings_role(settings: Path, cli_role: str) -> None:
+    """Change ``env.NBS_CLI_ROLE`` in a Claude settings file that sets another value."""
+    try:
+        data = json.loads(settings.read_text())
+    except (OSError, ValueError):
+        return
+    env = data.get("env")
+    if not isinstance(env, dict) or env.get("NBS_CLI_ROLE") in (None, cli_role):
+        return
+    env["NBS_CLI_ROLE"] = cli_role
+    settings.write_text(json.dumps(data, indent=2) + "\n")
+    LOGGER.info("Set NBS_CLI_ROLE=%s in %s", cli_role, settings)
 
 
 class RoleState:
@@ -826,7 +845,7 @@ class AssistantAgent(BaseAgent):
         """Prepare the workdirs, open today's records and start the timer thread."""
         for state in self.roles.values():
             try:
-                prepare_workdir(state.role.workdir)
+                prepare_workdir(state.role.workdir, cli_role=state.cli_role)
             except Exception:
                 LOGGER.exception("Could not prepare the %s role's workdir %s", state.name, state.role.workdir)
         self.open_log()

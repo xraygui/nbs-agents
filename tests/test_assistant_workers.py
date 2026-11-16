@@ -297,6 +297,18 @@ class HealthTests(WorkerTestCase):
         self.assertEqual(changes, [])
 
 
+class WorkdirTests(WorkerTestCase):
+    def test_headless_roles_post_as_themselves(self):
+        # The template's settings.json sets NBS_CLI_ROLE=assistant for every command
+        # Claude runs, which would make a headless role's nbs-cli post as the manager
+        self.agent.start()
+        self.addCleanup(self.agent.stop, "test")
+        for name, role in (("integrity", "assistant:integrity"), ("manager", "assistant")):
+            workdir = self.agent.roles[name].role.workdir
+            settings = json.loads((Path(workdir) / ".claude" / "settings.json").read_text())
+            self.assertEqual(settings["env"]["NBS_CLI_ROLE"], role)
+
+
 class IntegrityTests(WorkerTestCase):
     def test_integrity_prompt_leaves_out_the_driver(self):
         agent = ExternalAgent.__new__(ExternalAgent)
