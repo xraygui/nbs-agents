@@ -256,13 +256,10 @@ dialog.fig-dialog { width: min(1100px, calc(100vw - 32px)); padding: 12px; }
 .card .muted { color: var(--muted); }
 .card.staging { margin: 6px 0; }
 .card.staging.done { border-width: 1px; border-color: var(--border); background: var(--panel); }
-.card.staging.done.accepted .note { color: var(--ok); } .card.staging.done.rejected .note { color: var(--muted); }
+.card.staging.done.accepted .note { color: var(--ok); }
+.card.staging.done.rejected .note, .card.staging.done.changes_requested .note { color: var(--muted); }
 .staging-loose { margin-bottom: 6px; }
-#staging-dialog { width: min(640px, calc(100vw - 32px)); }
-.edit-op { border-top: 1px solid var(--border); padding: 6px 0; }
-.edit-op .check { align-items: flex-start; } .edit-op .ops { margin: 0; }
-.edit-kw { display: flex; gap: 8px; align-items: center; margin: 3px 0 3px 22px; font-size: 12px; }
-.edit-kw span { min-width: 90px; font-family: ui-monospace, monospace; } .edit-kw input { flex: 1; }
+
 nav #roles-toggle { margin-left: auto; }
 /* Manager threads in the assistant feed */
 .thread { margin: 2px 0 10px 12%; border-left: 3px solid var(--accent); padding: 2px 0 2px 10px; }
@@ -392,18 +389,6 @@ nav #roles-toggle { margin-left: auto; }
     <div class="actions">
       <button type="button" id="new-cancel">Cancel</button>
       <button type="submit" id="new-ok" class="primary">Queue agent</button>
-    </div>
-  </form>
-</dialog>
-<dialog id="staging-dialog">
-  <form method="dialog" id="staging-form">
-    <h3>Modify the staging proposal</h3>
-    <p>Change the plans' parameters or untick changes you don't want, then accept. Values are JSON or plain text. Nothing is queued to run.</p>
-    <div id="staging-edit"></div>
-    <div class="msg" id="staging-error" style="color:var(--bad)"></div>
-    <div class="actions">
-      <button type="button" id="staging-cancel">Cancel</button>
-      <button type="submit" id="staging-ok" class="primary">Accept with changes</button>
     </div>
   </form>
 </dialog>
@@ -1009,7 +994,7 @@ function setAskAbout(about) {
   el.innerHTML = about ? `<span class="chip">${esc(about.label)}<button type="button" id="ask-about-clear" title="Ask a new question instead">×</button></span>` : "";
   if (about) {
     $("ask-about-clear").addEventListener("click", () => setAskAbout(null));
-    $("question").placeholder = about.thread ? "Follow up in the thread" : "Your question";
+    $("question").placeholder = about.staging ? "What should the manager change?" : about.thread ? "Follow up in the thread" : "Your question";
     $("question").focus();
   } else {
     $("question").placeholder = "Ask the assistant (it reads the data; it never changes the queue)";
@@ -1144,10 +1129,10 @@ function stagingCard(p, staging) {
   const est = checks.estimate_s ? ` · ~${Math.round(checks.estimate_s / 60)} min` : "";
   const head = `<div class="hd"><b>Staging proposal</b> · ${fmtTime(p.created)}${est}</div><div>${rich(p.reason || "")}</div>`;
   if (p.status !== "pending") {
-    const what = p.status === "accepted" ? (p.accepted_ops ? "Accepted with changes" : "Accepted") : p.status[0].toUpperCase() + p.status.slice(1);
+    const what = {accepted: "Accepted", rejected: "Rejected", changes_requested: "Changes requested", withdrawn: "Withdrawn", stale: "Stale"}[p.status] || p.status;
     const by = p.decided_by ? ` by ${esc(String(p.decided_by).replace(/^web:/, ""))}` : "";
     const why = p.decision_reason ? `: ${esc(p.decision_reason)}` : "";
-    const ops = p.accepted_ops || p.ops || [];
+    const ops = p.ops || [];
     return `<div class="card staging done ${esc(p.status)}">${head}<ul class="ops">${ops.map((o, n) => opLine(o, items, ops[n - 1])).join("")}</ul>` +
       `<div class="note">${what}${by} at ${fmtTime(p.decided_at)}${why}</div></div>`;
   }
@@ -1159,7 +1144,7 @@ function stagingCard(p, staging) {
   return `<div class="card staging">${head}<ul class="ops">${(p.ops || []).map((o, n, ops) => opLine(o, items, ops[n - 1])).join("")}</ul>${notes}` +
     `<div class="acts"><button class="primary" data-staging="${esc(p.id)}" data-act="accept" ${p.stale ? "disabled" : ""}` +
     ` title="Apply it to nbs-gui's staging queue; nothing is queued to run">Accept</button>` +
-    `<button data-staging="${esc(p.id)}" data-act="modify" ${p.stale ? "disabled" : ""} title="Change the plans' parameters or drop some changes, then accept">Modify…</button>` +
+    `<button data-staging="${esc(p.id)}" data-act="modify" title="Tell the manager what to change; it proposes again">Modify…</button>` +
     `<button data-staging="${esc(p.id)}" data-act="reject">Reject</button></div></div>`;
 }
 // Staging proposals made in a thread sit in it by time; the rest go at the top of the feed
@@ -1261,13 +1246,19 @@ $("roles").addEventListener("click", async (ev) => {
   }
 });
 // ---------------------------------------------------------------- staging proposals
-let stagingEditing = null;  // the proposal being modified, as it was when the dialog opened
 function stagingProposal(id) {
   return ((snap.staging || {}).proposals || []).find((p) => p.id === id);
 }
 async function stagingAction(btn) {
   const id = btn.dataset.staging, act = btn.dataset.act;
-  if (act === "modify") { openStagingEdit(id); return; }
+  if (act === "modify") {
+    // A follow-up to the manager about this proposal, in its thread when it has one
+    const p = stagingProposal(id);
+    if (p && p.thread) threadOpen.set(p.thread, true);
+    setAskAbout({staging: id, label: `Changes to staging proposal ${id}`});
+    $("question").focus();
+    return;
+  }
   let reason = "";
   if (act === "reject") {
     reason = prompt("Why reject it? (optional; the manager sees this in the thread)");
@@ -1279,58 +1270,6 @@ async function stagingAction(btn) {
     toast(act === "accept" ? "Applied to the staging queue" : "Proposal rejected");
   } catch (e) { toast(e.message); btn.disabled = false; }
 }
-function valueText(v) { return typeof v === "string" ? v : JSON.stringify(v); }
-function parseValue(text) {
-  const t = text.trim();
-  try { return JSON.parse(t); } catch (e) { return t; }
-}
-function openStagingEdit(id) {
-  const p = stagingProposal(id);
-  if (!p) return;
-  stagingEditing = JSON.parse(JSON.stringify(p));
-  const items = (snap.staging || {}).items || [];
-  const rows = stagingEditing.ops.map((op, n) => {
-    let html = `<div class="edit-op"><label class="check"><input type="checkbox" data-keep="${n}" checked> <ul class="ops">${opLine(op, items, null)}</ul></label>`;
-    if (op.item) {
-      const kwargs = op.item.kwargs || {};
-      for (const [k, v] of Object.entries(kwargs)) {
-        html += `<div class="edit-kw"><span>${esc(k)}</span><input type="text" data-op="${n}" data-kw="${esc(k)}" value="${esc(valueText(v))}"></div>`;
-      }
-      if ((op.item.args || []).length) {
-        html += `<div class="edit-kw"><span>args</span><input type="text" data-op="${n}" data-args="1" value="${esc(JSON.stringify(op.item.args))}"></div>`;
-      }
-    }
-    return html + `</div>`;
-  });
-  $("staging-edit").innerHTML = rows.join("");
-  $("staging-error").textContent = "";
-  $("staging-dialog").showModal();
-}
-$("staging-cancel").addEventListener("click", () => $("staging-dialog").close());
-$("staging-form").addEventListener("submit", async (ev) => {
-  ev.preventDefault();
-  const p = stagingEditing;
-  if (!p) return;
-  const ops = [];
-  p.ops.forEach((op, n) => {
-    if (!$("staging-edit").querySelector(`input[data-keep="${n}"]`).checked) return;
-    const out = JSON.parse(JSON.stringify(op));
-    for (const input of $("staging-edit").querySelectorAll(`input[data-op="${n}"]`)) {
-      if (input.dataset.args) out.item.args = parseValue(input.value);
-      else out.item.kwargs[input.dataset.kw] = parseValue(input.value);
-    }
-    ops.push(out);
-  });
-  if (!ops.length) { $("staging-error").textContent = "Nothing left to accept; reject it instead."; return; }
-  $("staging-ok").disabled = true;
-  try {
-    await post(`/api/staging/${encodeURIComponent(p.id)}/decide`, {accept: true, by: who(), ops});
-    $("staging-dialog").close();
-    toast("Applied to the staging queue with your changes");
-  } catch (e) {
-    $("staging-error").textContent = e.message;
-  } finally { $("staging-ok").disabled = false; }
-});
 
 function renderAssistant() {
   const r = snap.assistant;
@@ -1385,6 +1324,17 @@ $("ask-row").addEventListener("submit", async (ev) => {
   const text = $("question").value.trim();
   if (!text) return;
   const body = {text, by: who()};
+  if (askAbout && askAbout.staging) {
+    try {
+      const out = await post(`/api/staging/${encodeURIComponent(askAbout.staging)}/changes`, body);
+      $("question").value = "";
+      if (out.thread) threadOpen.set(out.thread, true);
+      setAskAbout(null);
+      follow.feed = true;
+      $("ask-status").textContent = "Sent to the manager; it will propose again";
+    } catch (e) { toast(`Could not send it: ${e.message}`); }
+    return;
+  }
   if (askAbout && askAbout.thread) body.thread = askAbout.thread;
   else if (askAbout && askAbout.entry != null) body.entry = askAbout.entry;
   else if (askAbout && askAbout.tile) body.tile = askAbout.tile;

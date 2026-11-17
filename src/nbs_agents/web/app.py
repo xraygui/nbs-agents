@@ -51,7 +51,7 @@ from ..assistant.launcher import claude_launch_parameters
 from nbs_agents.queue import submit_agent_block
 from ..directives import DirectiveError, DirectiveStore, decide_directive, revoke_directive
 from ..beamline_info import STAGING
-from ..staging import StagingError, StaleProposal, check_ops, check_proposal
+from ..staging import StagingError, StaleProposal, check_proposal
 from ..threads import ThreadError, ThreadStore, open_thread
 from ..tiles import TileError, TileStore, acknowledge
 
@@ -107,7 +107,10 @@ class DecideBody(ByBody):
 
 class StagingDecideBody(ByBody):
     accept: bool
-    ops: Optional[list[dict[str, Any]]] = None
+
+
+class StagingChangesBody(MessageBody):
+    by: str = ""
 
 
 class RecheckBody(BaseModel):
@@ -543,21 +546,6 @@ class WebState:
             "proposals": proposals,
         }
 
-    def _check_modified(self, ops: list[dict[str, Any]]) -> None:
-        """Check the plans a person changed as the QueueServer would; refuse on any error."""
-        check = getattr(self.beamline, "check_plan", None)
-        if check is None:
-            return
-        errors = []
-        for n, op in enumerate(ops, 1):
-            item = op.get("item") if op.get("op") in ("add", "update") else None
-            if not isinstance(item, dict):
-                continue
-            result = check(item.get("name"), list(item.get("args") or []), dict(item.get("kwargs") or {}))
-            errors += [f"plan {n} ({item.get('name')}): {e}" for e in result.get("errors") or []]
-        if errors:
-            raise HTTPException(409, "; ".join(errors))
-
     def _staging_note(self, proposal: dict[str, Any], text: str) -> None:
         """Tell the thread that proposed it what the person did, so the manager sees it next time."""
         if not proposal.get("thread"):
@@ -567,12 +555,8 @@ class WebState:
         except Exception:
             pass
 
-    def decide_staging(self, proposal_id: str, accept: bool, by: str = "", reason: str = "",
-                       ops: Optional[list[dict[str, Any]]] = None) -> dict[str, Any]:
-        """
-        A person accepts a staging proposal (applying it to the staging queue,
-        as proposed or with their changes) or rejects it.
-        """
+    def decide_staging(self, proposal_id: str, accept: bool, by: str = "", reason: str = "") -> dict[str, Any]:
+        """A person accepts a staging proposal (applying it to the staging queue) or rejects it."""
         store = self._staging_store()
         if store is None:
             raise HTTPException(404, "this beamline has no shared staging queue")
@@ -580,12 +564,8 @@ class WebState:
         who = f"{SOURCE}:{name}"
         try:
             if accept:
-                if ops is not None:
-                    check_ops(ops)
-                    self._check_modified(ops)
-                out = store.accept(proposal_id, who, ops=ops)
-                what = "accepted with changes" if ops is not None else "accepted"
-                text = f"{name} {what} staging proposal {proposal_id}; the staging queue is now version {out['queue']['version']}."
+                out = store.accept(proposal_id, who)
+                text = f"{name} accepted staging proposal {proposal_id}; the staging queue is now version {out['queue']['version']}."
             else:
                 out = {"proposal": store.reject(proposal_id, who, reason=reason)}
                 text = f"{name} rejected staging proposal {proposal_id}" + (f": {reason.strip()}" if reason.strip() else ".")
@@ -594,6 +574,39 @@ class WebState:
         except StagingError as exc:
             raise HTTPException(409, str(exc))
         self._staging_note(out["proposal"], text)
+        return out
+
+    def request_staging_changes(self, proposal_id: str, text: str, by: str = "") -> dict[str, Any]:
+        """
+        A person asks the manager to change a staging proposal, as a follow-up
+        in the thread it came from (or a new thread): the proposal is closed as
+        ``changes_requested`` and the manager is expected to propose again.
+
+        Returns
+        -------
+        dict
+            ``proposal`` and what ``ask_assistant`` returned.
+        """
+        store = self._staging_store()
+        if store is None:
+            raise HTTPException(404, "this beamline has no shared staging queue")
+        text = text.strip()
+        if not text:
+            raise HTTPException(400, "say what should change")
+        proposal = store.get(proposal_id)
+        if proposal is None or proposal.get("status") != "pending":
+            raise HTTPException(409, f"staging proposal {proposal_id} is not pending")
+        thread = proposal.get("thread") or ""
+        if thread:
+            current = ThreadStore.for_agent_log(self.log).all().get(thread)
+            if not current or current.get("status") == "closed":
+                thread = ""
+        name = by.strip() or login_name()
+        out = self.ask_assistant(f"Please change staging proposal {proposal_id}: {text}", thread=thread, by=name)
+        try:
+            out["proposal"] = store.request_changes(proposal_id, f"{SOURCE}:{name}", text)
+        except StagingError as exc:
+            raise HTTPException(409, str(exc))
         return out
 
     def recheck(self, t: float, model: str = "", text: str = "") -> dict[str, Any]:
@@ -878,7 +891,11 @@ def create_app(
 
     @app.post("/api/staging/{proposal_id}/decide")
     async def decide_staging(proposal_id: str, body: StagingDecideBody):
-        return await write(state.decide_staging, proposal_id, body.accept, body.by, body.reason, body.ops)
+        return await write(state.decide_staging, proposal_id, body.accept, body.by, body.reason)
+
+    @app.post("/api/staging/{proposal_id}/changes")
+    async def staging_changes(proposal_id: str, body: StagingChangesBody):
+        return await write(state.request_staging_changes, proposal_id, body.text, body.by)
 
     @app.post("/api/assistant/recheck")
     async def recheck(body: RecheckBody):

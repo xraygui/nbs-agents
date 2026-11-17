@@ -12,8 +12,8 @@ nbs-gui, the web UI and `nbs-cli` see the same list. Nothing in it runs.
 You never change the staging queue directly, and you never queue anything. You
 **propose** changes; your proposal appears in the conversation in the web UI,
 in the thread you made it from, where a person accepts it, rejects it (saying
-why if they like), or modifies it (changes plans' parameters or drops some of
-the changes) and accepts that. Accepted changes land in the staging queue, and the
+why if they like), or asks you for changes (Modify). Small edits to a staged
+plan's parameters they make themselves in nbs-gui. Accepted changes land in the staging queue, and the
 person moves plans to the run queue in nbs-gui when they are ready.
 
 Run each `nbs-cli` command bare, as everywhere else.
@@ -27,6 +27,7 @@ Run each `nbs-cli` command bare, as everywhere else.
 | `staging propose --reason R --add PLAN params... [--add ...] [--after UID\|top\|end]` | Propose adding plans, kept in the order given, after an item (default: the end). |
 | `staging propose --reason R --remove UID`, `--move UID AFTER` | Propose removing or reordering staged items; combine with `--add` in one proposal. |
 | `staging propose --reason R --file notebook/staging-ops.json` | Many or mixed changes: a JSON list of ops, `{"op": "add", "item": {"name": PLAN, "args": [...], "kwargs": {...}}, "after_uid": UID or null or "top"}`, `{"op": "update", "item_uid": UID, "item": {...}}`, `{"op": "remove", "item_uid": UID}`, `{"op": "move", "item_uid": UID, "after_uid": ...}`. Write it with the Write tool first. |
+| `staging show --proposal ID` | One proposal whole, whatever its status: its ops, reason, checks and what became of it. |
 | `staging withdraw ID` | Take back your own pending proposal (for example when you replace it). |
 | `plans [NAME]`, `samples [--layout]`, `state`, `devices` | What plans exist and their parameters, the loaded samples, the XAS plan table, devices. |
 
@@ -49,11 +50,16 @@ as in `nbs-cli plans NAME` shows them.
    prefers, and label repeats and series with `group_name` where the plan takes it.
 5. Reply with what you proposed: the number of plans, the total estimated time
    from the proposal's `checks`, any warnings, and that it is waiting just below
-   for them to accept, modify or reject. Do not say it is staged until they
-   accept it. Their decision comes back to the thread as a note (accepted,
-   accepted with changes, or rejected and why); `staging show` has the result.
-6. If you replace a proposal, `staging withdraw` the old one so the person does
-   not see two.
+   for them to accept, ask for changes or reject. Do not say it is staged until
+   they accept it. Their decision comes back to the thread as a note (accepted,
+   or rejected and why); `staging show` has the result.
+6. If you replace a proposal on your own, `staging withdraw` the old one so the
+   person does not see two.
+7. A message "Please change staging proposal ID: ..." is a request for changes:
+   that proposal is already closed (`changes_requested`). Read it with
+   `staging show --proposal ID` and the list with `staging show`, then make a
+   new proposal with the changes, against the list as it is now. Ask if the
+   change is unclear.
 
 Proposals expire after 7 days. A proposal is `stale` when an item it refers to
 has gone from the staging queue (someone removed it); it can no longer apply, so

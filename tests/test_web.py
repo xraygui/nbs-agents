@@ -534,43 +534,46 @@ def test_staging_proposals_show_and_are_accepted_or_rejected_by_a_person():
     assert statuses == {add["id"]: "accepted", drop["id"]: "rejected"}
 
 
-def test_staging_proposal_modified_by_a_person_and_noted_in_its_thread():
+def test_staging_changes_are_a_follow_up_in_the_thread_and_decisions_are_noted():
     from nbs_agents.threads import ThreadStore, open_thread
 
     bl = StagingBeamline()
-    checked = []
-
-    def check_plan(name, args, kwargs):
-        checked.append((name, kwargs))
-        return {"errors": [] if kwargs.get("num", 0) < 100 else ["num too large"]}
-
-    bl.check_plan = check_plan
-    thread = open_thread(bl.agent_log, "stage three counts", "jamie")["thread"]
-    tid = thread["id"] if isinstance(thread, dict) else thread
+    tid = open_thread(bl.agent_log, "stage three counts", "jamie")["thread"]["id"]
     store = bl.staging
-    p = store.propose([{"op": "add", "item": {"name": "nbs_count", "kwargs": {"num": 3}}, "after_uid": None},
-                       {"op": "add", "item": {"name": "nbs_count", "kwargs": {"num": 4}}, "after_uid": None}],
-                      "two counts", "assistant:manager", thread=tid)
+    p = store.propose([{"op": "add", "item": {"name": "nbs_count", "kwargs": {"num": 3}}, "after_uid": None}],
+                      "a count", "assistant:manager", thread=tid)
     client = client_for(bl)
-    bad = [{"op": "add", "item": {"name": "nbs_count", "kwargs": {"num": 500}}, "after_uid": None}]
-    r = client.post(f"/api/staging/{p['id']}/decide", json={"accept": True, "by": "jamie", "ops": bad}, headers=ORIGIN)
-    assert r.status_code == 409 and "num too large" in r.json()["detail"]
-    assert store.get(p["id"])["status"] == "pending"
-    mine = [{"op": "add", "item": {"name": "nbs_count", "kwargs": {"num": 5}}, "after_uid": None}]
-    r = client.post(f"/api/staging/{p['id']}/decide", json={"accept": True, "by": "jamie", "ops": mine}, headers=ORIGIN)
-    assert r.status_code == 200
-    assert [i["kwargs"]["num"] for i in store.queue()["items"]] == [5]
+    assert client.post(f"/api/staging/{p['id']}/changes", json={"text": " ", "by": "jamie"},
+                       headers=ORIGIN).status_code == 400
+    r = client.post(f"/api/staging/{p['id']}/changes", json={"text": "make it 5 counts", "by": "jamie"}, headers=ORIGIN)
+    assert r.status_code == 200 and r.json()["thread"] == tid
     stored = store.get(p["id"])
-    assert stored["accepted_ops"] == mine and stored["ops"][0]["item"]["kwargs"]["num"] == 3
+    assert (stored["status"], stored["decision_reason"]) == ("changes_requested", "make it 5 counts")
+    messages = ThreadStore.for_agent_log(bl.agent_log).all()[tid]["messages"]
+    assert messages[-1]["kind"] == "question" and "make it 5 counts" in messages[-1]["text"] and p["id"] in messages[-1]["text"]
+    assert store.queue()["version"] == 0
+    assert client.post(f"/api/staging/{p['id']}/changes", json={"text": "again"}, headers=ORIGIN).status_code == 409
+    q = store.propose([{"op": "add", "item": {"name": "nbs_count", "kwargs": {"num": 5}}, "after_uid": None}],
+                      "5 counts", "assistant:manager", thread=tid)
+    assert client.post(f"/api/staging/{q['id']}/decide", json={"accept": True, "by": "jamie"}, headers=ORIGIN).status_code == 200
     notes = [m for m in ThreadStore.for_agent_log(bl.agent_log).all()[tid]["messages"] if m["kind"] == "note"]
-    assert "jamie accepted with changes" in notes[-1]["text"]
-    q = store.propose([{"op": "remove", "item_uid": store.queue()["items"][0]["item_uid"]}], "drop it",
+    assert notes[-1]["text"].startswith(f"jamie accepted staging proposal {q['id']}")
+    r = store.propose([{"op": "remove", "item_uid": store.queue()["items"][0]["item_uid"]}], "drop it",
                       "assistant:manager", thread=tid)
-    r = client.post(f"/api/staging/{q['id']}/decide", json={"accept": False, "by": "jamie", "reason": "keep it"},
-                    headers=ORIGIN)
-    assert r.status_code == 200 and store.get(q["id"])["decision_reason"] == "keep it"
+    assert client.post(f"/api/staging/{r['id']}/decide", json={"accept": False, "by": "jamie", "reason": "keep it"},
+                       headers=ORIGIN).status_code == 200
     notes = [m for m in ThreadStore.for_agent_log(bl.agent_log).all()[tid]["messages"] if m["kind"] == "note"]
-    assert notes[-1]["text"].endswith("rejected staging proposal " + q["id"] + ": keep it")
+    assert notes[-1]["text"].endswith(f"rejected staging proposal {r['id']}: keep it")
+
+
+def test_staging_changes_without_a_thread_go_to_the_manager_as_a_new_question():
+    bl = StagingBeamline()
+    p = bl.staging.propose([{"op": "add", "item": {"name": "nbs_count", "kwargs": {}}, "after_uid": None}],
+                           "a count", "jamie")
+    r = client_for(bl).post(f"/api/staging/{p['id']}/changes", json={"text": "two of them", "by": "jamie"},
+                            headers=ORIGIN)
+    assert r.status_code == 200  # a new thread, or the record when threads are off as here
+    assert bl.staging.get(p["id"])["status"] == "changes_requested"
 
 
 def test_no_staging_without_a_provider():

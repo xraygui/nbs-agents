@@ -769,6 +769,26 @@ class Beamline:
             "note": "people move staged plans to the queue in nbs-gui; nbs-cli only proposes changes",
         }
 
+    def staging_proposal(self, proposal_id: str) -> dict[str, Any]:
+        """
+        One staging proposal whole, whatever its status.
+
+        Returns
+        -------
+        dict
+            The ``proposal`` with ``created`` and ``decided_at`` as ISO times,
+            and, while pending, whether it still fits the list (``fit``).
+        """
+        store = self.staging
+        proposal = store.get(proposal_id)
+        if proposal is None:
+            raise CliError(f"no staging proposal {proposal_id} (they expire after 7 days)")
+        proposal = {**proposal, "created": _iso(proposal.get("created")), "decided_at": _iso(proposal.get("decided_at"))}
+        out: dict[str, Any] = {"proposal": proposal}
+        if proposal.get("status") == "pending":
+            out["fit"] = check_proposal(proposal, store.queue())
+        return out
+
     def staging_propose(self, ops: list[dict[str, Any]], reason: str) -> dict[str, Any]:
         """
         Propose changes to the shared staging queue for a person to accept in nbs-gui.

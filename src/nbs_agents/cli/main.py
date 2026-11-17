@@ -350,7 +350,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("staging", parents=[common],
                        help="nbs-gui's shared staging queue: read it, check plans, propose changes a person accepts")
     staging = p.add_subparsers(dest="staging_command", required=True)
-    staging.add_parser("show", parents=[common], help="the staged plans, with estimates, and pending proposals")
+    q = staging.add_parser("show", parents=[common], help="the staged plans, with estimates, and pending proposals")
+    q.add_argument("--proposal", metavar="ID", help="show one proposal whole instead, whatever its status")
     q = staging.add_parser("validate", parents=[common], help="check a plan as the QueueServer would, without queuing it")
     q.add_argument("plan")
     q.add_argument("params", nargs="*", help="positional values and key=value pairs (JSON or Python literals)")
@@ -858,7 +859,7 @@ def run_command(bl: Beamline, args: argparse.Namespace) -> Any:
         return bl.directive_decide(args.id, args.directive_command, reason=getattr(args, "reason", ""))
     if cmd == "staging":
         if args.staging_command == "show":
-            return bl.staging_show()
+            return bl.staging_proposal(args.proposal) if args.proposal else bl.staging_show()
         if args.staging_command == "validate":
             plan_args, plan_kwargs = parse_plan_params(args.params)
             return bl.check_plan(args.plan, plan_args, plan_kwargs)

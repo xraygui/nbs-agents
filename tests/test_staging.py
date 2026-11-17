@@ -260,6 +260,20 @@ class ParserTests(unittest.TestCase):
         out = run_command(bl, build_parser().parse_args(["staging", "show"]))
         self.assertEqual(out["n_items"], 1)
 
+    def test_run_command_show_one_proposal_whatever_its_status(self):
+        bl = VerbTests().make(staged("a"))
+        p = bl.staging.propose([{"op": "remove", "item_uid": "a"}], "drop a", "assistant:manager")
+        out = run_command(bl, build_parser().parse_args(["staging", "show", "--proposal", p["id"]]))
+        self.assertEqual(out["proposal"]["ops"], p["ops"])
+        self.assertFalse(out["fit"]["stale"])
+        bl.staging.request_changes(p["id"], "web:jamie", "keep a, drop nothing")
+        out = run_command(bl, build_parser().parse_args(["staging", "show", "--proposal", p["id"]]))
+        self.assertEqual(out["proposal"]["status"], "changes_requested")
+        self.assertEqual(out["proposal"]["decision_reason"], "keep a, drop nothing")
+        self.assertNotIn("fit", out)
+        with self.assertRaises(CliError):
+            run_command(bl, build_parser().parse_args(["staging", "show", "--proposal", "nope"]))
+
 
 if __name__ == "__main__":
     unittest.main()
