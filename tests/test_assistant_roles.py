@@ -495,6 +495,8 @@ class RoleScriptTests(unittest.TestCase):
     def test_chat_role_is_assistant(self):
         out = self.run_script("--headless", "--role", "assistant", env={"NBS_CLI_ROLE": "driver"})
         self.assertEqual(out["role"], "assistant")
+        # The chat role may propose staging changes without a permission prompt
+        self.assertIn("Bash(nbs-cli staging:*)", out["argv"])
 
 
 if __name__ == "__main__":

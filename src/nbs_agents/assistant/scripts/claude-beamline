@@ -255,8 +255,9 @@ case "$role" in
                "Bash(sandbox-python:*)" "Bash(nbs-cli post:*)" "Bash(nbs-reduce:*)")
         # role: the chat role reads the other roles and files requests to them (nbs-cli
         # refuses it to headless roles); thread reads its threads; directive proposes
-        # (only a person confirms: nbs-cli refuses that to the assistant)
-        for verb in state beam plans samples metadata devices device diagnose run runs log attach kb ref role thread directive; do
+        # (only a person confirms: nbs-cli refuses that to the assistant); staging proposes
+        # changes to nbs-gui's staging queue (only the chat role; a person accepts)
+        for verb in state beam plans samples metadata devices device diagnose run runs log attach kb ref role thread directive staging; do
             tools+=("Bash(nbs-cli $verb:*)")
         done
         ;;
