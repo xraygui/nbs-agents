@@ -248,14 +248,21 @@ dialog.fig-dialog { width: min(1100px, calc(100vw - 32px)); padding: 12px; }
 .card .hd { font-size: 12px; color: var(--muted); }
 .card .acts { display: flex; gap: 4px; margin-top: 5px; }
 .dirline { margin: 2px 8px; font-size: 12px; color: var(--muted); }
-/* Staging proposals and nbs-gui's staged plans, in the sidebar */
-.card .ops { margin: 4px 0 0; padding: 0; list-style: none; font-family: ui-monospace, monospace; font-size: 12px; }
-.card .ops li { padding: 1px 0; }
-.card .ops .add { color: var(--ok); } .card .ops .remove { color: var(--bad); }
+/* Staging proposals, in the conversation */
+.ops { margin: 4px 0 0; padding: 0; list-style: none; font-family: ui-monospace, monospace; font-size: 12px; }
+.ops li { padding: 1px 0; }
+.ops .add { color: var(--ok); } .ops .remove { color: var(--bad); }
 .card .note { font-size: 12px; margin-top: 3px; } .card .note.bad { color: var(--bad); } .card .note.warn { color: var(--warn); }
-.staged { margin: 8px; font-size: 12px; }
-.staged .muted, .card .muted { color: var(--muted); }
-.staged ol { margin: 4px 0; padding-left: 22px; font-family: ui-monospace, monospace; }
+.card .muted { color: var(--muted); }
+.card.staging { margin: 6px 0; }
+.card.staging.done { border-width: 1px; border-color: var(--border); background: var(--panel); }
+.card.staging.done.accepted .note { color: var(--ok); } .card.staging.done.rejected .note { color: var(--muted); }
+.staging-loose { margin-bottom: 6px; }
+#staging-dialog { width: min(640px, calc(100vw - 32px)); }
+.edit-op { border-top: 1px solid var(--border); padding: 6px 0; }
+.edit-op .check { align-items: flex-start; } .edit-op .ops { margin: 0; }
+.edit-kw { display: flex; gap: 8px; align-items: center; margin: 3px 0 3px 22px; font-size: 12px; }
+.edit-kw span { min-width: 90px; font-family: ui-monospace, monospace; } .edit-kw input { flex: 1; }
 nav #roles-toggle { margin-left: auto; }
 /* Manager threads in the assistant feed */
 .thread { margin: 2px 0 10px 12%; border-left: 3px solid var(--accent); padding: 2px 0 2px 10px; }
@@ -364,7 +371,7 @@ nav #roles-toggle { margin-left: auto; }
       <div id="ref-detail" class="scroll" style="flex:1"></div>
     </div>
   </section>
-  <!-- The assistant roles' tiles, and the directives and staging proposals waiting for a person, beside every view -->
+  <!-- The assistant roles' tiles and the directives waiting for a person, beside every view -->
   <aside id="roles-side" hidden>
     <div class="col-head"><h2>Assistant roles</h2></div>
     <div id="roles"></div>
@@ -385,6 +392,18 @@ nav #roles-toggle { margin-left: auto; }
     <div class="actions">
       <button type="button" id="new-cancel">Cancel</button>
       <button type="submit" id="new-ok" class="primary">Queue agent</button>
+    </div>
+  </form>
+</dialog>
+<dialog id="staging-dialog">
+  <form method="dialog" id="staging-form">
+    <h3>Modify the staging proposal</h3>
+    <p>Change the plans' parameters or untick changes you don't want, then accept. Values are JSON or plain text. Nothing is queued to run.</p>
+    <div id="staging-edit"></div>
+    <div class="msg" id="staging-error" style="color:var(--bad)"></div>
+    <div class="actions">
+      <button type="button" id="staging-cancel">Cancel</button>
+      <button type="submit" id="staging-ok" class="primary">Accept with changes</button>
     </div>
   </form>
 </dialog>
@@ -970,7 +989,10 @@ function threadBlock(e) {
   if (about) head += ` · ${esc(about)}`;
   head += ` · ${answers} answer(s)`;
   if (th.calling) head += ` · <span class="thinking">the manager is answering…</span>`;
-  let inner = msgs.map(threadMsg).join("");
+  const props = stagingFor(th.id);
+  const parts = [...msgs.map((m) => [m.t || 0, threadMsg(m)]), ...props.map((p) => [p.created || 0, stagingCard(p, snap.staging)])];
+  parts.sort((a, b) => a[0] - b[0]);
+  let inner = parts.map((x) => x[1]).join("");
   if (!msgs.length && !th.calling) inner += `<div class="empty">Waiting for the manager.</div>`;
   if (th.calling && msgs.length) inner += `<div class="thinking">the manager is answering…</div>`;
   if (closed && th.summary) inner += `<div class="hd" style="font-size:12px;color:var(--muted);margin-top:4px"><b>Summary:</b> ${esc(th.summary)}</div>`;
@@ -1120,24 +1142,38 @@ function stagingCard(p, staging) {
   const items = staging.items || [];
   const checks = p.checks || {};
   const est = checks.estimate_s ? ` · ~${Math.round(checks.estimate_s / 60)} min` : "";
+  const head = `<div class="hd"><b>Staging proposal</b> · ${fmtTime(p.created)}${est}</div><div>${rich(p.reason || "")}</div>`;
+  if (p.status !== "pending") {
+    const what = p.status === "accepted" ? (p.accepted_ops ? "Accepted with changes" : "Accepted") : p.status[0].toUpperCase() + p.status.slice(1);
+    const by = p.decided_by ? ` by ${esc(String(p.decided_by).replace(/^web:/, ""))}` : "";
+    const why = p.decision_reason ? `: ${esc(p.decision_reason)}` : "";
+    const ops = p.accepted_ops || p.ops || [];
+    return `<div class="card staging done ${esc(p.status)}">${head}<ul class="ops">${ops.map((o, n) => opLine(o, items, ops[n - 1])).join("")}</ul>` +
+      `<div class="note">${what}${by} at ${fmtTime(p.decided_at)}${why}</div></div>`;
+  }
   let notes = "";
   if (p.stale) notes += `<div class="note bad">Items it refers to are no longer staged; it cannot apply.</div>`;
   else if (p.changed) notes += `<div class="note warn">The staged list changed since this was proposed; it applies to the list as it is now.</div>`;
   for (const w of checks.warnings || []) notes += `<div class="note warn">${esc(w)}</div>`;
   for (const e of checks.errors || []) notes += `<div class="note bad">${esc(e)}</div>`;
-  return `<div class="card"><div class="hd"><b>Staging proposal</b> from ${esc(p.author || "?")} · ${fmtTime(p.created)}${est}` +
-    `${p.thread ? ` · thread ${esc(p.thread)}` : ""}</div><div>${rich(p.reason || "")}</div>` +
-    `<ul class="ops">${(p.ops || []).map((o, n, ops) => opLine(o, items, ops[n - 1])).join("")}</ul>${notes}` +
-    `<div class="acts"><button class="primary" data-staging="${esc(p.id)}" data-accept="1" ${p.stale ? "disabled" : ""}` +
+  return `<div class="card staging">${head}<ul class="ops">${(p.ops || []).map((o, n, ops) => opLine(o, items, ops[n - 1])).join("")}</ul>${notes}` +
+    `<div class="acts"><button class="primary" data-staging="${esc(p.id)}" data-act="accept" ${p.stale ? "disabled" : ""}` +
     ` title="Apply it to nbs-gui's staging queue; nothing is queued to run">Accept</button>` +
-    `<button data-staging="${esc(p.id)}" data-accept="0">Reject</button></div></div>`;
+    `<button data-staging="${esc(p.id)}" data-act="modify" ${p.stale ? "disabled" : ""} title="Change the plans' parameters or drop some changes, then accept">Modify…</button>` +
+    `<button data-staging="${esc(p.id)}" data-act="reject">Reject</button></div></div>`;
 }
-function stagedList(staging) {
-  const items = staging.items || [];
-  const by = staging.updated_by ? ` · last change by ${esc(staging.updated_by)}` : "";
-  return `<details class="staged"><summary>${items.length} plan${items.length === 1 ? "" : "s"} staged in nbs-gui${by}</summary>` +
-    (items.length ? `<ol>${items.map((i) => `<li>${esc(planText(i))}</li>`).join("")}</ol>` : `<div class="muted">The staging queue is empty.</div>`) +
-    `<div class="muted">People move staged plans to the queue in nbs-gui.</div></details>`;
+// Staging proposals made in a thread sit in it by time; the rest go at the top of the feed
+function stagingFor(threadId) {
+  const st = snap.staging;
+  if (!st) return [];
+  return (st.proposals || []).filter((p) => (p.thread || null) === threadId);
+}
+function looseStaging() {
+  const st = snap.staging;
+  if (!st) return "";
+  const shown = new Set((snap.threads || []).map((t) => t.id));
+  const loose = (st.proposals || []).filter((p) => p.status === "pending" && !(p.thread && shown.has(p.thread)));
+  return loose.length ? `<div class="staging-loose">${loose.map((p) => stagingCard(p, st)).join("")}</div>` : "";
 }
 const roleOpen = new Map();
 function directiveCard(d) {
@@ -1151,12 +1187,10 @@ function directiveCard(d) {
 function renderRoles() {
   const tiles = snap.tiles || {}, roles = snap.roles || {};
   const proposed = (snap.directives || []).filter((d) => d.status === "proposed");
-  const staging = snap.staging;
-  const stagingProps = staging ? staging.proposals || [] : [];
   const names = [...new Set([...Object.keys(roles), ...Object.keys(tiles)])];
-  const any = names.length > 0 || proposed.length > 0 || stagingProps.length > 0;
+  const any = names.length > 0 || proposed.length > 0;
   const nHeld = Object.values(tiles).filter(heldAlert).length;
-  const nWaiting = nHeld + proposed.length + stagingProps.length;
+  const nWaiting = nHeld + proposed.length;
   $("roles-toggle").hidden = !any;
   $("roles-toggle").classList.toggle("waiting", nWaiting > 0);
   $("roles-toggle").textContent = `Roles${nWaiting ? ` (${nWaiting})` : ""}`;
@@ -1164,8 +1198,7 @@ function renderRoles() {
   if (!any) return;
   names.sort((a, b) => (heldAlert(tiles[b]) - heldAlert(tiles[a])) ||
     ((SEVERITY_ORDER[(tiles[a] || {}).severity] ?? 4) - (SEVERITY_ORDER[(tiles[b] || {}).severity] ?? 4)) || a.localeCompare(b));
-  setHtml("roles", proposed.map(directiveCard).join("") + stagingProps.map((p) => stagingCard(p, staging)).join("") +
-    (stagingProps.length ? stagedList(staging) : "") + names.map((n) => roleTile(n, tiles[n], roles[n])).join(""));
+  setHtml("roles", proposed.map(directiveCard).join("") + names.map((n) => roleTile(n, tiles[n], roles[n])).join(""));
 }
 $("roles-toggle").addEventListener("click", () => {
   rolesHidden = !rolesHidden;
@@ -1181,7 +1214,6 @@ $("roles").addEventListener("click", async (ev) => {
   const about = ev.target.closest("button[data-about-tile]");
   const decide = ev.target.closest("button[data-decide]");
   const revoke = ev.target.closest("button[data-revoke]");
-  const stage = ev.target.closest("button[data-staging]");
   const flip = ev.target.closest("button[data-flip]");
   const zoom = ev.target.closest("a[data-zoom]");
   if (zoom && !(ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.button)) {
@@ -1216,11 +1248,6 @@ $("roles").addEventListener("click", async (ev) => {
       decide.disabled = true;
       await post(`/api/directives/${encodeURIComponent(decide.dataset.decide)}/decide`, {confirm: confirmIt, by: who(), reason});
       toast(confirmIt ? "Directive confirmed" : "Directive rejected");
-    } else if (stage) {
-      const acceptIt = stage.dataset.accept === "1";
-      stage.disabled = true;
-      await post(`/api/staging/${encodeURIComponent(stage.dataset.staging)}/decide`, {accept: acceptIt, by: who()});
-      toast(acceptIt ? "Proposal applied to the staging queue" : "Proposal rejected");
     } else if (revoke) {
       const reason = prompt("Revoke this directive now? Why (optional):");
       if (reason === null) return;
@@ -1230,9 +1257,81 @@ $("roles").addEventListener("click", async (ev) => {
     }
   } catch (e) {
     toast(e.message);
-    for (const b of [ack, decide, revoke, stage]) if (b) b.disabled = false;
+    for (const b of [ack, decide, revoke]) if (b) b.disabled = false;
   }
 });
+// ---------------------------------------------------------------- staging proposals
+let stagingEditing = null;  // the proposal being modified, as it was when the dialog opened
+function stagingProposal(id) {
+  return ((snap.staging || {}).proposals || []).find((p) => p.id === id);
+}
+async function stagingAction(btn) {
+  const id = btn.dataset.staging, act = btn.dataset.act;
+  if (act === "modify") { openStagingEdit(id); return; }
+  let reason = "";
+  if (act === "reject") {
+    reason = prompt("Why reject it? (optional; the manager sees this in the thread)");
+    if (reason === null) return;
+  }
+  btn.disabled = true;
+  try {
+    await post(`/api/staging/${encodeURIComponent(id)}/decide`, {accept: act === "accept", by: who(), reason});
+    toast(act === "accept" ? "Applied to the staging queue" : "Proposal rejected");
+  } catch (e) { toast(e.message); btn.disabled = false; }
+}
+function valueText(v) { return typeof v === "string" ? v : JSON.stringify(v); }
+function parseValue(text) {
+  const t = text.trim();
+  try { return JSON.parse(t); } catch (e) { return t; }
+}
+function openStagingEdit(id) {
+  const p = stagingProposal(id);
+  if (!p) return;
+  stagingEditing = JSON.parse(JSON.stringify(p));
+  const items = (snap.staging || {}).items || [];
+  const rows = stagingEditing.ops.map((op, n) => {
+    let html = `<div class="edit-op"><label class="check"><input type="checkbox" data-keep="${n}" checked> <ul class="ops">${opLine(op, items, null)}</ul></label>`;
+    if (op.item) {
+      const kwargs = op.item.kwargs || {};
+      for (const [k, v] of Object.entries(kwargs)) {
+        html += `<div class="edit-kw"><span>${esc(k)}</span><input type="text" data-op="${n}" data-kw="${esc(k)}" value="${esc(valueText(v))}"></div>`;
+      }
+      if ((op.item.args || []).length) {
+        html += `<div class="edit-kw"><span>args</span><input type="text" data-op="${n}" data-args="1" value="${esc(JSON.stringify(op.item.args))}"></div>`;
+      }
+    }
+    return html + `</div>`;
+  });
+  $("staging-edit").innerHTML = rows.join("");
+  $("staging-error").textContent = "";
+  $("staging-dialog").showModal();
+}
+$("staging-cancel").addEventListener("click", () => $("staging-dialog").close());
+$("staging-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const p = stagingEditing;
+  if (!p) return;
+  const ops = [];
+  p.ops.forEach((op, n) => {
+    if (!$("staging-edit").querySelector(`input[data-keep="${n}"]`).checked) return;
+    const out = JSON.parse(JSON.stringify(op));
+    for (const input of $("staging-edit").querySelectorAll(`input[data-op="${n}"]`)) {
+      if (input.dataset.args) out.item.args = parseValue(input.value);
+      else out.item.kwargs[input.dataset.kw] = parseValue(input.value);
+    }
+    ops.push(out);
+  });
+  if (!ops.length) { $("staging-error").textContent = "Nothing left to accept; reject it instead."; return; }
+  $("staging-ok").disabled = true;
+  try {
+    await post(`/api/staging/${encodeURIComponent(p.id)}/decide`, {accept: true, by: who(), ops});
+    $("staging-dialog").close();
+    toast("Applied to the staging queue with your changes");
+  } catch (e) {
+    $("staging-error").textContent = e.message;
+  } finally { $("staging-ok").disabled = false; }
+});
+
 function renderAssistant() {
   const r = snap.assistant;
   const [text, color] = snap.errors && snap.errors.agent_log ? [`Assistant unavailable: ${snap.errors.agent_log}`, "--bad"] : assistantState(r);
@@ -1243,7 +1342,8 @@ function renderAssistant() {
   renderRecheckModels(r);
   const showRuns = $("show-runs").checked;
   const entries = ((r && r.log) || []).filter((e) => showRuns || e.kind !== "run");
-  setHtml("feed", entries.length ? entries.map(assistantEntry).join("") : `<div class="empty">Nothing from the assistant yet today.</div>`);
+  const loose = looseStaging();
+  setHtml("feed", loose + (entries.length ? entries.map(assistantEntry).join("") : loose ? "" : `<div class="empty">Nothing from the assistant yet today.</div>`));
   const ok = !(snap.errors && snap.errors.agent_log);
   $("question").disabled = !ok; $("ask").disabled = !ok;
 }
@@ -1253,6 +1353,8 @@ $("feed").addEventListener("toggle", (ev) => {
   if (d.matches && d.matches("details.thread")) threadOpen.set(d.dataset.thread, d.open);
 }, true);
 $("feed").addEventListener("click", async (ev) => {
+  const stage = ev.target.closest("button[data-staging]");
+  if (stage) { await stagingAction(stage); return; }
   const reply = ev.target.closest("button[data-reply]");
   if (reply) { setAskAbout({thread: reply.dataset.reply, label: `Follow-up in thread ${reply.dataset.reply}`}); return; }
   const about = ev.target.closest("button[data-about-entry]");

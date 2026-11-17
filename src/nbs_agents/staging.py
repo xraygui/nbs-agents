@@ -320,7 +320,8 @@ class StagingStore:
         self._write(proposal, now)
         return proposal
 
-    def set_status(self, proposal_id: str, status: str, by: str, t: Optional[float] = None) -> dict[str, Any]:
+    def set_status(self, proposal_id: str, status: str, by: str, t: Optional[float] = None,
+                   **fields: Any) -> dict[str, Any]:
         """
         Decide or end a pending proposal.
 
@@ -334,6 +335,8 @@ class StagingStore:
             Who decided.
         t : float, optional
             Time, for tests.
+        **fields
+            More fields to store, such as ``decision_reason`` or ``accepted_ops``.
 
         Returns
         -------
@@ -353,11 +356,12 @@ class StagingStore:
         if proposal.get("status") != "pending":
             raise StagingError(f"proposal {proposal_id} is already {proposal.get('status')}")
         now = time.time() if t is None else t
-        proposal.update(status=status, decided_by=by, decided_at=now)
+        proposal.update(fields, status=status, decided_by=by, decided_at=now)
         self._write(proposal, now)
         return proposal
 
-    def accept(self, proposal_id: str, by: str, t: Optional[float] = None, tries: int = 3) -> dict[str, Any]:
+    def accept(self, proposal_id: str, by: str, t: Optional[float] = None, tries: int = 3,
+               ops: Optional[list[dict[str, Any]]] = None) -> dict[str, Any]:
         """
         A person accepts a pending proposal: apply its ops to the staging queue.
 
@@ -376,6 +380,9 @@ class StagingStore:
             Time, for tests.
         tries : int, optional
             Attempts when another writer changes the queue meanwhile.
+        ops : list of dict, optional
+            The ops as the person modified them, applied instead of the
+            proposal's; stored as ``accepted_ops`` beside the proposed ones.
 
         Returns
         -------
@@ -396,6 +403,9 @@ class StagingStore:
             raise StagingError(f"no staging proposal {proposal_id}")
         if proposal.get("status") != "pending":
             raise StagingError(f"proposal {proposal_id} is already {proposal.get('status')}")
+        if ops is not None:
+            check_ops(ops)
+            proposal = {**proposal, "ops": ops}
         for _ in range(tries):
             now = time.time() if t is None else t
             with self.redis.pipeline() as pipe:
@@ -423,12 +433,14 @@ class StagingStore:
                     pipe.execute()
                 except WatchError:
                     continue
-            return {"proposal": self.set_status(proposal_id, "accepted", by, t=now), "queue": new}
+            extra = {"accepted_ops": ops} if ops is not None else {}
+            return {"proposal": self.set_status(proposal_id, "accepted", by, t=now, **extra), "queue": new}
         raise StagingError("the staging queue kept changing; try again")
 
-    def reject(self, proposal_id: str, by: str, t: Optional[float] = None) -> dict[str, Any]:
-        """A person rejects a pending proposal; the staging queue is not touched."""
-        return self.set_status(proposal_id, "rejected", by, t=t)
+    def reject(self, proposal_id: str, by: str, t: Optional[float] = None, reason: str = "") -> dict[str, Any]:
+        """A person rejects a pending proposal, saying why if they like; the staging queue is not touched."""
+        extra = {"decision_reason": reason.strip()} if reason and reason.strip() else {}
+        return self.set_status(proposal_id, "rejected", by, t=t, **extra)
 
     def withdraw(self, proposal_id: str, by: str, t: Optional[float] = None) -> dict[str, Any]:
         """Withdraw one's own pending proposal."""

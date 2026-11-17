@@ -10,8 +10,10 @@ them to the QueueServer queue themselves. It lives in the beamline Redis, so eve
 nbs-gui, the web UI and `nbs-cli` see the same list. Nothing in it runs.
 
 You never change the staging queue directly, and you never queue anything. You
-**propose** changes; a person reads your proposal in the web UI (Roles sidebar)
-and accepts or rejects it. Accepted changes land in the staging queue, and the
+**propose** changes; your proposal appears in the conversation in the web UI,
+in the thread you made it from, where a person accepts it, rejects it (saying
+why if they like), or modifies it (changes plans' parameters or drops some of
+the changes) and accepts that. Accepted changes land in the staging queue, and the
 person moves plans to the run queue in nbs-gui when they are ready.
 
 Run each `nbs-cli` command bare, as everywhere else.
@@ -46,9 +48,10 @@ as in `nbs-cli plans NAME` shows them.
    related scans in a sensible order: group by sample or by edge as the person
    prefers, and label repeats and series with `group_name` where the plan takes it.
 5. Reply with what you proposed: the number of plans, the total estimated time
-   from the proposal's `checks`, any warnings, and that it is waiting in the
-   web UI's Roles sidebar for them to accept. Do not say it is staged until they
-   accept it.
+   from the proposal's `checks`, any warnings, and that it is waiting just below
+   for them to accept, modify or reject. Do not say it is staged until they
+   accept it. Their decision comes back to the thread as a note (accepted,
+   accepted with changes, or rejected and why); `staging show` has the result.
 6. If you replace a proposal, `staging withdraw` the old one so the person does
    not see two.
 
