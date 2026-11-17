@@ -1,7 +1,7 @@
 """
 Facts about a beamline beyond what the QueueServer, the document stream and
 Tiled give: whether beam reaches the endstation, what each device is, the
-loaded samples, plan time estimates.
+loaded samples, plan time estimates, the shared staging queue.
 
 Every beamline keeps these its own way (nbs-bl keeps them in status dicts in
 a beamline Redis), so nbs-agents asks a provider. A beamline package
@@ -23,6 +23,7 @@ SAMPLES = "samples"
 ESTIMATES = "estimates"
 XAS_PLANS = "xas_plans"
 METADATA = "metadata"
+STAGING = "staging"
 
 
 class BeamlineInfo:
@@ -158,6 +159,19 @@ class BeamlineInfo:
         -------
         str or None
             The warning, or None.
+        """
+        return None
+
+    def staging_redis(self) -> Optional[tuple[Any, str]]:
+        """
+        Where the beamline keeps nbs-gui's staging queue (see
+        ``nbs_agents.staging``).
+
+        Returns
+        -------
+        tuple of (redis.Redis, str) or None
+            A client for the beamline Redis and its key prefix; None when
+            the beamline has no shared staging queue.
         """
         return None
 

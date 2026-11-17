@@ -5,7 +5,12 @@ Every command prints one JSON document on stdout. Errors print
 ``{"error": ...}`` and exit with status 1.
 
 ``--role assistant`` (or ``NBS_CLI_ROLE=assistant``) makes the client
-read-only: only the read verbs and ``post`` work.
+read-only: only the read verbs, ``post``, ``role``, ``thread``,
+``directive propose`` and ``staging propose``/``withdraw`` (proposals a
+person accepts in nbs-gui) work.
+``NBS_CLI_ROLE=assistant:NAME`` (set by the runner, never by ``--role``) is
+the assistant's headless role NAME: read-only too, and ``post`` writes only
+that role's record and tile.
 """
 
 import argparse
@@ -21,6 +26,7 @@ from typing import Any
 import numpy as np
 
 from nbs_agents.agentlog import ASSISTANT_POST_KINDS, assistant_uid
+from nbs_agents.tiles import SEVERITIES
 from .config import ASSISTANT_ROLE, DEFAULT_CATALOG, ROLES, CliConfig
 from .core import NO_BEAM_MAP, Beamline, CliError, refuse_read_only
 from .kb import KBError, KnowledgeBase
@@ -143,6 +149,49 @@ CATALOG_HELP = "Tiled catalog to read: default (this beamline's), or a name from
 ROLE_HELP = "driver (default) or assistant (read-only; default $NBS_CLI_ROLE)"
 
 
+def staging_position(text: str) -> str | None:
+    """A ``staging propose`` position: an item_uid, ``top``, or ``end`` (None)."""
+    return None if text == "end" else text
+
+
+def staging_ops(args: argparse.Namespace) -> list[dict[str, Any]]:
+    """
+    The ops ``staging propose`` asks for.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed ``staging propose`` arguments.
+
+    Returns
+    -------
+    list of dict
+        ``--file``'s ops, or the removes, then the moves, then the adds.
+    """
+    flags = args.add or args.remove or args.move
+    if args.file:
+        if flags:
+            raise CliError("--file holds every op; do not combine it with --add, --remove or --move")
+        path = cwd_path(args.file, "--file")
+        try:
+            ops = json.loads(path.read_text())
+        except OSError as exc:
+            raise CliError(f"cannot read --file {args.file}: {exc.strerror}") from exc
+        except ValueError as exc:
+            raise CliError(f"--file {args.file} is not JSON: {exc}") from exc
+        return ops
+    if not flags:
+        raise CliError("nothing to propose: give --add, --remove, --move or --file")
+    ops: list[dict[str, Any]] = [{"op": "remove", "item_uid": uid} for uid in args.remove]
+    ops += [{"op": "move", "item_uid": uid, "after_uid": staging_position(after)} for uid, after in args.move]
+    after = staging_position(args.after)
+    for tokens in args.add:
+        plan_args, plan_kwargs = parse_plan_params(tokens[1:])
+        ops.append({"op": "add", "item": {"item_type": "plan", "name": tokens[0], "args": plan_args,
+                                          "kwargs": plan_kwargs}, "after_uid": after})
+    return ops
+
+
 def build_parser() -> argparse.ArgumentParser:
     """
     Build the argument parser.
@@ -261,8 +310,67 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("text")
 
     p = sub.add_parser("ask-assistant", parents=[common],
-                       help="operator: ask the beamline assistant a question (shows in its conversation)")
-    p.add_argument("text")
+                       help="operator: ask the beamline assistant a question (each question opens its own thread)")
+    p.add_argument("text", nargs="?", default="", help="the question; with --about, what to look at in particular")
+    p.add_argument("--about", metavar="POST",
+                   help="re-check one of today's assistant posts with a fresh call that does not see it: "
+                   "its time (HH:MM, HH:MM:SS or the epoch seconds `log` shows) or 'last'")
+    p.add_argument("--model", help="with --about: the model for the re-check (default: the assistant's alert_model)")
+    about = p.add_mutually_exclusive_group()
+    about.add_argument("--thread", metavar="ID", help="a follow-up in this thread (`thread list`)")
+    about.add_argument("--entry", metavar="POST", help="ask about one of today's assistant posts (as --about)")
+    about.add_argument("--tile", metavar="ROLE", help="ask about this role's tile")
+
+    p = sub.add_parser("thread", parents=[common], help="operator and assistant: the assistant's question threads")
+    thread = p.add_subparsers(dest="thread_command", required=True)
+    q = thread.add_parser("list", parents=[common], help="threads, newest first")
+    q.add_argument("--since", help="active since then: HH:MM, HH:MM:SS, epoch seconds, or an age like 2h")
+    q = thread.add_parser("show", parents=[common], help="one thread with its messages")
+    q.add_argument("id")
+
+    p = sub.add_parser("directive", parents=[common],
+                       help="standing instructions to an assistant role: the manager proposes, a person confirms")
+    directive = p.add_subparsers(dest="directive_command", required=True)
+    q = directive.add_parser("propose", parents=[common], help="assistant chat role: propose a directive for a role")
+    q.add_argument("role")
+    text = q.add_mutually_exclusive_group(required=True)
+    text.add_argument("text", nargs="?")
+    text.add_argument("--file", metavar="FILE", help="read the text from FILE (relative, inside the current folder)")
+    q.add_argument("--expires", default="beamtime",
+                   help="beamtime (default: until the proposal changes), a duration (12h, 3d) or a date (YYYY-MM-DD)")
+    q = directive.add_parser("list", parents=[common], help="proposed and active directives")
+    q.add_argument("--role", dest="directive_role", help="only this role's")
+    q.add_argument("--all", action="store_true", help="also rejected, expired and revoked ones")
+    for action, what in (("confirm", "confirm a proposed directive"), ("reject", "reject a proposed directive"),
+                         ("revoke", "end an active directive now")):
+        q = directive.add_parser(action, parents=[common], help=f"operator: {what} (logged)")
+        q.add_argument("id")
+        if action != "confirm":
+            q.add_argument("--reason", default="")
+    p = sub.add_parser("staging", parents=[common],
+                       help="nbs-gui's shared staging queue: read it, check plans, propose changes a person accepts")
+    staging = p.add_subparsers(dest="staging_command", required=True)
+    q = staging.add_parser("show", parents=[common], help="the staged plans, with estimates, and pending proposals")
+    q.add_argument("--proposal", metavar="ID", help="show one proposal whole instead, whatever its status")
+    q = staging.add_parser("validate", parents=[common], help="check a plan as the QueueServer would, without queuing it")
+    q.add_argument("plan")
+    q.add_argument("params", nargs="*", help="positional values and key=value pairs (JSON or Python literals)")
+    q = staging.add_parser(
+        "propose", parents=[common],
+        help="propose changes for a person to accept in nbs-gui: removes, then moves, then adds (or --file)",
+    )
+    q.add_argument("--reason", required=True)
+    q.add_argument("--add", action="append", nargs="+", metavar="PLAN_OR_PARAM", default=[],
+                   help="a plan and its params, e.g. --add nbs_count num=3 (repeat for more plans, kept in order)")
+    q.add_argument("--after", default="end", help="where the added plans go: an item_uid, top, or end (default)")
+    q.add_argument("--remove", action="append", metavar="ITEM_UID", default=[], help="remove a staged item")
+    q.add_argument("--move", action="append", nargs=2, metavar=("ITEM_UID", "AFTER"), default=[],
+                   help="move a staged item after another item_uid, or to top or end")
+    q.add_argument("--file", metavar="FILE",
+                   help="a JSON list of ops (add, update, remove, move; see nbs_agents.staging), relative, in the current folder")
+    q = staging.add_parser("withdraw", parents=[common], help="withdraw your own pending proposal")
+    q.add_argument("id")
+
     p = sub.add_parser("stop", parents=[common], help="operator: ask a running agent to wrap up")
     p.add_argument("--reason", default="")
 
@@ -270,8 +378,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--all", action="store_true", help="every agent session, not just the current one")
     p.add_argument("--tail", type=int, default=20, help="entries per session")
 
-    p = sub.add_parser("post", parents=[common], help="assistant: post to today's assistant record")
-    p.add_argument("--kind", required=True, choices=ASSISTANT_POST_KINDS)
+    p = sub.add_parser("post", parents=[common], help="assistant: post to the role's record for today, or its tile")
+    where = p.add_mutually_exclusive_group(required=True)
+    where.add_argument("--kind", choices=ASSISTANT_POST_KINDS, help="post an entry of this kind to the record")
+    where.add_argument("--tile", action="store_true", help="post to the role's tile instead (needs --severity)")
+    p.add_argument("--severity", choices=SEVERITIES,
+                   help="with --tile; an alert stays on the tile until a person acknowledges it")
+    p.add_argument("--figure", metavar="ATT", help="with --tile: a figure, as att:ID from `nbs-cli attach`")
     text = p.add_mutually_exclusive_group(required=True)
     text.add_argument("text", nargs="?")
     text.add_argument(
@@ -280,6 +393,22 @@ def build_parser() -> argparse.ArgumentParser:
         "$math$ and backticks need no shell quoting",
     )
     p.add_argument("--runs", nargs="+", default=[], metavar="UID", help="run uids the post is about")
+
+    p = sub.add_parser("ack", parents=[common], help="operator: acknowledge an assistant role's alert (logged)")
+    p.add_argument("role")
+
+    p = sub.add_parser("role", parents=[common], help="assistant chat role: read the other roles, or ask one")
+    role = p.add_subparsers(dest="role_command", required=True)
+    role.add_parser("list", parents=[common], help="every role with its settings, tile and status")
+    q = role.add_parser("show", parents=[common], help="a role's tile, today's record and notebook")
+    q.add_argument("name")
+    q.add_argument("--since", help="entries from then on: HH:MM, HH:MM:SS, epoch seconds, or an age like 30m or 2h")
+    q.add_argument("--tail", type=int, default=20, help="most entries (0 for all)")
+    q = role.add_parser("request", parents=[common],
+                        help="ask a headless role to do something; its answer comes back as a reply entry")
+    q.add_argument("name")
+    q.add_argument("text")
+    q.add_argument("--runs", nargs="+", default=[], metavar="UID", help="run uids the request is about")
 
     p = sub.add_parser("kb", parents=[common], help="beamline knowledge base: search, read, add and append notes")
     kb = p.add_subparsers(dest="kb_command", required=True)
@@ -405,7 +534,7 @@ def kb_text(args: argparse.Namespace, required: bool = True, what: str = "note t
 def kb_author(config: CliConfig, uid: str | None) -> str:
     """How a ``kb`` write is attributed: the role, plus the session for a driver."""
     if config.read_only:
-        return ASSISTANT_ROLE
+        return config.role if config.assistant_role else ASSISTANT_ROLE
     return f"{config.role} {uid[:8]}" if uid else config.role
 
 
@@ -704,7 +833,39 @@ def run_command(bl: Beamline, args: argparse.Namespace) -> Any:
                 raise CliError(f"cannot read --summary-file {args.summary_file}: {exc.strerror}") from exc
         return bl.finalize(summary, drop_pending=args.drop_pending, agent_uid=uid)
     if cmd == "ask-assistant":
-        return bl.ask_assistant(args.text)
+        if args.about:
+            if args.thread or args.entry or args.tile:
+                raise CliError("--about is a re-check; --thread, --entry and --tile are for questions")
+            return bl.recheck(args.about, model=args.model, text=args.text)
+        if args.model:
+            raise CliError("--model goes with --about (a re-check); a question uses the assistant's alert_model")
+        return bl.ask_assistant(args.text, thread=args.thread, entry=args.entry, tile=args.tile)
+    if cmd == "thread":
+        if args.thread_command == "list":
+            return bl.thread_list(since=args.since)
+        return bl.thread_show(args.id)
+    if cmd == "directive":
+        if args.directive_command == "propose":
+            text = args.text
+            if args.file:
+                path = cwd_path(args.file, "--file")
+                try:
+                    text = path.read_text()
+                except OSError as exc:
+                    raise CliError(f"cannot read --file {args.file}: {exc.strerror}") from exc
+            return bl.directive_propose(args.role, text, expires=args.expires)
+        if args.directive_command == "list":
+            return bl.directive_list(role=args.directive_role, all_=args.all)
+        return bl.directive_decide(args.id, args.directive_command, reason=getattr(args, "reason", ""))
+    if cmd == "staging":
+        if args.staging_command == "show":
+            return bl.staging_proposal(args.proposal) if args.proposal else bl.staging_show()
+        if args.staging_command == "validate":
+            plan_args, plan_kwargs = parse_plan_params(args.params)
+            return bl.check_plan(args.plan, plan_args, plan_kwargs)
+        if args.staging_command == "withdraw":
+            return bl.staging_withdraw(args.id)
+        return bl.staging_propose(staging_ops(args), args.reason)
     if cmd in ("tell", "stop"):
         refuse_read_only(bl.config, cmd)
         record = bl.find_session(uid)
@@ -721,12 +882,24 @@ def run_command(bl: Beamline, args: argparse.Namespace) -> Any:
                 text = path.read_text()
             except OSError as exc:
                 raise CliError(f"cannot read --file {args.file}: {exc.strerror}") from exc
-        return bl.post(args.kind, text, runs=args.runs)
+        if args.tile and not args.severity:
+            raise CliError("--tile needs --severity (ok, info, warn or alert)")
+        if not args.tile and (args.severity or args.figure):
+            raise CliError("--severity and --figure go with --tile")
+        return bl.post(args.kind, text, runs=args.runs, tile=args.tile, severity=args.severity, figure=args.figure)
+    if cmd == "ack":
+        return bl.ack(args.role)
+    if cmd == "role":
+        if args.role_command == "list":
+            return bl.role_list()
+        if args.role_command == "show":
+            return bl.role_show(args.name, since=args.since, tail=args.tail)
+        return bl.role_request(args.name, args.text, runs=args.runs)
     if cmd == "log":
         if args.all:
             records = bl.visible_records()
         elif bl.config.read_only and not uid:
-            own = assistant_uid()
+            own = assistant_uid(role=bl.config.assistant_role)
             record = bl.agent_log.get(own)
             records = {own: record} if record else {}
         else:
@@ -818,6 +991,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.cli_role:
             if config.read_only and args.cli_role != ASSISTANT_ROLE:
                 raise CliError("this client is set to the read-only assistant role; --role cannot lift it")
+            if config.assistant_role and args.cli_role != config.role:
+                raise CliError(f"this client is the assistant's {config.assistant_role} role; --role cannot change it")
             config.role = args.cli_role
         kb = KnowledgeBase(config.kb_dir, config.kb_agent_dir, config.kb_review_dir)
         refs = ReferenceLibrary(config.ref_dir, config.ref_agent_dir, config.ref_review_dir)
@@ -827,11 +1002,11 @@ def main(argv: list[str] | None = None) -> int:
             def beamline() -> Beamline:
                 nonlocal bl
                 if bl is None:
-                    bl = Beamline(config)
+                    bl = Beamline(config, config_path=args.config)
                 return bl
             result = run_ref(refs, config, args, beamline)
         else:
-            bl = Beamline(config)
+            bl = Beamline(config, config_path=args.config)
             result = add_note_refs(kb, args.command, run_command(bl, args), refs)
         if result is None:
             # Success never prints a bare null, which reads like a silent failure

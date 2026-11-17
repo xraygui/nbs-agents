@@ -26,6 +26,7 @@ from typing import Callable, Optional
 
 from ..constants import AGENT_OWNER_ENV
 from .resources import SCRIPTS_DIR
+from .timing import served_model_file
 
 LOGGER = logging.getLogger(__name__)
 
@@ -58,6 +59,29 @@ class LaunchedAgent:
     @property
     def pid(self) -> int:
         return self.process.pid
+
+
+def requested_model(argv: list[str]) -> Optional[str]:
+    """
+    The model a command line asks for with ``--model``, if any.
+
+    Parameters
+    ----------
+    argv : list of str
+        Command line.
+
+    Returns
+    -------
+    str or None
+        The last ``--model`` value, or None.
+    """
+    model = None
+    for i, arg in enumerate(argv):
+        if arg == "--model" and i + 1 < len(argv):
+            model = argv[i + 1]
+        elif arg.startswith("--model="):
+            model = arg.split("=", 1)[1]
+    return model or None
 
 
 def claude_launch_parameters(goal: str, budget: Optional[str] = None) -> dict:
@@ -381,11 +405,17 @@ class ClaudeLaunchHook:
         session waits for a Claude started by hand.
     agent_log : AgentLog, optional
         Where launches and exits are recorded.
+    model_poll_s, model_wait_s : float, optional
+        How often, and for how long after a launch, the Claude's log is read
+        for the model it runs on.
     """
 
-    def __init__(self, launcher: Optional[ClaudeLauncher], agent_log=None) -> None:
+    def __init__(self, launcher: Optional[ClaudeLauncher], agent_log=None,
+                 model_poll_s: float = 5.0, model_wait_s: float = 300.0) -> None:
         self.launcher = launcher
         self.agent_log = agent_log
+        self.model_poll_s = model_poll_s
+        self.model_wait_s = model_wait_s
         self.agents: dict[str, object] = {}
         if launcher is not None:
             launcher.on_exit = self._on_exit
@@ -404,8 +434,13 @@ class ClaudeLaunchHook:
             if self.agent_log is not None:
                 self.agent_log.update(agent.agent_uid, driver=driver)
             owner = getattr(agent, "owner", None) or {}
-            env = {AGENT_OWNER_ENV: owner["id"]} if owner.get("id") else None
-            launched = self.launcher.launch(agent.agent_uid, (agent.parameters or {}).get("goal"), driver, env=env)
+            env = {AGENT_OWNER_ENV: owner["id"]} if owner.get("id") else {}
+            model = requested_model(shlex.split(getattr(self.launcher, "command", "") or ""))
+            if model:
+                env["NBS_MODEL"] = model
+            launched = self.launcher.launch(
+                agent.agent_uid, (agent.parameters or {}).get("goal"), driver, env=env or None
+            )
         except Exception as exc:
             LOGGER.exception("Could not launch Claude for %s", agent.agent_uid)
             agent.log("error", f"could not launch Claude: {exc}")
@@ -415,13 +450,18 @@ class ClaudeLaunchHook:
             "command": launched.command,
             "workdir": launched.workdir,
             "log_path": launched.log_path,
+            "model": model,
         }
         if self.agent_log is not None:
             try:
-                self.agent_log.update(agent.agent_uid, launch=launch)
+                self.agent_log.update(agent.agent_uid, launch=launch, model=model, served_model=None)
             except Exception:
                 LOGGER.exception("Failed to record launch for %s", agent.agent_uid)
-        agent.log("launch", f"started Claude (pid {launched.pid})", pid=launched.pid, log_path=launched.log_path)
+            threading.Thread(
+                target=self._watch_model, args=(launched,), name=f"model-{agent.agent_uid[:8]}", daemon=True
+            ).start()
+        started = f"started Claude (pid {launched.pid}" + (f", {model})" if model else ")")
+        agent.log("launch", started, pid=launched.pid, log_path=launched.log_path, model=model)
 
     def on_agent_adopted(self, agent, record: dict) -> None:
         """
@@ -451,8 +491,34 @@ class ClaudeLaunchHook:
             except Exception:
                 LOGGER.exception("Failed to stop Claude for %s", agent.agent_uid)
 
+    def _record_model(self, launched: LaunchedAgent) -> Optional[str]:
+        """Put the model the Claude's log names on its session record; return it."""
+        served = served_model_file(launched.log_path)
+        if served and self.agent_log is not None:
+            try:
+                record = self.agent_log.get(launched.agent_uid) or {}
+                if record.get("served_model") != served:
+                    self.agent_log.update(launched.agent_uid, served_model=served)
+            except Exception:
+                LOGGER.exception("Failed to record the model for %s", launched.agent_uid)
+        return served
+
+    def _watch_model(self, launched: LaunchedAgent) -> None:
+        """
+        Read a new Claude's log until its first answer names the model; until
+        then the ``init`` event's model (a gateway alias, perhaps) stands.
+        """
+        deadline = time.time() + self.model_wait_s
+        while time.time() < deadline and launched.process.poll() is None:
+            self._record_model(launched)
+            if served_model_file(launched.log_path, answered_only=True):
+                return
+            time.sleep(self.model_poll_s)
+
     def _on_exit(self, launched: LaunchedAgent, returncode: int) -> None:
         """Log a launched Claude's exit in its session."""
+        # The last answer's model, which a gateway alias only shows once it has answered
+        self._record_model(launched)
         text = f"Claude (pid {launched.pid}) exited with status {returncode}"
         agent = self.agents.get(launched.agent_uid)
         kind = "error" if agent is not None and agent.active and returncode != 0 else "launch"

@@ -73,7 +73,7 @@ main { flex: 1; min-height: 0; display: flex; }
 .session.sel { background: var(--accent-soft); }
 .session.waiting { box-shadow: inset 3px 0 0 var(--warn-border); }
 .session .name { font-weight: 600; }
-.session .meta { font-size: 12px; color: var(--muted); }
+.session .meta { font-size: 12px; color: var(--muted); white-space: normal; }
 .session .goal { font-size: 12px; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .status { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: var(--b-note); color: var(--muted); }
 .status.active, .status.opening { background: var(--b-finalize); color: var(--ok); }
@@ -118,6 +118,9 @@ main { flex: 1; min-height: 0; display: flex; }
 .bubble.open { outline: 2px solid var(--warn-border); }
 .bubble.open .tag { color: var(--warn); }
 .empty { color: var(--faint); padding: 8px 0; }
+.badge { display: inline-block; font: 11px/1.5 var(--mono); padding: 0 5px; border: 1px solid var(--border); border-radius: 4px; color: var(--muted); white-space: nowrap; }
+.bubble .acts { margin-top: 4px; text-align: right; }
+.bubble .acts button { font-size: 12px; padding: 1px 8px; }
 
 #steer { display: flex; gap: 6px; padding: 8px 14px; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
 #activity-wrap { display: flex; flex-direction: column; min-height: 0; }
@@ -209,6 +212,69 @@ select { background: var(--panel); border: 1px solid var(--border); border-radiu
 .ref-table td { padding: 2px 12px 2px 0; font-family: var(--mono); font-size: 12.5px; word-break: break-all; }
 .ref-past { background: var(--warn-bg); border: 1px solid var(--warn-border); border-radius: 6px; padding: 6px 10px; margin: 8px 0; font-size: 13px; }
 #ref-detail pre { font-family: var(--mono); font-size: 12px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 8px; overflow-x: auto; }
+/* Role sidebar: one tile per assistant role, on every view */
+#roles-side { width: 280px; flex: none; border-left: 1px solid var(--border); background: var(--panel); overflow: auto; min-height: 0; }
+#roles-side[hidden] { display: none; }
+#roles-side .col-head { position: sticky; top: 0; background: var(--panel); z-index: 1; }
+.tile { margin: 8px; border: 1px solid var(--border); border-left: 4px solid var(--faint); border-radius: 6px; padding: 6px 8px; background: var(--bg); font-size: 13px; }
+.tile.ok { border-left-color: var(--ok); } .tile.info { border-left-color: var(--accent); }
+.tile.warn { border-left-color: var(--warn); } .tile.alert { border-left-color: var(--bad); background: var(--b-alert); }
+.tile.alert.acked { background: var(--bg); }
+.tile .hd { display: flex; gap: 6px; align-items: baseline; font-size: 12px; color: var(--muted); }
+.tile .hd b { color: var(--text); font-size: 13px; flex: 1; }
+.tile .sev { font-size: 11px; font-weight: 600; text-transform: uppercase; }
+.tile.ok .sev { color: var(--ok); } .tile.info .sev { color: var(--accent); } .tile.warn .sev { color: var(--warn); } .tile.alert .sev { color: var(--bad); }
+.tile .msg { margin-top: 3px; overflow-wrap: anywhere; }
+.tile .note { margin-top: 3px; font-size: 12px; color: var(--muted); }
+dialog.fig-dialog { width: min(1100px, calc(100vw - 32px)); padding: 12px; }
+.fig-head { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; }
+.fig-head b { flex: 1; }
+.fig-head a { color: var(--accent); font-size: 13px; }
+.fig-head button { border: none; font-size: 18px; padding: 0 6px; background: none; }
+.fig-body { display: flex; align-items: center; gap: 8px; }
+.fig-body img { flex: 1; min-width: 0; max-height: calc(100vh - 180px); object-fit: contain; background: #fff; border-radius: 4px; }
+.fig-nav { font-size: 28px; padding: 4px 12px; }
+#fig-cap { margin-top: 8px; font-size: 13px; color: var(--muted); white-space: pre-wrap; }
+.tile .flip { display: flex; align-items: center; gap: 4px; margin-top: 3px; font-size: 12px; color: var(--muted); }
+.tile .flip span { flex: 1; text-align: center; }
+.tile .flip button { font-size: 12px; padding: 0 8px; }
+.tile img.thumb { display: block; width: 100%; max-height: 160px; object-fit: contain; border: 1px solid var(--border); border-radius: 4px; background: #fff; margin-top: 4px; }
+.tile .acts { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+.tile .acts button, .card .acts button { font-size: 12px; padding: 1px 8px; }
+.tile details { margin-top: 4px; font-size: 12px; }
+.tile details .entry { border-top: 1px solid var(--border); padding: 3px 0; color: var(--muted); }
+.tile details .entry b { color: var(--text); font-weight: 600; }
+.card { margin: 8px; border: 2px solid var(--warn-border); border-radius: 6px; padding: 6px 8px; background: var(--warn-bg); font-size: 13px; }
+.card .hd { font-size: 12px; color: var(--muted); }
+.card .acts { display: flex; gap: 4px; margin-top: 5px; }
+.dirline { margin: 2px 8px; font-size: 12px; color: var(--muted); }
+/* Staging proposals, in the conversation */
+.ops { margin: 4px 0 0; padding: 0; list-style: none; font-family: ui-monospace, monospace; font-size: 12px; }
+.ops li { padding: 1px 0; }
+.ops .add { color: var(--ok); } .ops .remove { color: var(--bad); }
+.card .note { font-size: 12px; margin-top: 3px; } .card .note.bad { color: var(--bad); } .card .note.warn { color: var(--warn); }
+.card .muted { color: var(--muted); }
+.card.staging { margin: 6px 0; }
+.card.staging.done { border-width: 1px; border-color: var(--border); background: var(--panel); }
+.card.staging.done.accepted .note { color: var(--ok); }
+.card.staging.done.rejected .note, .card.staging.done.changes_requested .note { color: var(--muted); }
+.staging-loose { margin-bottom: 6px; }
+
+nav #roles-toggle { margin-left: auto; }
+/* Manager threads in the assistant feed */
+.thread { margin: 2px 0 10px 12%; border-left: 3px solid var(--accent); padding: 2px 0 2px 10px; }
+.thread > summary { cursor: pointer; font-size: 12px; color: var(--muted); list-style: none; }
+.thread > summary::-webkit-details-marker { display: none; }
+.thread > summary::before { content: "▸ "; } .thread[open] > summary::before { content: "▾ "; }
+.thread .row { margin: 4px 0; }
+.thread .bubble { max-width: 100%; }
+.thread .acts { text-align: left; }
+.thinking { color: var(--accent); font-size: 12px; }
+#ask-about { display: none; padding: 6px 14px 0; font-size: 12px; color: var(--muted); }
+#ask-about .chip { display: inline-flex; gap: 6px; align-items: center; padding: 1px 8px; border: 1px solid var(--accent); border-radius: 999px; color: var(--text); }
+#ask-about button { border: none; padding: 0 2px; background: none; }
+@media (max-width: 1100px) { #roles-side { width: 230px; } }
+@media (max-width: 720px) { #roles-side { width: auto; border-left: none; border-top: 1px solid var(--border); } }
 #tiled-login { display: none; padding: 8px 16px; background: var(--warn-bg); border-bottom: 1px solid var(--warn-border); }
 #tiled-login code { font-weight: 600; }
 </style>
@@ -227,6 +293,7 @@ select { background: var(--panel); border: 1px solid var(--border); border-radiu
   <button id="tab-assistant" data-view="assistant-view">Assistant</button>
   <button id="tab-kb" data-view="kb-view">Knowledge</button>
   <button id="tab-refs" data-view="ref-view">References</button>
+  <button id="roles-toggle" type="button" title="Show or hide the assistant roles' tiles">Roles</button>
 </nav>
 <main>
   <section id="agents-view" class="view active">
@@ -264,9 +331,12 @@ select { background: var(--panel); border: 1px solid var(--border); border-radiu
       <div class="col-head">
         <h2 id="assistant-state" style="text-transform:none;letter-spacing:0;font-size:14px">Assistant</h2>
         <span id="calls" style="color:var(--muted);font-size:12px;flex:2"></span>
+        <label style="font-size:13px" title="Model a re-check of a post runs on; it does not see the post, so it is a real second look">Re-check with
+          <select id="recheck-model"></select></label>
         <label style="font-size:13px"><input type="checkbox" id="show-runs" checked> Show every run</label>
       </div>
       <div id="feed" class="scroll"></div>
+      <div id="ask-about"></div>
       <form id="ask-row" autocomplete="off">
         <input type="text" id="question" placeholder="Ask the assistant (it reads the data; it never changes the queue)">
         <button type="submit" id="ask">Ask</button>
@@ -298,6 +368,11 @@ select { background: var(--panel); border: 1px solid var(--border); border-radiu
       <div id="ref-detail" class="scroll" style="flex:1"></div>
     </div>
   </section>
+  <!-- The assistant roles' tiles and the directives waiting for a person, beside every view -->
+  <aside id="roles-side" hidden>
+    <div class="col-head"><h2>Assistant roles</h2></div>
+    <div id="roles"></div>
+  </aside>
 </main>
 
 <dialog id="new-dialog">
@@ -316,6 +391,17 @@ select { background: var(--panel); border: 1px solid var(--border); border-radiu
       <button type="submit" id="new-ok" class="primary">Queue agent</button>
     </div>
   </form>
+</dialog>
+<dialog id="fig-dialog" class="fig-dialog">
+  <div class="fig-head"><b id="fig-title"></b>
+    <a id="fig-open" target="_blank" rel="noopener" title="Open the image on its own">Open</a>
+    <button type="button" id="fig-close" title="Close (Esc)">×</button></div>
+  <div class="fig-body">
+    <button type="button" id="fig-prev" class="fig-nav" title="Earlier figure (←)">‹</button>
+    <img id="fig-img" alt="">
+    <button type="button" id="fig-next" class="fig-nav" title="Later figure (→)">›</button>
+  </div>
+  <div id="fig-cap"></div>
 </dialog>
 <div id="toast" role="status"></div>
 
@@ -338,8 +424,18 @@ const POSTS = {
   summary: ["left", "--b-summary", "Summary"], advice: ["left", "--b-advice", "Advice"],
   alert: ["left", "--b-alert", "Alert"], answer: ["left", "--b-answer", "Answer"],
   operator: ["right", "--b-note", ""], error: ["left", "--b-question", "Assistant error"],
+  reply: ["left", "--b-advice", "Role reply"], directive: ["left", "--b-note", "Directive"],
+  ack: ["right", "--b-note", "Acknowledged"],
 };
+// Thread messages: kind -> [side, background variable, tag]
+const THREAD_MSGS = {
+  question: ["right", "--b-operator", ""], answer: ["left", "--b-answer", "Answer"],
+  reply: ["left", "--b-advice", "Role reply"], note: ["left", "--b-note", "Note"],
+  error: ["left", "--b-question", "Error"],
+};
+const SEVERITY_ORDER = {alert: 0, warn: 1, info: 2, ok: 3};
 const ASSISTANT_STALE_S = 120;
+const POST_KINDS = ["summary", "advice", "alert", "answer"];
 const ATT_RE = /!\[([^\]]*)\]\(att:([0-9A-Za-z_-]+)(?:\s+"[^"]*")?\)/g;
 const attUrl = (id) => `/api/attachments/${encodeURIComponent(id)}`;
 
@@ -523,7 +619,18 @@ function collectEntries(records, uid) {
   return out;
 }
 
-function bubble(lbl, e, open, showAgent) {
+// The model behind an entry: the one that answered, else the one asked for, else the session's
+function entryModel(e, r) {
+  return e.served_model || e.model || (r && (r.served_model || r.model)) || "";
+}
+function badge(model, title) {
+  return model ? ` <span class="badge" title="${esc(title || "Model")}">${esc(model)}</span>` : "";
+}
+function modelTitle(e) {
+  return e.served_model && e.model && e.served_model !== e.model ? `Asked for ${e.model}; ${e.served_model} answered` : "Model";
+}
+
+function bubble(lbl, e, open, showAgent, r) {
   let [side, bg, tag] = BUBBLES[e.kind] || BUBBLES.note;
   let who = lbl;
   if (side === "right") {
@@ -532,8 +639,10 @@ function bubble(lbl, e, open, showAgent) {
   }
   if (open) { tag = "Waiting for your answer"; bg = "--b-question"; }
   const tagHtml = tag ? ` · <span class="tag">${esc(tag)}</span>` : "";
+  // Only what a Claude wrote: a launched session's own entries, never the operator's
+  const model = side === "left" && (e.model || e.served_model || (r && r.launch)) ? badge(entryModel(e, r), modelTitle(e)) : "";
   return `<div class="row ${side}"><div class="bubble${open ? " open" : ""}" style="background:var(${bg})">` +
-    `<div class="hd"><b>${esc(who)}</b> · ${fmtTime(e.t)}${tagHtml}</div>${rich(e.text)}</div></div>`;
+    `<div class="hd"><b>${esc(who)}</b> · ${fmtTime(e.t)}${tagHtml}${model}</div>${rich(e.text)}</div></div>`;
 }
 
 function renderSessions(records) {
@@ -546,7 +655,7 @@ function renderSessions(records) {
     const cls = waiting(r) ? "waiting" : esc(r.status || "");
     html += `<button class="session${uid === selected ? " sel" : ""}${waiting(r) ? " waiting" : ""}" data-uid="${esc(uid)}" title="${esc(r.goal || "")}">` +
       `<div class="name">${esc(label(uid, r))}</div>` +
-      `<div class="meta"><span class="status ${cls}">${esc(st)}</span> ${fmtTime(r.opened, true)}</div>` +
+      `<div class="meta"><span class="status ${cls}">${esc(st)}</span> ${fmtTime(r.opened, true)}${badge(entryModel({}, r), "Model this session's Claude runs on")}</div>` +
       (r.goal ? `<div class="goal">${esc(r.goal)}</div>` : "") + `</button>`;
   }
   if (rendered.sessions !== html) { rendered.sessions = html; $("sessions").innerHTML = html; }
@@ -574,6 +683,8 @@ function renderSummary(records) {
       parts.push(`budget: ${esc(JSON.stringify(r.budget))}`);
     }
     if (r.runner && r.runner.host) parts.push(`runner: ${esc(r.runner.host)} pid ${esc(r.runner.pid ?? "?")}`);
+    const model = entryModel({}, r);
+    if (model) parts.push(`model:${badge(model, r.model && r.served_model && r.model !== r.served_model ? `Asked for ${r.model}; ${r.served_model} answered` : "Model this session's Claude runs on")}`);
     html = parts.join(" · ");
     if (r.goal) html += `<div class="goal"><span class="label">goal:</span> ${esc(r.goal)}</div>`;
     if (budget.time_s && r.opened) {
@@ -608,7 +719,7 @@ function renderLog(records) {
   const act = pairs.filter(([, e]) => !CONVERSATION_KINDS.includes(e.kind));
   const showAgent = selected === ALL;
   setHtml("conversation", conv.length
-    ? conv.map(([lbl, e, u]) => bubble(lbl, e, e.kind === "question" && openTimes.has(`${u}|${e.t}`), showAgent)).join("")
+    ? conv.map(([lbl, e, u]) => bubble(lbl, e, e.kind === "question" && openTimes.has(`${u}|${e.t}`), showAgent, records[u])).join("")
     : `<div class="empty">No messages yet.</div>`);
   const head = `<tr><th>Time</th>${showAgent ? "<th>Agent</th>" : ""}<th>Kind</th><th>Text</th><th>Details</th></tr>`;
   const rows = act.map(([lbl, e]) => {
@@ -784,11 +895,27 @@ function callSummary(r) {
   if (Object.keys(last).length) {
     text += ` · last at ${fmtTime(last.t)}`;
     if (last.reasons && last.reasons.length) text += ` for ${last.reasons.join(", ")}`;
-    if (last.model) text += ` (${last.model})`;
+    if (last.model || last.served_model) text += ` (${last.served_model && last.served_model !== last.model ? `${last.model || "default"} → ${last.served_model}` : last.model || last.served_model})`;
     if (![undefined, null, 0].includes(last.returncode)) text += `, exit ${last.returncode}`;
   }
   if (r.pending) text += ` · ${r.pending} event(s) waiting`;
+  const m = r.models || {};
+  if (m.routine || m.alert) text += ` · models: ${m.routine || "default"} routine, ${m.alert || "default"} for alerts and questions`;
   return text;
+}
+// Re-check choices: the configured models, the strong one first, and any model seen today
+function renderRecheckModels(r) {
+  const sel = $("recheck-model");
+  const m = (r && r.models) || {};
+  const seen = ((r && r.log) || []).map((e) => e.model).filter(Boolean);
+  const names = [...new Set([m.alert, m.routine, ...seen].filter(Boolean))];
+  const key = names.join("|");
+  if (sel.dataset.key === key) return;
+  const keep = sel.value;
+  sel.dataset.key = key;
+  sel.innerHTML = (names.length ? "" : `<option value="">default</option>`) +
+    names.map((n) => `<option value="${esc(n)}">${esc(n)}${n === m.alert ? " (alert model)" : ""}</option>`).join("");
+  if (names.includes(keep)) sel.value = keep;
 }
 const runLink = (uid) => `<a class="run" data-run="${esc(uid)}">${esc(String(uid).slice(0, 8))}</a>`;
 function assistantEntry(e) {
@@ -798,13 +925,352 @@ function assistantEntry(e) {
     for (const f of e.flags || []) line += `<br>&nbsp;&nbsp;<span class="flag">flag:</span> ${esc(f)}`;
     return `<div class="runline">${line}</div>`;
   }
-  const [side, bg, tag] = POSTS[e.kind] || ["left", "--b-note", String(e.kind)];
-  const who = side === "right" ? "Operator" : "Assistant";
+  let [side, bg, tag] = POSTS[e.kind] || ["left", "--b-note", String(e.kind)];
+  if (e.digest) tag = "Digest";
+  let who = side === "right" ? (e.by || "Operator") : "Assistant";
+  if (e.kind === "reply" && e.role) who = `${e.role} role`;
+  const post = POST_KINDS.includes(e.kind);
   let body = rich(e.text);
   if (e.run_uids && e.run_uids.length) body += `<div class="hd" style="margin-top:4px">runs: ${e.run_uids.map(runLink).join(", ")}</div>`;
-  return `<div class="row ${side}"><div class="bubble" style="background:var(${bg})"><div class="hd"><b>${who}</b> · ${fmtTime(e.t)}` +
-    `${tag ? ` · <span class="tag">${esc(tag)}</span>` : ""}</div>${body}</div></div>`;
+  if (post) {
+    const about = snap.threads_on ? `<button data-about-entry="${e.t}" title="Open a thread with the manager about this post">Ask about this</button> ` : "";
+    body += `<div class="acts">${about}<button data-recheck="${e.t}" title="Ask again on the model chosen above, in a fresh call that does not see this post">Re-check</button></div>`;
+  }
+  const recheck = e.recheck_of ? ` · <span class="tag">re-check of ${fmtTime(e.recheck_of)}</span>` : "";
+  const html = `<div class="row ${side}"><div class="bubble" style="background:var(${bg})"><div class="hd"><b>${esc(who)}</b> · ${fmtTime(e.t)}` +
+    `${tag ? ` · <span class="tag">${esc(tag)}</span>` : ""}${recheck}${post ? badge(entryModel(e), modelTitle(e)) : ""}</div>${body}</div></div>`;
+  return e.kind === "operator" && e.thread ? html + threadBlock(e) : html;
 }
+
+// ---------------------------------------------------------------- manager threads
+// A question opens a thread: its one line is in the record, the rest expands under it
+const threadOpen = new Map();
+function seedLine(seed) {
+  if (!seed || !seed.kind || seed.kind === "snapshot") return "";
+  if (seed.kind === "tile") return `about the ${seed.role} tile`;
+  if (seed.kind === "entry") return `about the ${(seed.entry || {}).kind || "post"} at ${fmtTime((seed.entry || {}).t)}`;
+  return "";
+}
+function threadMsg(m) {
+  const [side, bg, tag] = THREAD_MSGS[m.kind] || THREAD_MSGS.note;
+  const who = side === "right" ? (m.by || "Operator") : m.role ? `${m.role} role` : "Manager";
+  const model = m.kind === "answer" ? badge(m.served_model || m.model, modelTitle(m)) : "";
+  const runs = m.run_uids && m.run_uids.length ? `<div class="hd" style="margin-top:4px">runs: ${m.run_uids.map(runLink).join(", ")}</div>` : "";
+  return `<div class="row ${side}"><div class="bubble" style="background:var(${bg})"><div class="hd"><b>${esc(who)}</b> · ${fmtTime(m.t)}` +
+    `${tag ? ` · <span class="tag">${esc(tag)}</span>` : ""}${model}</div>${rich(m.text)}${runs}</div></div>`;
+}
+function threadBlock(e) {
+  const th = (snap.threads || []).find((t) => t.id === e.thread);
+  if (!th) {
+    const summary = e.thread_summary ? `: ${esc(e.thread_summary)}` : "";
+    return `<div class="thread"><div class="hd" style="font-size:12px;color:var(--muted)">Thread ${esc(e.thread)} ${e.thread_status === "closed" ? "closed" : "not shown"}${summary}</div></div>`;
+  }
+  const closed = th.status === "closed";
+  const open = threadOpen.has(th.id) ? threadOpen.get(th.id) : !closed;
+  const msgs = (th.messages || []).slice(1);
+  const answers = msgs.filter((m) => m.kind === "answer").length;
+  let head = `${closed ? "Closed thread" : "Thread"} ${esc(th.id)}`;
+  const about = seedLine(th.seed);
+  if (about) head += ` · ${esc(about)}`;
+  head += ` · ${answers} answer(s)`;
+  if (th.calling) head += ` · <span class="thinking">the manager is answering…</span>`;
+  const props = stagingFor(th.id);
+  const parts = [...msgs.map((m) => [m.t || 0, threadMsg(m)]), ...props.map((p) => [p.created || 0, stagingCard(p, snap.staging)])];
+  parts.sort((a, b) => a[0] - b[0]);
+  let inner = parts.map((x) => x[1]).join("");
+  if (!msgs.length && !th.calling) inner += `<div class="empty">Waiting for the manager.</div>`;
+  if (th.calling && msgs.length) inner += `<div class="thinking">the manager is answering…</div>`;
+  if (closed && th.summary) inner += `<div class="hd" style="font-size:12px;color:var(--muted);margin-top:4px"><b>Summary:</b> ${esc(th.summary)}</div>`;
+  if (!closed) inner += `<div class="acts"><button data-reply="${esc(th.id)}" title="Ask a follow-up in this thread">Follow up</button></div>`;
+  return `<details class="thread" data-thread="${esc(th.id)}"${open ? " open" : ""}><summary>${head}</summary>${inner}</details>`;
+}
+
+// What the next question is about: a thread to follow up, a post, or a role's tile
+let askAbout = null;
+function setAskAbout(about) {
+  askAbout = about;
+  const el = $("ask-about");
+  el.style.display = about ? "block" : "none";
+  el.innerHTML = about ? `<span class="chip">${esc(about.label)}<button type="button" id="ask-about-clear" title="Ask a new question instead">×</button></span>` : "";
+  if (about) {
+    $("ask-about-clear").addEventListener("click", () => setAskAbout(null));
+    $("question").placeholder = about.staging ? "What should the manager change?" : about.thread ? "Follow up in the thread" : "Your question";
+    $("question").focus();
+  } else {
+    $("question").placeholder = "Ask the assistant (it reads the data; it never changes the queue)";
+  }
+}
+function showAssistant() {
+  $("tab-assistant").click();
+}
+const who = () => { try { return localStorage.getItem("kb-who") || ""; } catch (e) { return ""; } };
+
+// ---------------------------------------------------------------- role sidebar
+let rolesHidden = false;
+try { rolesHidden = localStorage.getItem("roles-hidden") === "1"; } catch (e) {}
+const heldAlert = (t) => !!t && t.severity === "alert" && !t.ack;
+function roleTile(name, tile, role) {
+  const dirs = (snap.directives || []).filter((d) => d.role === name && d.status === "active");
+  const state = role && role.status === "calling" ? ` · <span class="thinking">thinking…</span>` : "";
+  if (!tile) {
+    return `<div class="tile"><div class="hd"><b>${esc(name)}</b>${state}</div><div class="note">No word yet today.</div>${roleDetails(name, role, dirs)}</div>`;
+  }
+  const held = heldAlert(tile);
+  let html = `<div class="tile ${esc(tile.severity)}${tile.severity === "alert" && !held ? " acked" : ""}">` +
+    `<div class="hd"><b>${esc(name)}</b><span class="sev">${esc(tile.severity)}</span> ${fmtTime(tile.ts)}${state}</div>` +
+    `<div class="msg">${esc(plainText(tile.message))}</div>`;
+  if (tile.cleared && tile.latest) html += `<div class="note">Cleared since ${fmtTime(tile.latest.ts)}: ${esc(plainText(tile.latest.message))}</div>`;
+  if (tile.ack) html += `<div class="note">Acknowledged by ${esc(tile.ack.by)} at ${fmtTime(tile.ack.ts)}</div>`;
+  else if (tile.last_ack && !held) html += `<div class="note">Last alert acknowledged by ${esc(tile.last_ack.by)} at ${fmtTime(tile.last_ack.ts)}</div>`;
+  html += tileFigure(name);
+  const acts = [];
+  if (held) acts.push(`<button class="primary" data-ack="${esc(name)}" title="You have seen this alert; it stays until someone acknowledges it">Acknowledge</button>`);
+  if (snap.threads_on) acts.push(`<button data-about-tile="${esc(name)}" title="Open a thread with the manager about this tile">Ask about this</button>`);
+  if (acts.length) html += `<div class="acts">${acts.join("")}</div>`;
+  return html + roleDetails(name, role, dirs) + `</div>`;
+}
+// The figure viewer: one role's figures large, with arrows (and arrow keys) to step through them
+let viewer = null;
+function openViewer(name, at) {
+  viewer = {name, at};
+  showViewer();
+  if (!$("fig-dialog").open) $("fig-dialog").showModal();
+}
+function showViewer() {
+  const figs = roleFigs(viewer.name);
+  if (!figs.length) { $("fig-dialog").close(); return; }
+  viewer.at = Math.max(0, Math.min(viewer.at, figs.length - 1));
+  const f = figs[viewer.at], url = attUrl(String(f.figure).replace(/^att:/, ""));
+  const latest = viewer.at === figs.length - 1;
+  $("fig-title").textContent = `${viewer.name}: ${viewer.at + 1} / ${figs.length}${latest ? " (latest)" : ""} · ${fmtTime(f.t)}`;
+  $("fig-img").src = url;
+  $("fig-img").alt = plainText(f.text || "");
+  $("fig-open").href = url;
+  $("fig-cap").textContent = plainText(f.text || "");
+  $("fig-prev").disabled = viewer.at === 0;
+  $("fig-next").disabled = latest;
+}
+function stepViewer(by) {
+  if (!viewer) return;
+  viewer.at += by;
+  showViewer();
+}
+$("fig-prev").addEventListener("click", () => stepViewer(-1));
+$("fig-next").addEventListener("click", () => stepViewer(1));
+$("fig-close").addEventListener("click", () => $("fig-dialog").close());
+$("fig-dialog").addEventListener("keydown", (ev) => {
+  if (ev.key === "ArrowLeft") { ev.preventDefault(); stepViewer(-1); }
+  if (ev.key === "ArrowRight") { ev.preventDefault(); stepViewer(1); }
+});
+// A click on the backdrop closes it
+$("fig-dialog").addEventListener("click", (ev) => { if (ev.target === $("fig-dialog")) $("fig-dialog").close(); });
+$("fig-dialog").addEventListener("close", () => { viewer = null; });
+
+// Each role's figures from today, newest last; figAt holds the one shown when not the newest
+const figAt = new Map();
+function roleFigs(name) {
+  const tile = (snap.tiles || {})[name] || {}, role = (snap.roles || {})[name] || {};
+  const figs = (role.figures || []).slice();
+  const current = String(tile.figure || "");
+  if (current && !figs.some((f) => f.figure === current)) figs.push({figure: current, t: tile.ts, text: tile.message});
+  return figs;
+}
+function tileFigure(name) {
+  const figs = roleFigs(name);
+  if (!figs.length) return "";
+  const at = figAt.has(name) ? Math.min(figAt.get(name), figs.length - 1) : figs.length - 1;
+  const f = figs[at], id = String(f.figure).replace(/^att:/, "");
+  let html = `<a href="${attUrl(id)}" data-zoom="${esc(name)}" title="Show the figure large"><img class="thumb" src="${attUrl(id)}" alt="${esc(name)} figure"></a>`;
+  if (figs.length > 1) {
+    html += `<div class="flip"><button data-flip="${esc(name)}" data-to="${at - 1}" ${at === 0 ? "disabled" : ""} title="Earlier figure">‹</button>` +
+      `<span>${at + 1} / ${figs.length}${at === figs.length - 1 ? " (latest)" : ` · ${fmtTime(f.t)}`}</span>` +
+      `<button data-flip="${esc(name)}" data-to="${at + 1}" ${at === figs.length - 1 ? "disabled" : ""} title="Later figure">›</button>` +
+      (at < figs.length - 1 ? `<button data-flip="${esc(name)}" data-to="latest" title="Back to the latest figure">Latest</button>` : "") + `</div>`;
+    if (at < figs.length - 1 && f.text) html += `<div class="note">${esc(plainText(f.text))}</div>`;
+  }
+  return html;
+}
+function roleDetails(name, role, dirs) {
+  const entries = ((role && role.log) || []).slice(-8).reverse();
+  if (!entries.length && !dirs.length) return "";
+  let html = `<details data-role="${esc(name)}"${roleOpen.get(name) ? " open" : ""}><summary>${entries.length} recent entr${entries.length === 1 ? "y" : "ies"}${dirs.length ? `, ${dirs.length} directive(s)` : ""}</summary>`;
+  for (const d of dirs) html += `<div class="entry"><b>directive</b> ${esc(d.text)} <button data-revoke="${esc(d.id)}" title="End this directive now">Revoke</button></div>`;
+  for (const e of entries) html += `<div class="entry"><b>${esc(e.kind)}</b> ${fmtTime(e.t)} ${esc(plainText(e.text).slice(0, 300))}</div>`;
+  return html + `</details>`;
+}
+// One staged item as a short line: plan name and its parameters
+function planText(item) {
+  if (!item) return "?";
+  const args = (item.args || []).map((a) => JSON.stringify(a));
+  const kwargs = Object.entries(item.kwargs || {}).map(([k, v]) => `${k}=${JSON.stringify(v)}`);
+  return `${item.name || item.item_type || "?"}(${[...args, ...kwargs].join(", ")})`;
+}
+function stagedText(uid, items) {
+  if (uid === "top") return "the top";
+  if (uid === null || uid === undefined) return "the end";
+  const n = items.findIndex((i) => i.item_uid === uid);
+  return n < 0 ? `missing item ${uid.slice(0, 8)}` : `#${n + 1} ${items[n].name || ""}`;
+}
+function stagedFull(uid, items) {
+  const n = items.findIndex((i) => i.item_uid === uid);
+  return n < 0 ? `missing item ${String(uid).slice(0, 8)}` : `#${n + 1} ${planText(items[n])}`;
+}
+// A run of adds after the same item lands in order, so only the first says where
+function opLine(op, items, prev) {
+  const sameRun = prev && prev.op === "add" && op.op === "add" && prev.after_uid === op.after_uid;
+  if (op.op === "add") return `<li class="add">+ ${esc(planText(op.item))}${sameRun ? "" : ` <span class="muted">after ${esc(stagedText(op.after_uid, items))}</span>`}</li>`;
+  if (op.op === "remove") return `<li class="remove">− ${esc(stagedFull(op.item_uid, items))}</li>`;
+  if (op.op === "update") return `<li>~ ${esc(stagedFull(op.item_uid, items))} → ${esc(planText(op.item))}</li>`;
+  return `<li>↕ ${esc(stagedText(op.item_uid, items))} <span class="muted">after ${esc(stagedText(op.after_uid, items))}</span></li>`;
+}
+function stagingCard(p, staging) {
+  const items = staging.items || [];
+  const checks = p.checks || {};
+  const est = checks.estimate_s ? ` · ~${Math.round(checks.estimate_s / 60)} min` : "";
+  const head = `<div class="hd"><b>Staging proposal</b> · ${fmtTime(p.created)}${est}</div><div>${rich(p.reason || "")}</div>`;
+  if (p.status !== "pending") {
+    const what = {accepted: "Accepted", rejected: "Rejected", changes_requested: "Changes requested", withdrawn: "Withdrawn", stale: "Stale"}[p.status] || p.status;
+    const by = p.decided_by ? ` by ${esc(String(p.decided_by).replace(/^web:/, ""))}` : "";
+    const why = p.decision_reason ? `: ${esc(p.decision_reason)}` : "";
+    const ops = p.ops || [];
+    return `<div class="card staging done ${esc(p.status)}">${head}<ul class="ops">${ops.map((o, n) => opLine(o, items, ops[n - 1])).join("")}</ul>` +
+      `<div class="note">${what}${by} at ${fmtTime(p.decided_at)}${why}</div></div>`;
+  }
+  let notes = "";
+  if (p.stale) notes += `<div class="note bad">Items it refers to are no longer staged; it cannot apply.</div>`;
+  else if (p.changed) notes += `<div class="note warn">The staged list changed since this was proposed; it applies to the list as it is now.</div>`;
+  for (const w of checks.warnings || []) notes += `<div class="note warn">${esc(w)}</div>`;
+  for (const e of checks.errors || []) notes += `<div class="note bad">${esc(e)}</div>`;
+  return `<div class="card staging">${head}<ul class="ops">${(p.ops || []).map((o, n, ops) => opLine(o, items, ops[n - 1])).join("")}</ul>${notes}` +
+    `<div class="acts"><button class="primary" data-staging="${esc(p.id)}" data-act="accept" ${p.stale ? "disabled" : ""}` +
+    ` title="Apply it to nbs-gui's staging queue; nothing is queued to run">Accept</button>` +
+    `<button data-staging="${esc(p.id)}" data-act="modify" title="Tell the manager what to change; it proposes again">Modify…</button>` +
+    `<button data-staging="${esc(p.id)}" data-act="reject">Reject</button></div></div>`;
+}
+// Staging proposals made in a thread sit in it by time; the rest go at the top of the feed
+function stagingFor(threadId) {
+  const st = snap.staging;
+  if (!st) return [];
+  return (st.proposals || []).filter((p) => (p.thread || null) === threadId);
+}
+function looseStaging() {
+  const st = snap.staging;
+  if (!st) return "";
+  const shown = new Set((snap.threads || []).map((t) => t.id));
+  const loose = (st.proposals || []).filter((p) => p.status === "pending" && !(p.thread && shown.has(p.thread)));
+  return loose.length ? `<div class="staging-loose">${loose.map((p) => stagingCard(p, st)).join("")}</div>` : "";
+}
+const roleOpen = new Map();
+function directiveCard(d) {
+  const until = d.expires && d.expires.until ? `until ${fmtTime(d.expires.until, true)}` : "";
+  const expires = d.expires ? `${esc(d.expires.kind || "")} ${until}` : "";
+  return `<div class="card"><div class="hd"><b>Directive for ${esc(d.role)}</b> · proposed ${fmtTime(d.proposed_t)}` +
+    `${d.thread ? ` in thread ${esc(d.thread)}` : ""}${expires ? ` · expires: ${expires}` : ""}</div>` +
+    `<div>${rich(d.text)}</div><div class="acts"><button class="primary" data-decide="${esc(d.id)}" data-confirm="1" title="The role follows it until it expires">Confirm</button>` +
+    `<button data-decide="${esc(d.id)}" data-confirm="0">Reject</button></div></div>`;
+}
+function renderRoles() {
+  const tiles = snap.tiles || {}, roles = snap.roles || {};
+  const proposed = (snap.directives || []).filter((d) => d.status === "proposed");
+  const names = [...new Set([...Object.keys(roles), ...Object.keys(tiles)])];
+  const any = names.length > 0 || proposed.length > 0;
+  const nHeld = Object.values(tiles).filter(heldAlert).length;
+  const nWaiting = nHeld + proposed.length;
+  $("roles-toggle").hidden = !any;
+  $("roles-toggle").classList.toggle("waiting", nWaiting > 0);
+  $("roles-toggle").textContent = `Roles${nWaiting ? ` (${nWaiting})` : ""}`;
+  $("roles-side").hidden = !any || rolesHidden;
+  if (!any) return;
+  names.sort((a, b) => (heldAlert(tiles[b]) - heldAlert(tiles[a])) ||
+    ((SEVERITY_ORDER[(tiles[a] || {}).severity] ?? 4) - (SEVERITY_ORDER[(tiles[b] || {}).severity] ?? 4)) || a.localeCompare(b));
+  setHtml("roles", proposed.map(directiveCard).join("") + names.map((n) => roleTile(n, tiles[n], roles[n])).join(""));
+}
+$("roles-toggle").addEventListener("click", () => {
+  rolesHidden = !rolesHidden;
+  try { localStorage.setItem("roles-hidden", rolesHidden ? "1" : "0"); } catch (e) {}
+  if (snap) renderRoles();
+});
+$("roles").addEventListener("toggle", (ev) => {
+  const d = ev.target;
+  if (d.matches && d.matches("details[data-role]")) roleOpen.set(d.dataset.role, d.open);
+}, true);
+$("roles").addEventListener("click", async (ev) => {
+  const ack = ev.target.closest("button[data-ack]");
+  const about = ev.target.closest("button[data-about-tile]");
+  const decide = ev.target.closest("button[data-decide]");
+  const revoke = ev.target.closest("button[data-revoke]");
+  const flip = ev.target.closest("button[data-flip]");
+  const zoom = ev.target.closest("a[data-zoom]");
+  if (zoom && !(ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.button)) {
+    ev.preventDefault();
+    const figs = roleFigs(zoom.dataset.zoom);
+    openViewer(zoom.dataset.zoom, figAt.has(zoom.dataset.zoom) ? Math.min(figAt.get(zoom.dataset.zoom), figs.length - 1) : figs.length - 1);
+    return;
+  }
+  if (flip) {
+    // Paging back stays put as new figures come; Latest follows the newest again
+    if (flip.dataset.to === "latest") figAt.delete(flip.dataset.flip);
+    else {
+      const figs = roleFigs(flip.dataset.flip);
+      const to = Number(flip.dataset.to);
+      if (to >= figs.length - 1 && to >= 0 && figs.length) figAt.delete(flip.dataset.flip); else figAt.set(flip.dataset.flip, to);
+    }
+    renderRoles();
+    return;
+  }
+  try {
+    if (ack) {
+      ack.disabled = true;
+      await post(`/api/tiles/${encodeURIComponent(ack.dataset.ack)}/ack`, {by: who()});
+      toast(`Acknowledged the ${ack.dataset.ack} alert`);
+    } else if (about) {
+      setAskAbout({tile: about.dataset.aboutTile, label: `About the ${about.dataset.aboutTile} tile`});
+      showAssistant();
+    } else if (decide) {
+      const confirmIt = decide.dataset.confirm === "1";
+      const reason = confirmIt ? "" : prompt("Why reject it? (optional; the manager sees this)");
+      if (reason === null) return;
+      decide.disabled = true;
+      await post(`/api/directives/${encodeURIComponent(decide.dataset.decide)}/decide`, {confirm: confirmIt, by: who(), reason});
+      toast(confirmIt ? "Directive confirmed" : "Directive rejected");
+    } else if (revoke) {
+      const reason = prompt("Revoke this directive now? Why (optional):");
+      if (reason === null) return;
+      revoke.disabled = true;
+      await post(`/api/directives/${encodeURIComponent(revoke.dataset.revoke)}/revoke`, {by: who(), reason});
+      toast("Directive revoked");
+    }
+  } catch (e) {
+    toast(e.message);
+    for (const b of [ack, decide, revoke]) if (b) b.disabled = false;
+  }
+});
+// ---------------------------------------------------------------- staging proposals
+function stagingProposal(id) {
+  return ((snap.staging || {}).proposals || []).find((p) => p.id === id);
+}
+async function stagingAction(btn) {
+  const id = btn.dataset.staging, act = btn.dataset.act;
+  if (act === "modify") {
+    // A follow-up to the manager about this proposal, in its thread when it has one
+    const p = stagingProposal(id);
+    if (p && p.thread) threadOpen.set(p.thread, true);
+    setAskAbout({staging: id, label: `Changes to staging proposal ${id}`});
+    $("question").focus();
+    return;
+  }
+  let reason = "";
+  if (act === "reject") {
+    reason = prompt("Why reject it? (optional; the manager sees this in the thread)");
+    if (reason === null) return;
+  }
+  btn.disabled = true;
+  try {
+    await post(`/api/staging/${encodeURIComponent(id)}/decide`, {accept: act === "accept", by: who(), reason});
+    toast(act === "accept" ? "Applied to the staging queue" : "Proposal rejected");
+  } catch (e) { toast(e.message); btn.disabled = false; }
+}
+
 function renderAssistant() {
   const r = snap.assistant;
   const [text, color] = snap.errors && snap.errors.agent_log ? [`Assistant unavailable: ${snap.errors.agent_log}`, "--bad"] : assistantState(r);
@@ -812,14 +1278,41 @@ function renderAssistant() {
   st.textContent = text;
   st.style.color = `var(${color})`;
   $("calls").textContent = callSummary(r);
+  renderRecheckModels(r);
   const showRuns = $("show-runs").checked;
   const entries = ((r && r.log) || []).filter((e) => showRuns || e.kind !== "run");
-  setHtml("feed", entries.length ? entries.map(assistantEntry).join("") : `<div class="empty">Nothing from the assistant yet today.</div>`);
+  const loose = looseStaging();
+  setHtml("feed", loose + (entries.length ? entries.map(assistantEntry).join("") : loose ? "" : `<div class="empty">Nothing from the assistant yet today.</div>`));
   const ok = !(snap.errors && snap.errors.agent_log);
   $("question").disabled = !ok; $("ask").disabled = !ok;
 }
 $("show-runs").addEventListener("change", () => snap && renderAssistant());
+$("feed").addEventListener("toggle", (ev) => {
+  const d = ev.target;
+  if (d.matches && d.matches("details.thread")) threadOpen.set(d.dataset.thread, d.open);
+}, true);
 $("feed").addEventListener("click", async (ev) => {
+  const stage = ev.target.closest("button[data-staging]");
+  if (stage) { await stagingAction(stage); return; }
+  const reply = ev.target.closest("button[data-reply]");
+  if (reply) { setAskAbout({thread: reply.dataset.reply, label: `Follow-up in thread ${reply.dataset.reply}`}); return; }
+  const about = ev.target.closest("button[data-about-entry]");
+  if (about) {
+    const t = Number(about.dataset.aboutEntry);
+    setAskAbout({entry: t, label: `About the post at ${fmtTime(t)}`});
+    return;
+  }
+  const b = ev.target.closest("button[data-recheck]");
+  if (b) {
+    const model = $("recheck-model").value;
+    b.disabled = true;
+    try {
+      await post("/api/assistant/recheck", {t: Number(b.dataset.recheck), model});
+      follow.feed = true;
+      $("ask-status").textContent = `Re-check sent${model ? ` (${model})` : ""}; the assistant answers below without seeing the original post`;
+    } catch (e) { toast(`Could not ask for a re-check: ${e.message}`); b.disabled = false; }
+    return;
+  }
   const a = ev.target.closest("a[data-run]");
   if (!a) return;
   const uid = a.dataset.run;
@@ -830,11 +1323,28 @@ $("ask-row").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const text = $("question").value.trim();
   if (!text) return;
+  const body = {text, by: who()};
+  if (askAbout && askAbout.staging) {
+    try {
+      const out = await post(`/api/staging/${encodeURIComponent(askAbout.staging)}/changes`, body);
+      $("question").value = "";
+      if (out.thread) threadOpen.set(out.thread, true);
+      setAskAbout(null);
+      follow.feed = true;
+      $("ask-status").textContent = "Sent to the manager; it will propose again";
+    } catch (e) { toast(`Could not send it: ${e.message}`); }
+    return;
+  }
+  if (askAbout && askAbout.thread) body.thread = askAbout.thread;
+  else if (askAbout && askAbout.entry != null) body.entry = askAbout.entry;
+  else if (askAbout && askAbout.tile) body.tile = askAbout.tile;
   try {
-    await post("/api/assistant/ask", {text});
+    const out = await post("/api/assistant/ask", body);
     $("question").value = "";
+    if (out.thread) threadOpen.set(out.thread, true);
+    setAskAbout(null);
     follow.feed = true;
-    $("ask-status").textContent = "";
+    $("ask-status").textContent = out.thread ? `Asked in thread ${out.thread}; the manager answers there` : "";
   } catch (e) { toast(`Could not send the question: ${e.message}`); }
 });
 
@@ -1390,6 +1900,7 @@ function render() {
   renderHeader();
   renderAgents();
   renderAssistant();
+  renderRoles();
   renderKbTab();
   renderRefTab();
 }

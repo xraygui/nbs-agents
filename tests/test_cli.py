@@ -514,7 +514,9 @@ desc = "a node"
             run_command(bl, build_parser().parse_args(["post", "--kind", "answer", "--file", "post.md"]))
         finally:
             os.chdir(cwd)
-        bl.post.assert_called_once_with("answer", "Edge at $E_0 = 284.8$ eV; run `nbs-cli diagnose`.", runs=[])
+        bl.post.assert_called_once_with(
+            "answer", "Edge at $E_0 = 284.8$ eV; run `nbs-cli diagnose`.", runs=[], tile=False, severity=None, figure=None
+        )
 
     def test_post_takes_text_or_file_not_both(self):
         with self.assertRaises(SystemExit):

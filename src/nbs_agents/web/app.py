@@ -40,15 +40,20 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
-from nbs_agents.agentlog import assistant_uid, is_assistant_record
+from nbs_agents.agentlog import assistant_uid, find_assistant_post, is_assistant_record
 from ..assistant.attachments import AttachmentStore
 from ..assistant.auth import check_token
-from ..cli.core import compact_item
+from ..cli.core import compact_item, login_name
 from ..cli.kb import KBError, KnowledgeBase
 from ..cli.refs import ReferenceLibrary, RefError, catalogs, resolve_refs
 from nbs_agents.constants import AGENT_UID_KEY
 from ..assistant.launcher import claude_launch_parameters
 from nbs_agents.queue import submit_agent_block
+from ..directives import DirectiveError, DirectiveStore, decide_directive, revoke_directive
+from ..beamline_info import STAGING
+from ..staging import StagingError, StaleProposal, check_proposal
+from ..threads import ThreadError, ThreadStore, open_thread
+from ..tiles import TileError, TileStore, acknowledge
 
 STATIC_DIR = Path(__file__).parent / "static"
 # Same as the Qt agent log tab
@@ -56,9 +61,17 @@ STEERABLE_STATUSES = ("opening", "active", "finalizing")
 CLAUDE_AGENT = "claude"
 SOURCE = "web"
 POLL_S = 1.0
+STAGING_DECIDED_SHOWN_S = 86400  # decided staging proposals stay in their thread this long
 # After a failed QueueServer call, skip it this long so one dead server does not stall every snapshot
 QUEUE_RETRY_S = 15.0
 KEEPALIVE_S = 15.0
+# Closed threads shown in the manager chat: those active this recently, at most THREADS_SHOWN in all
+THREADS_SHOWN_S = 86400.0
+THREADS_SHOWN = 40
+# Newest entries of each headless role's record in the snapshot
+ROLE_ENTRIES = 20
+# Most of each role's figures from today kept for flipping back on its tile
+ROLE_FIGURES = 50
 LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
 COOKIE = "nbs_agents_token"
 LOGIN_PAGE = """<!doctype html><meta charset="utf-8"><title>nbs-agents sign in</title>
@@ -73,6 +86,36 @@ placeholder="token"><button>Sign in</button></form>{error}
 
 
 class MessageBody(BaseModel):
+    text: str = ""
+
+
+class AskBody(MessageBody):
+    thread: str = ""
+    entry: Optional[float] = None
+    tile: str = ""
+    by: str = ""
+
+
+class ByBody(BaseModel):
+    by: str = ""
+    reason: str = ""
+
+
+class DecideBody(ByBody):
+    confirm: bool
+
+
+class StagingDecideBody(ByBody):
+    accept: bool
+
+
+class StagingChangesBody(MessageBody):
+    by: str = ""
+
+
+class RecheckBody(BaseModel):
+    t: float
+    model: str = ""
     text: str = ""
 
 
@@ -204,8 +247,15 @@ class WebState:
             ``manager``, ``running``, ``blocks``
             (each steerable session's queued items), ``read_only``,
             ``kb_pending`` (knowledge-base items waiting for review),
-            ``ref_pending`` (reference drafts and open draft requests) and
-            ``errors``.
+            ``ref_pending`` (reference drafts and open draft requests),
+            ``tiles`` (each assistant role's tile), ``roles`` (each
+            headless role's record for today: status, heartbeat, calls, its
+            newest entries and ``figures``, its tile posts with a figure), ``threads`` (the manager's open threads and
+            those closed in the last day, with their messages, newest first),
+            ``directives`` (proposed and active), ``threads_on``,
+            ``staging`` (nbs-gui's shared staging queue, its pending
+            proposals and those decided in the last day, None when the
+            beamline has none) and ``errors``.
         """
         errors: dict[str, str] = {}
         out: dict[str, Any] = {
@@ -223,6 +273,12 @@ class WebState:
             "drivers": bool(getattr(self.beamline.config, "drivers", True)),
             "kb_pending": None,
             "ref_pending": None,
+            "tiles": {},
+            "roles": {},
+            "threads": [],
+            "directives": [],
+            "threads_on": self.threads_on(),
+            "staging": None,
         }
         try:
             out["kb_pending"] = self.kb.review_queue()["count"]
@@ -243,8 +299,23 @@ class WebState:
             if is_assistant_record(record, uid):
                 if uid == out["assistant_uid"]:
                     out["assistant"] = record
+                elif record.get("role") and uid == assistant_uid(role=record["role"]):
+                    out["roles"][record["role"]] = {
+                        k: record.get(k) for k in ("status", "heartbeat", "calls", "last_call", "models", "role_config")
+                    }
+                    out["roles"][record["role"]]["uid"] = uid
+                    out["roles"][record["role"]]["log"] = (record.get("log") or [])[-ROLE_ENTRIES:]
+                    out["roles"][record["role"]]["figures"] = [
+                        {k: e.get(k) for k in ("t", "figure", "text", "severity", "run_uids")}
+                        for e in record.get("log") or [] if e.get("kind") == "tile" and e.get("figure")
+                    ][-ROLE_FIGURES:]
             else:
                 out["sessions"][uid] = record
+        self._assistant_parts(out, errors)
+        try:
+            out["staging"] = self.staging()
+        except Exception as exc:
+            errors["staging"] = str(exc)
         try:
             out["runner_alive"] = self.log.runner_alive()
             out["tiled_login"] = self.log.tiled_login() if out["runner_alive"] else None
@@ -285,6 +356,54 @@ class WebState:
         out["errors"] = errors
         return out
 
+    def _assistant_parts(self, out: dict[str, Any], errors: dict[str, str]) -> None:
+        """Tiles, threads and directives, each read on its own."""
+        try:
+            out["tiles"] = TileStore.for_agent_log(self.log).all()
+        except Exception as exc:
+            errors["tiles"] = str(exc)
+        try:
+            store = ThreadStore.for_agent_log(self.log)
+            since = time.time() - THREADS_SHOWN_S
+            threads = [t for t in store.all().values()
+                       if t.get("status") != "closed" or (t.get("last_t") or 0) >= since]
+            threads.sort(key=lambda t: t.get("created_t") or 0, reverse=True)
+            out["threads"] = threads[:THREADS_SHOWN]
+        except Exception as exc:
+            errors["threads"] = str(exc)
+        try:
+            out["directives"] = DirectiveStore.for_agent_log(self.log).listing(statuses=("proposed", "active"))
+        except Exception as exc:
+            errors["directives"] = str(exc)
+
+    # ----------------------------------------------------------------- assistant
+
+    def _assistant_config(self) -> Any:
+        """The beamline's ``[assistant]`` settings, or None if this client has none."""
+        return getattr(self.beamline, "assistant", None)
+
+    def threads_on(self) -> bool:
+        """Whether questions open manager threads (``[assistant] threads``)."""
+        config = self._assistant_config()
+        return bool(config is not None and getattr(config, "threads", False))
+
+    def _chat_role(self) -> Optional[str]:
+        config = self._assistant_config()
+        try:
+            return config.chat_role().name if config is not None else None
+        except Exception:
+            return None
+
+    def _chat_roles(self) -> tuple[Optional[str], set]:
+        """The chat role's name and every configured role's name."""
+        config = self._assistant_config()
+        try:
+            roles = config.resolved_roles() if config is not None else {}
+        except Exception:
+            roles = {}
+        chat = next((r.name for r in roles.values() if r.chat), None)
+        return chat, set(roles)
+
     # ----------------------------------------------------------------- writes
 
     def _steerable(self, uid: str) -> dict[str, Any]:
@@ -310,13 +429,193 @@ class WebState:
             raise HTTPException(409, "stop already requested")
         return self.log.request_stop(uid, text.strip(), source=SOURCE)
 
-    def ask_assistant(self, text: str) -> dict[str, Any]:
-        """Post a question to today's assistant record."""
+    def ask_assistant(self, text: str, thread: str = "", entry: Optional[float] = None, tile: str = "",
+                      by: str = "") -> dict[str, Any]:
+        """
+        Ask the assistant (its chat role, the manager) a question.
+
+        With ``[assistant] threads`` on, a new question opens a thread, seeded
+        with one of today's assistant posts (``entry``, its time) or a role's
+        tile (``tile``); ``thread`` adds a follow-up to an open thread. With
+        threads off the question goes into today's main record, as before.
+
+        Returns
+        -------
+        dict
+            ``thread`` and the main record's ``entry`` for a new thread, the
+            thread's new ``message`` for a follow-up, or the record entry
+            itself with threads off.
+        """
         text = text.strip()
         if not text:
             raise HTTPException(400, "empty question")
+        if sum(bool(x) for x in (thread, entry is not None, tile)) > 1:
+            raise HTTPException(400, "a question is a follow-up, about an entry or about a tile, not several")
+        by = by.strip() or login_name()
+        if thread:
+            try:
+                return {"thread": thread, "message": ThreadStore.for_agent_log(self.log).ask(thread, text, by, source=SOURCE)}
+            except ThreadError as exc:
+                raise HTTPException(404, str(exc))
         uid = self.log.ensure_assistant_record()
-        return self.log.message(uid, text, source=SOURCE)
+        if not self.threads_on():
+            if entry is not None or tile:
+                raise HTTPException(409, "asking about an entry or a tile opens a thread, and [assistant] threads is off")
+            return self.log.message(uid, text, source=SOURCE)
+        seed = None
+        if entry is not None:
+            try:
+                post = find_assistant_post(self.log.get(uid) or {}, entry)
+            except ValueError as exc:
+                raise HTTPException(404, str(exc))
+            seed = {"kind": "entry", "record": uid, "entry": post}
+        elif tile:
+            current = TileStore.for_agent_log(self.log).get(tile)
+            if current is None:
+                raise HTTPException(404, f"no tile for role {tile!r}")
+            seed = {"kind": "tile", "role": tile, "tile": current}
+        out = open_thread(self.log, text, by, source=SOURCE, seed=seed)
+        return {"thread": out["thread"]["id"], "entry": out["entry"]}
+
+    def acknowledge(self, role: str, by: str = "") -> dict[str, Any]:
+        """A person acknowledges a role's sticky alert; it is logged in the role's record."""
+        chat, roles = self._chat_roles()
+        store = TileStore.for_agent_log(self.log)
+        if role not in roles and store.get(role) is None:
+            raise HTTPException(404, f"no role {role!r}")
+        try:
+            return acknowledge(self.log, role, by.strip() or login_name(), source=SOURCE, chat=role == chat)
+        except TileError as exc:
+            raise HTTPException(409, str(exc))
+
+    def decide_directive(self, directive_id: str, confirm: bool, by: str = "", reason: str = "") -> dict[str, Any]:
+        """A person confirms or rejects a directive the manager proposed."""
+        try:
+            return decide_directive(self.log, directive_id, confirm, by.strip() or login_name(), source=SOURCE,
+                                    reason=reason.strip(), chat_role=self._chat_role())
+        except DirectiveError as exc:
+            raise HTTPException(409, str(exc))
+
+    def revoke_directive(self, directive_id: str, by: str = "", reason: str = "") -> dict[str, Any]:
+        """A person ends an active directive before it expires."""
+        try:
+            return revoke_directive(self.log, directive_id, by.strip() or login_name(), source=SOURCE,
+                                    reason=reason.strip(), chat_role=self._chat_role())
+        except DirectiveError as exc:
+            raise HTTPException(409, str(exc))
+
+    # ------------------------------------------------------------------ staging
+
+    def _staging_store(self) -> Any:
+        """The shared staging queue, or None when this beamline has none."""
+        if not hasattr(type(self.beamline), "staging"):
+            return None
+        info = self.beamline.info
+        if STAGING not in info.capabilities or info.staging_redis() is None:
+            return None
+        return self.beamline.staging
+
+    def staging(self) -> Optional[dict[str, Any]]:
+        """
+        nbs-gui's staging queue and its proposals, for the conversation.
+
+        Returns
+        -------
+        dict or None
+            ``version``, ``updated``, ``updated_by``, ``items`` (compact) and
+            ``proposals``: pending ones (each with ``stale``, ``changed`` and
+            ``missing``) and those decided in the last day, oldest first;
+            None when the beamline has no staging queue.
+        """
+        store = self._staging_store()
+        if store is None:
+            return None
+        queue = store.queue()
+        since = time.time() - STAGING_DECIDED_SHOWN_S
+        proposals = []
+        for proposal in store.proposals(statuses=None):
+            if proposal.get("status") == "pending":
+                proposals.append({**proposal, **check_proposal(proposal, queue)})
+            elif (proposal.get("decided_at") or 0) >= since:
+                proposals.append(proposal)
+        return {
+            "version": queue["version"],
+            "updated": queue["updated"],
+            "updated_by": queue["updated_by"],
+            "items": [compact_item(i) for i in queue["items"]],
+            "proposals": proposals,
+        }
+
+    def _staging_note(self, proposal: dict[str, Any], text: str) -> None:
+        """Tell the thread that proposed it what the person did, so the manager sees it next time."""
+        if not proposal.get("thread"):
+            return
+        try:
+            ThreadStore.for_agent_log(self.log).add(proposal["thread"], "note", text, staging=proposal["id"])
+        except Exception:
+            pass
+
+    def decide_staging(self, proposal_id: str, accept: bool, by: str = "", reason: str = "") -> dict[str, Any]:
+        """A person accepts a staging proposal (applying it to the staging queue) or rejects it."""
+        store = self._staging_store()
+        if store is None:
+            raise HTTPException(404, "this beamline has no shared staging queue")
+        name = by.strip() or login_name()
+        who = f"{SOURCE}:{name}"
+        try:
+            if accept:
+                out = store.accept(proposal_id, who)
+                text = f"{name} accepted staging proposal {proposal_id}; the staging queue is now version {out['queue']['version']}."
+            else:
+                out = {"proposal": store.reject(proposal_id, who, reason=reason)}
+                text = f"{name} rejected staging proposal {proposal_id}" + (f": {reason.strip()}" if reason.strip() else ".")
+        except StaleProposal as exc:
+            raise HTTPException(409, f"{exc}; it is marked stale")
+        except StagingError as exc:
+            raise HTTPException(409, str(exc))
+        self._staging_note(out["proposal"], text)
+        return out
+
+    def request_staging_changes(self, proposal_id: str, text: str, by: str = "") -> dict[str, Any]:
+        """
+        A person asks the manager to change a staging proposal, as a follow-up
+        in the thread it came from (or a new thread): the proposal is closed as
+        ``changes_requested`` and the manager is expected to propose again.
+
+        Returns
+        -------
+        dict
+            ``proposal`` and what ``ask_assistant`` returned.
+        """
+        store = self._staging_store()
+        if store is None:
+            raise HTTPException(404, "this beamline has no shared staging queue")
+        text = text.strip()
+        if not text:
+            raise HTTPException(400, "say what should change")
+        proposal = store.get(proposal_id)
+        if proposal is None or proposal.get("status") != "pending":
+            raise HTTPException(409, f"staging proposal {proposal_id} is not pending")
+        thread = proposal.get("thread") or ""
+        if thread:
+            current = ThreadStore.for_agent_log(self.log).all().get(thread)
+            if not current or current.get("status") == "closed":
+                thread = ""
+        name = by.strip() or login_name()
+        out = self.ask_assistant(f"Please change staging proposal {proposal_id}: {text}", thread=thread, by=name)
+        try:
+            out["proposal"] = store.request_changes(proposal_id, f"{SOURCE}:{name}", text)
+        except StagingError as exc:
+            raise HTTPException(409, str(exc))
+        return out
+
+    def recheck(self, t: float, model: str = "", text: str = "") -> dict[str, Any]:
+        """Ask the assistant for a blind second look at its post at time ``t``."""
+        uid = self.log.ensure_assistant_record()
+        try:
+            return self.log.request_recheck(uid, t, model=model.strip() or None, text=text, source=SOURCE)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc))
 
     def kb_call(self, method: str, *args: Any, **kwargs: Any) -> Any:
         """Run a knowledge-base method, turning its refusals into HTTP 400."""
@@ -575,8 +874,32 @@ def create_app(
         return await write(state.new_agent, body.goal, body.budget, body.start, body.confirm_busy)
 
     @app.post("/api/assistant/ask")
-    async def ask(body: MessageBody):
-        return await write(state.ask_assistant, body.text)
+    async def ask(body: AskBody):
+        return await write(state.ask_assistant, body.text, body.thread, body.entry, body.tile, body.by)
+
+    @app.post("/api/tiles/{role}/ack")
+    async def ack(role: str, body: ByBody):
+        return await write(state.acknowledge, role, body.by)
+
+    @app.post("/api/directives/{directive_id}/decide")
+    async def decide(directive_id: str, body: DecideBody):
+        return await write(state.decide_directive, directive_id, body.confirm, body.by, body.reason)
+
+    @app.post("/api/directives/{directive_id}/revoke")
+    async def revoke(directive_id: str, body: ByBody):
+        return await write(state.revoke_directive, directive_id, body.by, body.reason)
+
+    @app.post("/api/staging/{proposal_id}/decide")
+    async def decide_staging(proposal_id: str, body: StagingDecideBody):
+        return await write(state.decide_staging, proposal_id, body.accept, body.by, body.reason)
+
+    @app.post("/api/staging/{proposal_id}/changes")
+    async def staging_changes(proposal_id: str, body: StagingChangesBody):
+        return await write(state.request_staging_changes, proposal_id, body.text, body.by)
+
+    @app.post("/api/assistant/recheck")
+    async def recheck(body: RecheckBody):
+        return await write(state.recheck, body.t, body.model, body.text)
 
     # Knowledge base. Note IDs contain "/", so they travel in the body or query.
 

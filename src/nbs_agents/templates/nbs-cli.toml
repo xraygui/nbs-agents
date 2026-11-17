@@ -22,3 +22,11 @@
 # port = 60740
 # serve = true
 # data_dir = ""                         # default state/agent-log under $NBS_AGENTS_HOME
+
+# [reduce]
+# nbs-reduce: the profile's devices.toml (only _desc and _role are read) and the
+# default keys per plan or scantype; see the README.
+# devices_file = ""
+# [[reduce.defaults.xas]]
+# signal = ["sc"]
+# norm = "i0"

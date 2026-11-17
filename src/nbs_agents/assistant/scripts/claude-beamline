@@ -10,7 +10,9 @@
 #   claude-beamline --headless   unattended: claude -p, stream-json to stdout
 #   claude-beamline --headless --role assistant
 #                                one read-only beamline-assistant call; the runner
-#                                passes the triggering events in NBS_ASSISTANT_PROMPT
+#                                passes the triggering events in NBS_ASSISTANT_PROMPT,
+#                                and for a headless role NBS_CLI_ROLE=assistant:NAME
+#                                and its skill in NBS_ASSISTANT_SKILL
 #
 # Extra arguments are passed to claude. NBS_CLI_CONFIG selects the nbs-cli config
 # (default config/nbs-cli.toml under $NBS_AGENTS_HOME). Run it from the folder you want the agent to
@@ -153,6 +155,15 @@ print(os.path.expanduser(CliConfig.load().beam_map_file) or "-")')"
             mounts+=(--ro-path "$beam_map_file")
             export NBS_BEAM_MAP_FILE="$beam_map_file"
         fi
+        # The profile's devices.toml, where nbs-reduce reads each device's _desc and _role
+        devices_file="$("$python" -c 'import os
+from nbs_agents.reduce.config import ReduceConfig
+print(os.path.expanduser(ReduceConfig.load().devices_file) or "-")')"
+        if [[ "$devices_file" != - && -f "$devices_file" ]]; then
+            devices_file="$(readlink -f "$devices_file")"
+            mounts+=(--ro-path "$devices_file")
+            export NBS_DEVICES_FILE="$devices_file"
+        fi
         config="${NBS_CLI_CONFIG:-$default_config}"
         [[ -f "$config" ]] && config="$(readlink -f "$config")" && mounts+=(--ro-path "$config")
         # Name it explicitly inside, where $HOME looks different
@@ -196,6 +207,13 @@ command -v nbs-cli >/dev/null 2>&1 || { echo "nbs-cli not found in $NBS_ENV_DIR/
 # Both roles read and add to the beamline knowledge base (nbs-cli kb). Skills are
 # written into the workdir with any beamline addenda appended.
 "$python" -m nbs_agents.assistant.resources skill beamline-knowledge
+# Both may reduce and plot runs from Tiled (nbs-reduce)
+"$python" -m nbs_agents.assistant.resources skill beamline-reduce
+# The assistant helps people build plan lists in nbs-gui's staging queue
+# (nbs-cli lets only its chat role propose)
+if [[ "$role" == assistant ]]; then
+    "$python" -m nbs_agents.assistant.resources skill beamline-staging
+fi
 
 system=()
 case "$role" in
@@ -217,23 +235,29 @@ case "$role" in
         # workdir); Write and Edit only in the workdir (Edit rules cover Write).
         # Plain python stays disallowed.
         export PATH="$here:$PATH"
-        tools=("Bash(nbs-cli:*)" "Read" "Skill" "Bash(sandbox-python:*)"
+        tools=("Bash(nbs-cli:*)" "Bash(nbs-reduce:*)" "Read" "Skill" "Bash(sandbox-python:*)"
                "Edit(./**)" "Glob" "Grep")
         ;;
     assistant)
         # Read-only: nbs-cli refuses every verb that changes the queue or a driver's session.
-        export NBS_CLI_ROLE=assistant
+        # The chat role is "assistant", a headless role "assistant:NAME" (set by the runner)
+        [[ "${NBS_CLI_ROLE:-}" == assistant:* ]] || export NBS_CLI_ROLE=assistant
         unset NBS_AGENT_UID NBS_AGENT_GOAL NBS_AGENT_OWNER
         prompt="${NBS_ASSISTANT_PROMPT:-Follow the beamline assistant instructions in your system prompt. Review the latest runs and post anything the operator should know.}"
         # The assistant's skill goes into the system prompt rather than being
         # loaded as a skill: it is then part of the prefix every call shares,
         # which the API caches, and no turn is spent loading it.
-        system=(--append-system-prompt-file "$("$python" -m nbs_agents.assistant.resources prompt beamline-assistant)")
+        # NBS_ASSISTANT_SKILL is the role's skill ([assistant.roles.NAME] skill).
+        system=(--append-system-prompt-file "$("$python" -m nbs_agents.assistant.resources prompt "${NBS_ASSISTANT_SKILL:-beamline-assistant}")")
         # Analysis only in sandbox-python, as for the driver; plain python is not allowed.
         export PATH="$here:$PATH"
         tools=("Read" "Skill" "Glob" "Grep" "Edit(./notebook/**)"
-               "Bash(sandbox-python:*)" "Bash(nbs-cli post:*)")
-        for verb in state beam plans samples metadata devices device diagnose run runs log attach kb ref; do
+               "Bash(sandbox-python:*)" "Bash(nbs-cli post:*)" "Bash(nbs-reduce:*)")
+        # role: the chat role reads the other roles and files requests to them (nbs-cli
+        # refuses it to headless roles); thread reads its threads; directive proposes
+        # (only a person confirms: nbs-cli refuses that to the assistant); staging proposes
+        # changes to nbs-gui's staging queue (only the chat role; a person accepts)
+        for verb in state beam plans samples metadata devices device diagnose run runs log attach kb ref role thread directive staging; do
             tools+=("Bash(nbs-cli $verb:*)")
         done
         ;;
@@ -245,7 +269,8 @@ esac
 # Run nbs-cli outside it; bwclaude still confines it, and the allow rules above
 # and nbs-cli's role decide what it may do. Only a call that is exactly
 # `nbs-cli ...` matches: a redirect, pipe or `&&` keeps the whole call sandboxed.
-settings='{"sandbox":{"excludedCommands":["nbs-cli *"]}}'
+# nbs-reduce reads only Tiled and writes only inside the working folder.
+settings='{"sandbox":{"excludedCommands":["nbs-cli *","nbs-reduce *"]}}'
 
 if [[ $headless == 1 ]]; then
     exec claude -p "$prompt" "${system[@]}" --settings "$settings" --allowedTools "${tools[@]}" --output-format stream-json --verbose "$@"

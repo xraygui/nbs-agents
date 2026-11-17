@@ -19,6 +19,7 @@ from nbs_agents.agentlog import (
     ASSISTANT_POST_KINDS,
     AgentLog,
     assistant_uid,
+    find_assistant_post,
     is_assistant_record,
     unread_operator_entries,
 )
@@ -33,9 +34,14 @@ from nbs_agents.constants import (
     QUEUE_STOP_INSTRUCTION,
 )
 from ..queue import close_agent_owner, describe_owner
-from ..beamline_info import DEVICES, METADATA, SAMPLES, BeamlineInfo, load_beamline_info
-from .config import CliConfig
-from .summaries import SummaryContext, summarize
+from ..beamline_info import DEVICES, METADATA, SAMPLES, STAGING, BeamlineInfo, load_beamline_info
+from ..staging import StagingError, StagingStore, check_ops, check_proposal, referenced_uids
+from .config import ASSISTANT_ROLE, AssistantConfig, CliConfig, RoleConfig
+from ..tiles import TileError, TileStore, acknowledge
+from ..threads import ThreadError, ThreadStore, open_thread
+from ..directives import DIRECTIVE_STATUSES, DirectiveError, DirectiveStore, decide_directive, parse_expiry, \
+    log_directive, revoke_directive
+from ..reduce.metrics import SummaryContext, summarize
 
 LOGGER = logging.getLogger(__name__)
 
@@ -49,6 +55,72 @@ METADATA_VALUE_CHARS = 300
 
 class CliError(RuntimeError):
     """An error to report to the CLI user without a traceback."""
+
+
+def writer_refs() -> dict[str, Any]:
+    """
+    What the runner told this Claude about itself, for the entries it writes.
+
+    Returns
+    -------
+    dict
+        ``model`` (``NBS_MODEL``), and for the assistant ``call``
+        (``NBS_ASSISTANT_CALL``) and ``recheck_of`` (``NBS_RECHECK_OF``),
+        each only when set.
+    """
+    out: dict[str, Any] = {}
+    if os.environ.get("NBS_MODEL"):
+        out["model"] = os.environ["NBS_MODEL"]
+    for key, var in (("call", "NBS_ASSISTANT_CALL"), ("recheck_of", "NBS_RECHECK_OF")):
+        try:
+            out[key] = int(os.environ[var]) if key == "call" else float(os.environ[var])
+        except (KeyError, ValueError):
+            pass
+    return out
+
+
+def parse_since(text: str, now: float) -> float:
+    """
+    A start time from ``HH:MM`` or ``HH:MM:SS`` (today, local), epoch
+    seconds, or an age such as ``30m``, ``2h`` or ``90s``.
+
+    Raises
+    ------
+    CliError
+        For anything else.
+    """
+    text = str(text).strip()
+    units = {"s": 1, "m": 60, "h": 3600}
+    if text[-1:] in units:
+        try:
+            return now - float(text[:-1]) * units[text[-1]]
+        except ValueError:
+            pass
+    if text.count(":") in (1, 2):
+        fmt = "%H:%M:%S" if text.count(":") == 2 else "%H:%M"
+        try:
+            clock = time.strptime(text, fmt)
+        except ValueError:
+            pass
+        else:
+            day = time.localtime(now)
+            return time.mktime((day.tm_year, day.tm_mon, day.tm_mday, clock.tm_hour, clock.tm_min, clock.tm_sec, 0, 0, -1))
+    try:
+        return float(text)
+    except ValueError:
+        raise CliError(f"--since takes HH:MM, HH:MM:SS, epoch seconds or an age like 30m or 2h, not {text!r}") from None
+
+
+def is_person(config: CliConfig) -> bool:
+    """Whether this client is a person: not the assistant, and not run by the runner for a driver."""
+    return not (config.is_assistant or os.environ.get("NBS_AGENT_UID") or os.environ.get("NBS_DRIVER"))
+
+
+def login_name() -> str:
+    """The person running this client."""
+    import getpass
+
+    return getpass.getuser()
 
 
 def refuse_read_only(config: CliConfig, verb: str) -> None:
@@ -226,12 +298,15 @@ class Beamline:
         Connection settings. Loaded from the environment if omitted.
     """
 
-    def __init__(self, config: Optional[CliConfig] = None) -> None:
-        self.config = config or CliConfig.load()
+    def __init__(self, config: Optional[CliConfig] = None, config_path: Optional[str] = None) -> None:
+        self.config = config or CliConfig.load(config_path)
+        self.config_path = config_path
         self._manager = None
         self._tiled = None
         self._info = None
         self._agent_log = None
+        self._staging = None
+        self._assistant = None
 
     # ------------------------------------------------------------------ clients
 
@@ -270,6 +345,16 @@ class Beamline:
         return self._info
 
     @property
+    def assistant(self) -> AssistantConfig:
+        """The ``[assistant]`` settings, for its roles."""
+        if self._assistant is None:
+            try:
+                self._assistant = AssistantConfig.load(self.config_path)
+            except ValueError as exc:
+                raise CliError(f"bad [assistant] settings: {exc}") from exc
+        return self._assistant
+
+    @property
     def agent_log(self) -> AgentLog:
         """Agent-log records, in the ``[agent_log]`` Redis."""
         if self._agent_log is None:
@@ -288,6 +373,7 @@ class Beamline:
         if self._info is not None:
             self._info.close()
             self._info = None
+        self._staging = None
 
     # ------------------------------------------------------------ beamline info
 
@@ -529,6 +615,252 @@ class Beamline:
             estimator = self.info.estimator()
         return estimator(item) if estimator else None
 
+    def _plan_errors(self, plan: str, kwargs: dict[str, Any], allowed: dict[str, Any]) -> list[str]:
+        """
+        Why a plan cannot be queued: the nbs-cli allowlist, the user group's
+        allowed plans and unknown keyword arguments.
+
+        Parameters
+        ----------
+        plan : str
+            Plan name.
+        kwargs : dict
+            Keyword arguments.
+        allowed : dict
+            ``plans_allowed()``.
+
+        Returns
+        -------
+        list of str
+            Problems; empty when there are none.
+        """
+        if self.config.allowed_plans is not None and plan not in self.config.allowed_plans:
+            return [f"plan {plan!r} is not in the nbs-cli allowlist"]
+        if plan not in allowed:
+            return [f"plan {plan!r} is not allowed for group {self.config.qs_user_group!r}"]
+        params = allowed[plan].get("parameters", [])
+        names = {p["name"] for p in params}
+        has_var_kw = any(p.get("kind", {}).get("name") == "VAR_KEYWORD" for p in params)
+        unknown = [k for k in kwargs if k not in names]
+        if unknown and not has_var_kw:
+            return [f"unknown parameters for {plan}: {unknown}; allowed: {sorted(names)}"]
+        return []
+
+    # ------------------------------------------------------------------ staging
+
+    @property
+    def staging(self) -> StagingStore:
+        """The beamline's shared staging queue (nbs-gui's), through the beamline-info provider."""
+        if self._staging is None:
+            where = self.info.staging_redis() if STAGING in self.info.capabilities else None
+            if where is None:
+                raise CliError(
+                    f"this beamline has no shared staging queue (beamline info provider: {self.info.name})"
+                )
+            self._staging = StagingStore(*where)
+        return self._staging
+
+    def _staging_author(self) -> str:
+        """Who proposes: the assistant's chat role, or the person running nbs-cli."""
+        if self.config.is_assistant:
+            try:
+                return f"{ASSISTANT_ROLE}:{self.assistant.chat_role().name}"
+            except Exception:
+                return ASSISTANT_ROLE
+        return login_name()
+
+    def _refuse_unless_stager(self, verb: str) -> None:
+        """Staging proposals are for people and the assistant's chat role, not headless roles or drivers."""
+        if self.config.assistant_role is not None or (not self.config.is_assistant and not is_person(self.config)):
+            raise CliError(f"{verb} is for people and the assistant's chat role")
+
+    def check_plan(self, plan: str, args: list[Any], kwargs: dict[str, Any], *, allowed: Optional[dict] = None,
+                   devices: Optional[dict] = None, estimator: Any = None) -> dict[str, Any]:
+        """
+        Check a plan as the QueueServer would before queuing it, without a session.
+
+        Parameters
+        ----------
+        plan : str
+            Plan name.
+        args : list
+            Positional arguments.
+        kwargs : dict
+            Keyword arguments.
+        allowed, devices : dict, optional
+            ``plans_allowed()`` and allowed devices, fetched once for many plans.
+        estimator : callable, optional
+            The provider's estimator, fetched once for many plans.
+
+        Returns
+        -------
+        dict
+            ``item`` (compact), ``valid``, ``errors``, ``warnings`` and ``estimate_s``.
+        """
+        from bluesky_queueserver.manager.profile_ops import validate_plan
+
+        if allowed is None:
+            allowed = self.plans_allowed()
+        item = {"item_type": "plan", "name": plan, "args": list(args), "kwargs": dict(kwargs)}
+        errors = self._plan_errors(plan, kwargs, allowed)
+        warnings: list[str] = []
+        if not errors:
+            if devices is None:
+                devices = self.devices_allowed()
+            ok, msg = validate_plan(item, allowed_plans=allowed, allowed_devices=devices)
+            if not ok:
+                text = msg.split("\nPlan:")[0]
+                errors.append(" ".join(line.strip() for line in text.splitlines()
+                                       if line.strip() and not line.strip().startswith("For further information")))
+            names = {p["name"] for p in allowed[plan].get("parameters", [])}
+            warning = self.info.add_warning(plan, dict(kwargs), names, [])
+            if warning:
+                warnings.append(warning)
+        try:
+            est = self.estimate(item, estimator if estimator is not None else self.info.estimator())
+        except Exception as exc:  # an estimate is a nicety
+            est = None
+            warnings.append(f"no estimate: {exc}")
+        return {"item": compact_item(item, est), "valid": not errors, "errors": errors, "warnings": warnings,
+                "estimate_s": None if est is None else round(est, 1)}
+
+    def devices_allowed(self) -> dict[str, Any]:
+        """Devices this user group may pass to plans, as the QueueServer describes them."""
+        response = self.manager.devices_allowed(user_group=self.config.qs_user_group)
+        return _check(response, "devices_allowed")["devices_allowed"]
+
+    def staging_show(self) -> dict[str, Any]:
+        """
+        The shared staging queue with estimates, and its pending proposals.
+
+        Returns
+        -------
+        dict
+            ``version``, ``updated``, ``updated_by``, ``items``, ``total_est_s``
+            and ``proposals`` (pending, each with ``stale``/``changed``).
+        """
+        store = self.staging
+        queue = store.queue()
+        try:
+            estimator = self.info.estimator()
+        except Exception:
+            estimator = None
+        items, total = [], 0.0
+        for item in queue["items"]:
+            try:
+                est = self.estimate(item, estimator) if estimator else None
+            except Exception:
+                est = None
+            total += est or 0
+            items.append(compact_item(item, est))
+        proposals = []
+        for p in store.proposals():
+            fit = check_proposal(p, queue)
+            proposals.append({
+                "id": p["id"], "author": p.get("author"), "reason": p.get("reason"),
+                "ops": [o["op"] for o in p.get("ops", [])], "created": _iso(p.get("created")),
+                "estimate_s": (p.get("checks") or {}).get("estimate_s"), "stale": fit["stale"],
+                "changed": fit["changed"],
+            })
+        return {
+            "version": queue["version"], "updated": _iso(queue["updated"]), "updated_by": queue["updated_by"],
+            "n_items": len(items), "total_est_s": round(total, 1) if estimator else None, "items": items,
+            "proposals": proposals,
+            "note": "people move staged plans to the queue in nbs-gui; nbs-cli only proposes changes",
+        }
+
+    def staging_proposal(self, proposal_id: str) -> dict[str, Any]:
+        """
+        One staging proposal whole, whatever its status.
+
+        Returns
+        -------
+        dict
+            The ``proposal`` with ``created`` and ``decided_at`` as ISO times,
+            and, while pending, whether it still fits the list (``fit``).
+        """
+        store = self.staging
+        proposal = store.get(proposal_id)
+        if proposal is None:
+            raise CliError(f"no staging proposal {proposal_id} (they expire after 7 days)")
+        proposal = {**proposal, "created": _iso(proposal.get("created")), "decided_at": _iso(proposal.get("decided_at"))}
+        out: dict[str, Any] = {"proposal": proposal}
+        if proposal.get("status") == "pending":
+            out["fit"] = check_proposal(proposal, store.queue())
+        return out
+
+    def staging_propose(self, ops: list[dict[str, Any]], reason: str) -> dict[str, Any]:
+        """
+        Propose changes to the shared staging queue for a person to accept in nbs-gui.
+
+        Parameters
+        ----------
+        ops : list of dict
+            ``add``, ``update``, ``remove`` and ``move`` ops (``nbs_agents.staging``).
+        reason : str
+            Why, shown to the person deciding.
+
+        Returns
+        -------
+        dict
+            The stored ``proposal`` and a ``note``.
+
+        Raises
+        ------
+        CliError
+            On malformed ops, unknown items, or plans that fail validation
+            (nothing is stored then).
+        """
+        self._refuse_unless_stager("staging propose")
+        if not reason or not reason.strip():
+            raise CliError("--reason is required")
+        try:
+            check_ops(ops)
+        except StagingError as exc:
+            raise CliError(str(exc)) from exc
+        store = self.staging
+        queue = store.queue()
+        present = {i.get("item_uid") for i in queue["items"]}
+        missing = [u for u in referenced_uids(ops) if u not in present]
+        if missing:
+            raise CliError(f"not in the staging queue (version {queue['version']}): {missing}; see nbs-cli staging show")
+        allowed = devices = None
+        estimator = self.info.estimator()
+        errors, warnings, total, checked = [], [], 0.0, False
+        for n, op in enumerate(ops, 1):
+            if op["op"] not in ("add", "update"):
+                continue
+            item = op["item"]
+            if item.get("item_type", "plan") != "plan":
+                continue
+            if allowed is None:
+                allowed = self.plans_allowed()
+            if devices is None:
+                devices = self.devices_allowed()
+            out = self.check_plan(item["name"], item.get("args", []), item.get("kwargs", {}),
+                                  allowed=allowed, devices=devices, estimator=estimator)
+            errors += [f"op {n} ({item['name']}): {e}" for e in out["errors"]]
+            warnings += [f"op {n} ({item['name']}): {w}" for w in out["warnings"]]
+            total += out["estimate_s"] or 0
+            checked = True
+        if errors:
+            raise CliError("; ".join(errors))
+        checks = {"estimate_s": round(total, 1) if checked and estimator else None, "warnings": warnings,
+                  "errors": []}
+        thread = os.environ.get("NBS_ASSISTANT_THREAD") or None
+        proposal = store.propose(ops, reason, self._staging_author(), thread=thread, checks=checks,
+                                 base_version=queue["version"])
+        return {"proposal": proposal,
+                "note": "a person accepts or rejects it in nbs-gui; it expires in 7 days if nobody decides"}
+
+    def staging_withdraw(self, proposal_id: str) -> dict[str, Any]:
+        """Withdraw one's own pending staging proposal."""
+        self._refuse_unless_stager("staging withdraw")
+        try:
+            return {"proposal": self.staging.withdraw(proposal_id, self._staging_author())}
+        except StagingError as exc:
+            raise CliError(str(exc)) from exc
+
     # ----------------------------------------------------------------- sessions
 
     def find_session(self, agent_uid: Optional[str] = None) -> Optional[dict[str, Any]]:
@@ -691,24 +1023,12 @@ class Beamline:
         BlueskyRun
             Tiled run.
         """
-        from tiled.queries import Key
+        from ..reduce.runs import find_run
 
-        ref = str(ref)
-        if ref.lstrip("-").isdigit():
-            n = int(ref)
-            if n < 0:
-                runs = list(self.tiled.values()[-1 : n - 1 : -1])
-                if len(runs) < -n:
-                    raise CliError(f"only {len(runs)} runs in the catalog")
-                return runs[-1]
-            matches = list(self.tiled.search(Key("scan_id") == n).values()[-1:-2:-1])
-            if not matches:
-                raise CliError(f"no run with scan_id {n}")
-            return matches[0]
         try:
-            return self.tiled[ref]
-        except KeyError:
-            raise CliError(f"no run {ref!r}") from None
+            return find_run(self.tiled, ref)
+        except LookupError as exc:
+            raise CliError(str(exc)) from None
 
     def run_data(self, run) -> dict[str, np.ndarray]:
         """
@@ -919,7 +1239,7 @@ class Beamline:
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
-        from .summaries import dimension_keys
+        from ..reduce.metrics import dimension_keys
 
         start = run.metadata["start"]
         data = self.run_data(run)
@@ -1619,17 +1939,11 @@ class Beamline:
                 f"operator requested stop ({stop.get('text')}); finalize with `nbs-cli finalize --summary ...`"
             )
 
-        if self.config.allowed_plans is not None and plan not in self.config.allowed_plans:
-            raise CliError(f"plan {plan!r} is not in the nbs-cli allowlist")
         allowed = self.plans_allowed()
-        if plan not in allowed:
-            raise CliError(f"plan {plan!r} is not allowed for group {self.config.qs_user_group!r}")
-        params = allowed[plan].get("parameters", [])
-        names = {p["name"] for p in params}
-        has_var_kw = any(p.get("kind", {}).get("name") == "VAR_KEYWORD" for p in params)
-        unknown = [k for k in kwargs if k not in names]
-        if unknown and not has_var_kw:
-            raise CliError(f"unknown parameters for {plan}: {unknown}; allowed: {sorted(names)}")
+        errors = self._plan_errors(plan, kwargs, allowed)
+        if errors:
+            raise CliError(errors[0])
+        names = {p["name"] for p in allowed[plan].get("parameters", [])}
 
         estimator = self.info.estimator()
         item_dict = {"item_type": "plan", "name": plan, "args": list(args), "kwargs": dict(kwargs)}
@@ -1820,12 +2134,23 @@ class Beamline:
             return records
         return {uid: r for uid, r in records.items() if not is_assistant_record(r, uid)}
 
-    def ask_assistant(self, text: str, source: str = "nbs-cli") -> dict[str, Any]:
+    def ask_assistant(
+        self,
+        text: str,
+        source: str = "nbs-cli",
+        thread: Optional[str] = None,
+        entry: Optional[str] = None,
+        tile: Optional[str] = None,
+        by: Optional[str] = None,
+    ) -> dict[str, Any]:
         """
-        Put an operator question in today's assistant record.
+        Ask the assistant (its chat role, the manager) a question.
 
-        It is the same entry the GUI's Assistant tab writes, so the question
-        shows in the assistant conversation and the runner answers it.
+        Each new question opens its own thread: the runner answers it, and
+        each follow-up (``thread``), in a Claude session of its own. Only the
+        question shows in today's main record, as the thread's one line.
+        With ``[assistant] threads = false`` the question goes into the main
+        record and is answered there, as the GUI's Assistant tab did before.
 
         Parameters
         ----------
@@ -1833,6 +2158,183 @@ class Beamline:
             The question.
         source : str, optional
             Where it came from.
+        thread : str, optional
+            A follow-up in this thread.
+        entry : str, optional
+            Ask about one of today's assistant posts: ``HH:MM``, ``HH:MM:SS``,
+            epoch seconds or ``"last"``.
+        tile : str, optional
+            Ask about this role's tile.
+        by : str, optional
+            Who asks; the login name if omitted.
+
+        Returns
+        -------
+        dict
+            ``agent_uid`` (the main record), ``thread`` (its id) and the
+            appended ``entry`` (the main record's line) or ``message`` (a follow-up).
+        """
+        refuse_read_only(self.config, "ask-assistant")
+        if not text.strip():
+            raise CliError("empty question")
+        if sum(x is not None for x in (thread, entry, tile)) > 1:
+            raise CliError("a question is a follow-up (--thread), about an entry (--entry) or about a tile (--tile)")
+        by = by or login_name()
+        uid = self.agent_log.ensure_assistant_record()
+        if thread:
+            try:
+                message = ThreadStore.for_agent_log(self.agent_log).ask(thread, text, by, source=source)
+            except ThreadError as exc:
+                raise CliError(str(exc)) from exc
+            return {"agent_uid": uid, "thread": thread, "message": message}
+        if not self.assistant.threads:
+            if entry or tile:
+                raise CliError("--entry and --tile open a thread, and [assistant] threads is off")
+            return {"agent_uid": uid, "entry": self.agent_log.message(uid, text.strip(), source=source)}
+        seed = None
+        if entry:
+            try:
+                post = find_assistant_post(self.agent_log.get(uid) or {}, entry)
+            except ValueError as exc:
+                raise CliError(str(exc)) from exc
+            seed = {"kind": "entry", "record": uid, "entry": post}
+        elif tile:
+            current = TileStore.for_agent_log(self.agent_log).get(tile)
+            if current is None:
+                raise CliError(f"no tile for role {tile!r}")
+            seed = {"kind": "tile", "role": tile, "tile": current}
+        out = open_thread(self.agent_log, text, by, source=source, seed=seed)
+        return {"agent_uid": uid, "thread": out["thread"]["id"], "entry": out["entry"]}
+
+    def _refuse_unless_person_or_assistant(self, verb: str) -> None:
+        """Assistant records stay out of drivers' reach (the firewall); people and the assistant read them."""
+        if not self.config.is_assistant and not is_person(self.config):
+            raise CliError(f"{verb} is for people and the assistant, not for driving agents")
+
+    def thread_list(self, since: Optional[str] = None) -> list[dict[str, Any]]:
+        """
+        The assistant's threads, newest first, without their messages.
+
+        Parameters
+        ----------
+        since : str, optional
+            Only threads active since then (as ``role show --since``).
+        """
+        self._refuse_unless_person_or_assistant("thread list")
+        start = parse_since(since, time.time()) if since else None
+        return ThreadStore.for_agent_log(self.agent_log).listing(start)
+
+    def thread_show(self, thread_id: str) -> dict[str, Any]:
+        """One thread with its messages."""
+        self._refuse_unless_person_or_assistant("thread show")
+        thread = ThreadStore.for_agent_log(self.agent_log).get(thread_id)
+        if thread is None:
+            raise CliError(f"no thread {thread_id}")
+        return thread
+
+    def directive_propose(self, role: str, text: str, expires: str = "beamtime") -> dict[str, Any]:
+        """
+        Propose a directive for an assistant role (the chat role only). It
+        waits for a person to confirm it.
+
+        Parameters
+        ----------
+        role : str
+            The role it is for.
+        text : str
+            What the role should do or stop doing.
+        expires : str, optional
+            ``beamtime``, a duration (``12h``, ``3d``) or a date (``YYYY-MM-DD``).
+
+        Returns
+        -------
+        dict
+            The ``directive`` and a ``note`` on what happens next.
+        """
+        self._refuse_unless_chat_role("directive propose")
+        self._named_role(role)
+        now = time.time()
+        proposal = None
+        if expires.strip() == "beamtime":
+            try:
+                proposal = (self.info.metadata(["proposal"]) or {}).get("proposal")
+            except Exception:
+                proposal = None
+        try:
+            when = parse_expiry(expires, now, proposal, self.assistant.beamtime_s)
+            thread = os.environ.get("NBS_ASSISTANT_THREAD") or None
+            directive = DirectiveStore.for_agent_log(self.agent_log).propose(
+                role, text, when, by=ASSISTANT_ROLE, thread=thread, t=now,
+            )
+        except DirectiveError as exc:
+            raise CliError(str(exc)) from exc
+        log_directive(
+            self.agent_log, directive,
+            f"proposed directive {directive['id']} for {role} (until {when['text']}): {directive['text']}",
+            source=ASSISTANT_ROLE, thread=thread, **writer_refs(),
+        )
+        if thread:
+            try:
+                ThreadStore.for_agent_log(self.agent_log).add(
+                    thread, "note", f"proposed directive {directive['id']} for the {role} role: {directive['text']}",
+                    directive=directive["id"], source=ASSISTANT_ROLE,
+                )
+            except ThreadError:
+                pass
+        return {"directive": directive,
+                "note": "a person must confirm it (web UI, or nbs-cli directive confirm ID); tell them in your answer"}
+
+    def directive_list(self, role: Optional[str] = None, all_: bool = False) -> list[dict[str, Any]]:
+        """Directives waiting for a person and active ones (every one with ``all_``), oldest first."""
+        self._refuse_unless_person_or_assistant("directive list")
+        statuses = DIRECTIVE_STATUSES if all_ else ("proposed", "active")
+        return DirectiveStore.for_agent_log(self.agent_log).listing(role, statuses)
+
+    def directive_decide(self, directive_id: str, action: str, reason: str = "", by: Optional[str] = None) -> dict[str, Any]:
+        """
+        A person confirms, rejects or revokes a directive; it is logged.
+
+        Parameters
+        ----------
+        directive_id : str
+            The directive.
+        action : {"confirm", "reject", "revoke"}
+            What to do.
+        reason : str, optional
+            Why (for a reject or revoke).
+        by : str, optional
+            Who; the login name if omitted.
+        """
+        if not is_person(self.config):
+            raise CliError("only a person confirms, rejects or revokes a directive")
+        by = by or login_name()
+        chat = self.assistant.chat_role().name
+        try:
+            if action == "revoke":
+                return revoke_directive(self.agent_log, directive_id, by, source="nbs-cli", reason=reason,
+                                        chat_role=chat)
+            return decide_directive(self.agent_log, directive_id, action == "confirm", by, source="nbs-cli",
+                                    reason=reason, chat_role=chat)
+        except DirectiveError as exc:
+            raise CliError(str(exc)) from exc
+
+    def recheck(self, about: str, model: Optional[str] = None, text: str = "", source: str = "nbs-cli") -> dict[str, Any]:
+        """
+        Ask the assistant for a blind second look at one of today's posts.
+
+        The runner starts a fresh call (on ``model``, else the assistant's
+        ``alert_model``) that sees the events behind the post but not the post.
+
+        Parameters
+        ----------
+        about : str
+            The post: ``HH:MM``, ``HH:MM:SS``, epoch seconds or ``"last"``.
+        model : str, optional
+            Model for the re-check.
+        text : str, optional
+            What to look at in particular.
+        source : str, optional
+            Where the request came from.
 
         Returns
         -------
@@ -1840,38 +2342,238 @@ class Beamline:
             ``agent_uid`` and the appended entry.
         """
         refuse_read_only(self.config, "ask-assistant")
-        if not text.strip():
-            raise CliError("empty question")
         uid = self.agent_log.ensure_assistant_record()
-        return {"agent_uid": uid, "entry": self.agent_log.message(uid, text.strip(), source=source)}
+        try:
+            entry = self.agent_log.request_recheck(uid, about, model=model, text=text, source=source)
+        except ValueError as exc:
+            raise CliError(str(exc)) from exc
+        return {"agent_uid": uid, "entry": entry}
 
-    def post(self, kind: str, text: str, runs: Optional[list[str]] = None) -> dict[str, Any]:
+    def _own_role(self) -> RoleConfig:
         """
-        Post to the assistant's own record for today.
+        The assistant role this client posts for: the headless role
+        ``NBS_CLI_ROLE=assistant:NAME`` names, else the chat role.
+        """
+        roles = self.assistant.resolved_roles()
+        name = self.config.assistant_role
+        if name is None:
+            return next(r for r in roles.values() if r.chat)
+        role = roles.get(name)
+        if role is None or role.chat:
+            raise CliError(f"{name!r} is not a headless role in [assistant.roles] (roles: {sorted(roles)})")
+        return role
+
+    def _role_record(self, role: RoleConfig) -> str:
+        return self.agent_log.ensure_assistant_record(role=None if role.chat else role.name)
+
+    def post(
+        self,
+        kind: Optional[str],
+        text: str,
+        runs: Optional[list[str]] = None,
+        tile: bool = False,
+        severity: Optional[str] = None,
+        figure: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """
+        Post to the assistant role's own record for today, or to its tile.
+
+        A headless role (``NBS_CLI_ROLE=assistant:NAME``) writes its own
+        record and tile; the chat role writes today's main assistant record.
+        Each may post only where its ``sinks`` allow.
 
         Parameters
         ----------
-        kind : {"summary", "advice", "alert", "answer"}
-            Entry kind.
+        kind : {"summary", "advice", "alert", "answer"} or None
+            Entry kind; None with ``tile``.
         text : str
             What to tell the operator.
         runs : list of str, optional
             UIDs of the runs the post is about.
+        tile : bool, optional
+            Post to the role's tile instead (logged as a ``tile`` entry).
+        severity : {"ok", "info", "warn", "alert"}, optional
+            The tile's severity; needed with ``tile``. An alert stays on the
+            tile until a person acknowledges it.
+        figure : str, optional
+            The tile's figure, as ``att:ID`` from ``nbs-cli attach``.
 
         Returns
         -------
         dict
-            The log entry, with ``agent_uid``.
+            The log entry, with ``agent_uid`` (and ``tile`` for a tile post).
         """
         if not self.config.read_only:
             raise CliError("post is only for the assistant role (NBS_CLI_ROLE=assistant or --role assistant)")
-        if kind not in ASSISTANT_POST_KINDS:
-            raise CliError(f"unknown post kind {kind!r}; use one of {list(ASSISTANT_POST_KINDS)}")
         if not text or not text.strip():
             raise CliError("post text is required")
-        uid = self.agent_log.ensure_assistant_record()
-        entry = self.agent_log.append(uid, kind, text.strip(), source="assistant", run_uids=list(runs or []) or None)
+        role = self._own_role()
+        refs = writer_refs()
+        source = ASSISTANT_ROLE if role.chat else f"{ASSISTANT_ROLE}:{role.name}"
+        if tile:
+            if "tile" not in role.sinks:
+                raise CliError(f"the {role.name} role has no tile (its sinks are {role.sinks})")
+            try:
+                written = TileStore.for_agent_log(self.agent_log).post(
+                    role.name, severity or "", text, run_uids=runs, figure=figure, model=refs.get("model"),
+                )
+            except TileError as exc:
+                raise CliError(str(exc)) from exc
+            uid = self._role_record(role)
+            entry = self.agent_log.append(
+                uid, "tile", text.strip(), source=source, severity=severity,
+                run_uids=list(runs or []) or None, figure=figure or None, **refs,
+            )
+            return {"agent_uid": uid, **entry, "tile": written}
+        if "record" not in role.sinks:
+            raise CliError(f"the {role.name} role posts only to its tile (its sinks are {role.sinks}); use --tile")
+        if kind not in ASSISTANT_POST_KINDS:
+            raise CliError(f"unknown post kind {kind!r}; use one of {list(ASSISTANT_POST_KINDS)}")
+        uid = self._role_record(role)
+        entry = self.agent_log.append(
+            uid, kind, text.strip(), source=source, run_uids=list(runs or []) or None, **refs
+        )
         return {"agent_uid": uid, **entry}
+
+    def ack(self, role: str, by: Optional[str] = None) -> dict[str, Any]:
+        """
+        Acknowledge an assistant role's alert, as a person; it is logged in
+        the role's record.
+
+        Parameters
+        ----------
+        role : str
+            The role whose tile holds the alert.
+        by : str, optional
+            Who acknowledges; the login name if omitted.
+
+        Returns
+        -------
+        dict
+            ``agent_uid`` (where it was logged), ``tile`` and ``entry``.
+        """
+        if not is_person(self.config):
+            raise CliError("only a person acknowledges an alert; an agent can mention it in a post instead")
+        roles = self.assistant.resolved_roles()
+        if role not in roles and TileStore.for_agent_log(self.agent_log).get(role) is None:
+            raise CliError(f"no role {role!r} (roles: {sorted(roles)})")
+        by = by or login_name()
+        try:
+            return acknowledge(self.agent_log, role, by, source="nbs-cli", chat=role in roles and roles[role].chat)
+        except TileError as exc:
+            raise CliError(str(exc)) from exc
+
+    def _refuse_unless_chat(self, verb: str) -> None:
+        self._refuse_unless_chat_role(f"role {verb}")
+
+    def _refuse_unless_chat_role(self, verb: str) -> None:
+        if not self.config.read_only or self.config.assistant_role is not None:
+            raise CliError(
+                f"{verb} is for the assistant's chat role (the manager: NBS_CLI_ROLE=assistant or --role assistant)"
+            )
+
+    def _named_role(self, name: str) -> RoleConfig:
+        roles = self.assistant.resolved_roles()
+        if name not in roles:
+            raise CliError(f"no role {name!r} (roles: {sorted(roles)})")
+        return roles[name]
+
+    def role_list(self) -> dict[str, Any]:
+        """
+        Every assistant role with its settings, tile and status.
+
+        Returns
+        -------
+        dict
+            ``{name: {mode, skill, models, triggers, sinks, record, status, tile}}``.
+        """
+        self._refuse_unless_chat("list")
+        tiles = TileStore.for_agent_log(self.agent_log)
+        out = {}
+        for role in self.assistant.resolved_roles().values():
+            uid = assistant_uid(role=None if role.chat else role.name)
+            record = self.agent_log.get(uid) or {}
+            out[role.name] = {
+                "mode": role.mode, "skill": role.skill, "models": [role.model, role.alert_model],
+                "triggers": role.triggers, "sinks": role.sinks, "record": uid,
+                "status": record.get("status"), "tile": tiles.get(role.name),
+            }
+        return out
+
+    def role_show(self, name: str, since: Optional[str] = None, tail: int = 20) -> dict[str, Any]:
+        """
+        A role's tile, its record for today and its notebook (as of its last call).
+
+        Parameters
+        ----------
+        name : str
+            The role.
+        since : str, optional
+            Only entries from then on: ``HH:MM``, ``HH:MM:SS``, epoch seconds,
+            or an age such as ``30m`` or ``2h``.
+        tail : int, optional
+            Most entries; 0 for all.
+
+        Returns
+        -------
+        dict
+            ``role``, its settings, ``record``, ``status``, ``last_call``,
+            ``tile``, ``entries`` and ``notebook``.
+        """
+        self._refuse_unless_chat("show")
+        role = self._named_role(name)
+        uid = assistant_uid(role=None if role.chat else role.name)
+        record = self.agent_log.get(uid) or {}
+        entries = record.get("log") or []
+        if since:
+            start = parse_since(since, time.time())
+            entries = [e for e in entries if (e.get("t") or 0) >= start]
+        if tail:
+            entries = entries[-tail:]
+        return {
+            "role": role.name, "mode": role.mode, "skill": role.skill, "models": [role.model, role.alert_model],
+            "triggers": role.triggers, "sinks": role.sinks, "record": uid, "status": record.get("status"),
+            "last_call": record.get("last_call"), "tile": TileStore.for_agent_log(self.agent_log).get(role.name),
+            "entries": entries,
+            "notebook": "(your own notebook folder)" if role.chat else record.get("notebook"),
+        }
+
+    def role_request(self, name: str, text: str, runs: Optional[list[str]] = None) -> dict[str, Any]:
+        """
+        Ask a headless role to do something with its own tools and prompt.
+
+        The runner gives the request to the role in its next call and passes
+        the role's answer back to today's main assistant record as a
+        ``reply`` entry, which starts a call of the chat role.
+
+        Parameters
+        ----------
+        name : str
+            A headless role.
+        text : str
+            The request.
+        runs : list of str, optional
+            Run uids it is about.
+
+        Returns
+        -------
+        dict
+            ``agent_uid`` (the role's record) and the ``request`` entry.
+        """
+        self._refuse_unless_chat("request")
+        role = self._named_role(name)
+        if role.chat:
+            raise CliError(f"{name} is the chat role itself; requests go to headless roles")
+        if not text or not text.strip():
+            raise CliError("request text is required")
+        uid = self._role_record(role)
+        thread = os.environ.get("NBS_ASSISTANT_THREAD") or None
+        entry = self.agent_log.append(
+            uid, "request", text.strip(), source=ASSISTANT_ROLE, reply_to=assistant_uid(), thread=thread,
+            run_uids=list(runs or []) or None, **writer_refs(),
+        )
+        where = "into this thread" if thread else "as a reply entry"
+        return {"agent_uid": uid, "entry": entry, "note": f"the {name} role's answer will come back {where}"}
 
     def note(self, text: str, agent_uid: Optional[str] = None) -> dict[str, Any]:
         """
@@ -1895,7 +2597,7 @@ class Beamline:
         record = self.find_session(agent_uid)
         if record is None:
             raise CliError("no open session to note on")
-        return self.agent_log.append(record["agent_uid"], "note", text, source="nbs-cli")
+        return self.agent_log.append(record["agent_uid"], "note", text, source="nbs-cli", **writer_refs())
 
     def ask(self, text: str, agent_uid: Optional[str] = None) -> dict[str, Any]:
         """
@@ -1919,7 +2621,7 @@ class Beamline:
         record = self.find_session(agent_uid)
         if record is None:
             raise CliError("no open session to ask from")
-        return self.agent_log.ask(record["agent_uid"], text, source="nbs-cli")
+        return self.agent_log.ask(record["agent_uid"], text, source="nbs-cli", **writer_refs())
 
     def finalize(self, summary: str, drop_pending: bool = False, agent_uid: Optional[str] = None) -> dict[str, Any]:
         """
@@ -1956,7 +2658,7 @@ class Beamline:
             for item in split["block"]:
                 _check(self.manager.item_remove(uid=item["item_uid"]), "item_remove")
                 dropped.append(item["item_uid"])
-        self.agent_log.append(uid, "finalize", summary, source="nbs-cli")
+        self.agent_log.append(uid, "finalize", summary, source="nbs-cli", **writer_refs())
         self.agent_log.set_status(uid, "finalizing")
         if split["queue_stop"] is not None:
             _check(self.manager.item_remove(uid=split["queue_stop"]["item_uid"]), "item_remove")

@@ -121,6 +121,21 @@ def test_ask_assistant_posts_to_todays_record():
     assert log[-1]["kind"] == "operator" and log[-1]["text"] == "how is S1?"
 
 
+def test_recheck_asks_for_a_blind_second_look():
+    bl = FakeBeamline()
+    client = client_for(bl)
+    uid = bl.agent_log.ensure_assistant_record()
+    post = bl.agent_log.append(uid, "alert", "beam lost", source="assistant", model="sonnet")
+    r = client.post("/api/assistant/recheck", json={"t": post["t"], "model": "opus"}, headers=ORIGIN)
+    assert r.status_code == 200
+    entry = bl.agent_log.get(uid)["log"][-1]
+    assert entry["kind"] == "operator" and entry["source"] == "web"
+    assert entry["recheck"] == {"t": post["t"], "model": "opus", "note": None}
+    assert client.post("/api/assistant/recheck", json={"t": 1.0}, headers=ORIGIN).status_code == 404
+    snap = client.get("/api/snapshot").json()
+    assert snap["assistant"]["log"][0]["model"] == "sonnet"
+
+
 def test_new_agent_needs_runner_and_confirms_busy_sessions():
     bl = FakeBeamline()
     client = client_for(bl)
@@ -341,3 +356,228 @@ def test_request_reference_draft_asks_the_assistant(tmp_path):
     assert r.status_code == 200
     assert client.get("/api/refs").json()["queue"]["requests"] == []
 
+
+
+# ---------------------------------------------------------------- role sidebar and manager threads
+
+def roles_beamline(threads=True):
+    from nbs_agents.cli.config import AssistantConfig, read_roles
+
+    bl = FakeBeamline()
+    bl.assistant = AssistantConfig(threads=threads, roles=read_roles({
+        "manager": {"mode": "chat"}, "plotter": {"triggers": ["run"]}, "integrity": {"triggers": ["alert"]},
+    }))
+    return bl
+
+
+def test_snapshot_has_tiles_role_records_threads_and_directives():
+    from nbs_agents.directives import DirectiveStore
+    from nbs_agents.threads import open_thread
+    from nbs_agents.tiles import TileStore
+
+    bl = roles_beamline()
+    TileStore.for_agent_log(bl.agent_log).post("plotter", "ok", "scan 3 plotted", figure="att:0123456789abcdef")
+    uid = bl.agent_log.ensure_assistant_record(role="plotter")
+    bl.agent_log.append(uid, "tile", "scan 3 plotted", source="assistant:plotter")
+    open_thread(bl.agent_log, "why is i0 low?", "jamie")
+    DirectiveStore.for_agent_log(bl.agent_log).propose("integrity", "U6 charges; do not alert on it", {"kind": "beamtime"})
+    snap = client_for(bl).get("/api/snapshot").json()
+    assert snap["tiles"]["plotter"]["message"] == "scan 3 plotted"
+    assert snap["roles"]["plotter"]["uid"] == uid
+    assert snap["roles"]["plotter"]["log"][-1]["text"] == "scan 3 plotted"
+    # The plotter's record is not the main assistant record
+    assert all(e.get("source") != "assistant:plotter" for e in snap["assistant"]["log"])
+    assert [t["messages"][0]["text"] for t in snap["threads"]] == ["why is i0 low?"]
+    assert snap["directives"][0]["status"] == "proposed"
+    assert snap["threads_on"] is True
+    assert snap["errors"] == {}
+
+
+def test_questions_open_threads_and_follow_ups_join_them():
+    from nbs_agents.threads import ThreadStore
+    from nbs_agents.tiles import TileStore
+
+    bl = roles_beamline()
+    client = client_for(bl)
+    r = client.post("/api/assistant/ask", json={"text": "how is S1?", "by": "jamie"}, headers=ORIGIN)
+    assert r.status_code == 200
+    thread_id = r.json()["thread"]
+    line = bl.agent_log.get(assistant_uid())["log"][-1]
+    assert (line["kind"], line["thread"], line["by"], line["source"]) == ("operator", thread_id, "jamie", "web")
+    r = client.post("/api/assistant/ask", json={"text": "and S2?", "thread": thread_id}, headers=ORIGIN)
+    assert r.status_code == 200
+    thread = ThreadStore.for_agent_log(bl.agent_log).get(thread_id)
+    assert [m["text"] for m in thread["messages"]] == ["how is S1?", "and S2?"]
+    # Only the question is in the main record
+    assert len(bl.agent_log.get(assistant_uid())["log"]) == 1
+    assert client.post("/api/assistant/ask", json={"text": "x", "thread": "nope"}, headers=ORIGIN).status_code == 404
+    # About a post, and about a tile
+    post = bl.agent_log.append(assistant_uid(), "alert", "i0 dropped", source="assistant")
+    r = client.post("/api/assistant/ask", json={"text": "why?", "entry": post["t"]}, headers=ORIGIN)
+    seed = ThreadStore.for_agent_log(bl.agent_log).get(r.json()["thread"])["seed"]
+    assert seed["kind"] == "entry" and seed["entry"]["text"] == "i0 dropped"
+    TileStore.for_agent_log(bl.agent_log).post("plotter", "warn", "flat signal")
+    r = client.post("/api/assistant/ask", json={"text": "which keys?", "tile": "plotter"}, headers=ORIGIN)
+    seed = ThreadStore.for_agent_log(bl.agent_log).get(r.json()["thread"])["seed"]
+    assert seed == {"kind": "tile", "role": "plotter", "tile": TileStore.for_agent_log(bl.agent_log).get("plotter")}
+    assert client.post("/api/assistant/ask", json={"text": "x", "tile": "health"}, headers=ORIGIN).status_code == 404
+    two = {"text": "x", "tile": "plotter", "thread": thread_id}
+    assert client.post("/api/assistant/ask", json=two, headers=ORIGIN).status_code == 400
+
+
+def test_threads_off_keeps_questions_in_the_record():
+    bl = roles_beamline(threads=False)
+    client = client_for(bl)
+    r = client.post("/api/assistant/ask", json={"text": "how is S1?"}, headers=ORIGIN)
+    assert r.status_code == 200 and "thread" not in r.json()
+    assert "thread" not in bl.agent_log.get(assistant_uid())["log"][-1]
+    assert client.post("/api/assistant/ask", json={"text": "x", "tile": "plotter"}, headers=ORIGIN).status_code == 409
+
+
+def test_acknowledging_a_sticky_alert_is_logged():
+    from nbs_agents.tiles import TileStore
+
+    bl = roles_beamline()
+    client = client_for(bl)
+    tiles = TileStore.for_agent_log(bl.agent_log)
+    assert client.post("/api/tiles/plotter/ack", json={"by": "jamie"}, headers=ORIGIN).status_code == 409
+    tiles.post("integrity", "alert", "edge inverted on U6")
+    tiles.post("integrity", "ok", "fine again")
+    assert tiles.get("integrity")["cleared"] is True
+    r = client.post("/api/tiles/integrity/ack", json={"by": "jamie"}, headers=ORIGIN)
+    assert r.status_code == 200
+    tile = tiles.get("integrity")
+    assert (tile["severity"], tile["message"], tile["last_ack"]["by"]) == ("ok", "fine again", "jamie")
+    entry = bl.agent_log.get(assistant_uid(role="integrity"))["log"][-1]
+    assert (entry["kind"], entry["by"], entry["source"]) == ("ack", "jamie", "web")
+    assert client.post("/api/tiles/nobody/ack", json={}, headers=ORIGIN).status_code == 404
+
+
+def test_directives_are_confirmed_rejected_and_revoked_by_a_person():
+    from nbs_agents.directives import DirectiveStore
+
+    bl = roles_beamline()
+    client = client_for(bl)
+    store = DirectiveStore.for_agent_log(bl.agent_log)
+    a = store.propose("integrity", "U6 charges; do not alert on it", {"kind": "beamtime", "until": 9e12})
+    b = store.propose("plotter", "use pey", {"kind": "duration", "until": 9e12})
+    r = client.post(f"/api/directives/{a['id']}/decide", json={"confirm": True, "by": "jamie"}, headers=ORIGIN)
+    assert r.status_code == 200 and store.get(a["id"])["status"] == "active"
+    r = client.post(f"/api/directives/{b['id']}/decide", json={"confirm": False, "by": "jamie", "reason": "no"},
+                    headers=ORIGIN)
+    assert r.status_code == 200 and store.get(b["id"])["status"] == "rejected"
+    # Decided already
+    assert client.post(f"/api/directives/{b['id']}/decide", json={"confirm": True}, headers=ORIGIN).status_code == 409
+    r = client.post(f"/api/directives/{a['id']}/revoke", json={"by": "jamie"}, headers=ORIGIN)
+    assert r.status_code == 200 and store.get(a["id"])["status"] == "revoked"
+    texts = [e["text"] for e in bl.agent_log.get(assistant_uid())["log"] if e["kind"] == "directive"]
+    assert any("jamie confirmed" in t for t in texts) and any("jamie revoked" in t for t in texts)
+    snap = client.get("/api/snapshot").json()
+    assert snap["directives"] == []
+
+
+def test_snapshot_keeps_each_roles_figures_for_flipping_back():
+    bl = roles_beamline()
+    uid = bl.agent_log.ensure_assistant_record(role="plotter")
+    bl.agent_log.append(uid, "tile", "scan 1", source="assistant:plotter", figure="att:00000000000000a1")
+    bl.agent_log.append(uid, "tile", "no figure", source="assistant:plotter")
+    bl.agent_log.append(uid, "summary", "scan 2 ![x](att:00000000000000a2)", source="assistant:plotter")
+    bl.agent_log.append(uid, "tile", "scan 2", source="assistant:plotter", figure="att:00000000000000a2")
+    figs = client_for(bl).get("/api/snapshot").json()["roles"]["plotter"]["figures"]
+    assert [(f["figure"], f["text"]) for f in figs] == [("att:00000000000000a1", "scan 1"), ("att:00000000000000a2", "scan 2")]
+
+
+class StagingBeamline(FakeBeamline):
+    """A beamline whose provider offers nbs-gui's staging queue."""
+
+    def __init__(self):
+        super().__init__()
+        from fakes import StaticInfo
+        from nbs_agents.staging import StagingStore
+
+        self.redis = FakeRedis()
+        self.info = StaticInfo(staging=(self.redis, "bl-"))
+        self._store = StagingStore(self.redis, "bl-")
+
+    @property
+    def staging(self):
+        return self._store
+
+
+def test_staging_proposals_show_and_are_accepted_or_rejected_by_a_person():
+    import json
+
+    bl = StagingBeamline()
+    bl.redis.set("bl-staging:queue", json.dumps({"version": 2, "updated": 1.0, "updated_by": "nbs-gui:ws1:jamie", "items": [
+        {"item_uid": "a", "item_type": "plan", "name": "nbs_count", "args": [], "kwargs": {"num": 1}}]}))
+    store = bl.staging
+    add = store.propose([{"op": "add", "item": {"name": "nbs_count", "kwargs": {"num": 3}}, "after_uid": None}],
+                        "three more counts", "assistant:manager")
+    drop = store.propose([{"op": "remove", "item_uid": "a"}], "drop a", "assistant:manager")
+    client = client_for(bl)
+    snap = client.get("/api/snapshot").json()
+    assert snap["staging"]["version"] == 2
+    assert [i["item_uid"] for i in snap["staging"]["items"]] == ["a"]
+    assert {p["id"] for p in snap["staging"]["proposals"]} == {add["id"], drop["id"]}
+    assert all(p["stale"] is False for p in snap["staging"]["proposals"])
+    r = client.post(f"/api/staging/{add['id']}/decide", json={"accept": True, "by": "jamie"}, headers=ORIGIN)
+    assert r.status_code == 200
+    queue = store.queue()
+    assert queue["version"] == 3 and queue["updated_by"] == "web:jamie"
+    assert [i["kwargs"]["num"] for i in queue["items"]] == [1, 3]
+    r = client.post(f"/api/staging/{drop['id']}/decide", json={"accept": False, "by": "jamie"}, headers=ORIGIN)
+    assert r.status_code == 200 and store.get(drop["id"])["status"] == "rejected"
+    assert store.queue()["version"] == 3
+    assert client.post(f"/api/staging/{drop['id']}/decide", json={"accept": True}, headers=ORIGIN).status_code == 409
+    # Decided ones stay for the conversation, marked
+    statuses = {p["id"]: p["status"] for p in client.get("/api/snapshot").json()["staging"]["proposals"]}
+    assert statuses == {add["id"]: "accepted", drop["id"]: "rejected"}
+
+
+def test_staging_changes_are_a_follow_up_in_the_thread_and_decisions_are_noted():
+    from nbs_agents.threads import ThreadStore, open_thread
+
+    bl = StagingBeamline()
+    tid = open_thread(bl.agent_log, "stage three counts", "jamie")["thread"]["id"]
+    store = bl.staging
+    p = store.propose([{"op": "add", "item": {"name": "nbs_count", "kwargs": {"num": 3}}, "after_uid": None}],
+                      "a count", "assistant:manager", thread=tid)
+    client = client_for(bl)
+    assert client.post(f"/api/staging/{p['id']}/changes", json={"text": " ", "by": "jamie"},
+                       headers=ORIGIN).status_code == 400
+    r = client.post(f"/api/staging/{p['id']}/changes", json={"text": "make it 5 counts", "by": "jamie"}, headers=ORIGIN)
+    assert r.status_code == 200 and r.json()["thread"] == tid
+    stored = store.get(p["id"])
+    assert (stored["status"], stored["decision_reason"]) == ("changes_requested", "make it 5 counts")
+    messages = ThreadStore.for_agent_log(bl.agent_log).all()[tid]["messages"]
+    assert messages[-1]["kind"] == "question" and "make it 5 counts" in messages[-1]["text"] and p["id"] in messages[-1]["text"]
+    assert store.queue()["version"] == 0
+    assert client.post(f"/api/staging/{p['id']}/changes", json={"text": "again"}, headers=ORIGIN).status_code == 409
+    q = store.propose([{"op": "add", "item": {"name": "nbs_count", "kwargs": {"num": 5}}, "after_uid": None}],
+                      "5 counts", "assistant:manager", thread=tid)
+    assert client.post(f"/api/staging/{q['id']}/decide", json={"accept": True, "by": "jamie"}, headers=ORIGIN).status_code == 200
+    notes = [m for m in ThreadStore.for_agent_log(bl.agent_log).all()[tid]["messages"] if m["kind"] == "note"]
+    assert notes[-1]["text"].startswith(f"jamie accepted staging proposal {q['id']}")
+    r = store.propose([{"op": "remove", "item_uid": store.queue()["items"][0]["item_uid"]}], "drop it",
+                      "assistant:manager", thread=tid)
+    assert client.post(f"/api/staging/{r['id']}/decide", json={"accept": False, "by": "jamie", "reason": "keep it"},
+                       headers=ORIGIN).status_code == 200
+    notes = [m for m in ThreadStore.for_agent_log(bl.agent_log).all()[tid]["messages"] if m["kind"] == "note"]
+    assert notes[-1]["text"].endswith(f"rejected staging proposal {r['id']}: keep it")
+
+
+def test_staging_changes_without_a_thread_go_to_the_manager_as_a_new_question():
+    bl = StagingBeamline()
+    p = bl.staging.propose([{"op": "add", "item": {"name": "nbs_count", "kwargs": {}}, "after_uid": None}],
+                           "a count", "jamie")
+    r = client_for(bl).post(f"/api/staging/{p['id']}/changes", json={"text": "two of them", "by": "jamie"},
+                            headers=ORIGIN)
+    assert r.status_code == 200  # a new thread, or the record when threads are off as here
+    assert bl.staging.get(p["id"])["status"] == "changes_requested"
+
+
+def test_no_staging_without_a_provider():
+    client = client_for(FakeBeamline())
+    snap = client.get("/api/snapshot").json()
+    assert snap["staging"] is None and "staging" not in snap["errors"]
+    assert client.post("/api/staging/x/decide", json={"accept": True}, headers=ORIGIN).status_code == 404

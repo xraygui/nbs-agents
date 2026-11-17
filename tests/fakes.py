@@ -23,6 +23,9 @@ class FakePipeline:
     def multi(self):
         self._queued = []
 
+    def reset(self):
+        self._queued = []
+
     def set(self, key, value):
         self._queued.append((key, value))
 
@@ -34,12 +37,15 @@ class FakePipeline:
 class FakeRedis:
     def __init__(self):
         self.store = {}
+        self.ttl = {}
 
     def get(self, key):
         return self.store.get(key)
 
-    def set(self, key, value):
+    def set(self, key, value, ex=None):
         self.store[key] = value.encode() if isinstance(value, str) else value
+        if ex is not None:
+            self.ttl[key] = ex
 
     def delete(self, key):
         return 1 if self.store.pop(key, None) is not None else 0
@@ -51,7 +57,7 @@ class FakeRedis:
         return FakePipeline(self.store)
 
 
-from nbs_agents.beamline_info import BEAM_MAP, DEVICES, ESTIMATES, METADATA, SAMPLES, XAS_PLANS, BeamlineInfo  # noqa: E402
+from nbs_agents.beamline_info import BEAM_MAP, DEVICES, ESTIMATES, METADATA, SAMPLES, STAGING, XAS_PLANS, BeamlineInfo  # noqa: E402,E501
 
 
 class StaticInfo(BeamlineInfo):
@@ -60,13 +66,13 @@ class StaticInfo(BeamlineInfo):
     name = "static"
 
     def __init__(self, beam_map=None, device_info=None, samples=None, estimate=None, xas_plans=None, warning=None,
-                 metadata=None):
+                 metadata=None, staging=None):
         super().__init__(None)
         self._beam_map, self._device_info, self._samples = beam_map, device_info, samples
         self._estimate, self._xas_plans, self._warning = estimate, xas_plans, warning
-        self._metadata = metadata
+        self._metadata, self._staging = metadata, staging
         given = {BEAM_MAP: beam_map, DEVICES: device_info, SAMPLES: samples, ESTIMATES: estimate, XAS_PLANS: xas_plans,
-                 METADATA: metadata}
+                 METADATA: metadata, STAGING: staging}
         self.capabilities = frozenset(name for name, value in given.items() if value is not None)
 
     def beam_map(self):
@@ -86,6 +92,9 @@ class StaticInfo(BeamlineInfo):
 
     def add_warning(self, plan, kwargs, parameters, block):
         return self._warning
+
+    def staging_redis(self):
+        return self._staging
 
     def metadata(self, keys=None):
         if self._metadata is None:

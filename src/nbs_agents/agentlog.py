@@ -24,6 +24,12 @@ Record schema::
 ``launch`` (the runner started or reaped a Claude) and ``error``. Optional
 refs include ``item_uid``, ``run_uid``, ``plan`` and ``source`` (who wrote it).
 
+Entries a Claude writes carry ``model``: the model the runner asked for
+(``NBS_MODEL`` in nbs-cli's environment). Once the call ends the runner adds
+``served_model`` where the model that answered differs, as with a gateway
+alias such as ``claude-auto``. A launched driver's record has the same two
+fields at the top level.
+
 Operators steer a running agent through the same record: ``operator`` entries
 are messages to the agent, and a ``stop`` entry plus a top-level
 ``stop_requested`` field ask it to wrap up. ``operator_read`` holds the time of
@@ -38,6 +44,18 @@ The read-only beamline assistant keeps one record per day under
 ``assistant-YYYYMMDD`` with a top-level ``kind`` of ``"assistant"``. Its
 entries are deterministic ``run`` lines and Claude's ``summary``, ``advice``,
 ``alert`` and ``answer`` posts; ``operator`` entries are questions to it.
+Posts also carry ``call`` (the number of the call that wrote them). An
+``operator`` entry with ``recheck`` (``{"t", "model", "note"}``) asks for a blind
+second look at the post at time ``t``, and the posts that call writes carry
+``recheck_of``. The record's ``models`` holds the configured ``routine`` and
+``alert`` models and ``call_events`` the events behind recent calls.
+
+With ``[assistant.roles]``, that record belongs to the chat role and each
+headless role keeps its own, ``assistant-ROLE-YYYYMMDD`` (top-level ``role``).
+A ``request`` entry there (``nbs-cli role request``) asks the role for
+something, and ``request_read`` marks the newest one the runner has taken; the
+role's answer comes back to the main record as a ``reply`` entry. ``ack``
+entries log people acknowledging the role's tile (``nbs_agents.tiles``).
 Driver agents never see these records.
 """
 
@@ -56,7 +74,7 @@ ASSISTANT_KIND = "assistant"
 ASSISTANT_POST_KINDS = ("summary", "advice", "alert", "answer")
 
 
-def assistant_uid(t: Optional[float] = None) -> str:
+def assistant_uid(t: Optional[float] = None, role: Optional[str] = None) -> str:
     """
     UID of the assistant's record for the local day containing ``t``.
 
@@ -64,13 +82,17 @@ def assistant_uid(t: Optional[float] = None) -> str:
     ----------
     t : float, optional
         Epoch seconds; now if omitted.
+    role : str, optional
+        A headless assistant role, for its own record; None for the main
+        record the chat role writes.
 
     Returns
     -------
     str
-        ``"assistant-YYYYMMDD"``.
+        ``"assistant-YYYYMMDD"``, or ``"assistant-ROLE-YYYYMMDD"``.
     """
-    return f"{ASSISTANT_NAME}-{time.strftime('%Y%m%d', time.localtime(t))}"
+    day = time.strftime('%Y%m%d', time.localtime(t))
+    return f"{ASSISTANT_NAME}-{role}-{day}" if role else f"{ASSISTANT_NAME}-{day}"
 
 
 def is_assistant_record(record: Optional[dict[str, Any]], agent_uid: str = "") -> bool:
@@ -365,7 +387,7 @@ class AgentLog:
         self._modify(agent_uid, update)
         return entry
 
-    def ask(self, agent_uid: str, text: str, source: Optional[str] = None) -> dict[str, Any]:
+    def ask(self, agent_uid: str, text: str, source: Optional[str] = None, **refs: Any) -> dict[str, Any]:
         """
         Ask the operator a question and mark the agent as awaiting input.
 
@@ -377,6 +399,8 @@ class AgentLog:
             The question.
         source : str, optional
             Who asked.
+        **refs
+            Optional references, as for ``append``.
 
         Returns
         -------
@@ -386,6 +410,7 @@ class AgentLog:
         entry = {"t": time.time(), "kind": "question", "text": text}
         if source is not None:
             entry["source"] = source
+        entry.update({k: v for k, v in refs.items() if v is not None})
 
         def update(record):
             if record is None:
@@ -396,6 +421,39 @@ class AgentLog:
 
         self._modify(agent_uid, update)
         return entry
+
+    def annotate(self, agent_uid: str, match, **fields: Any) -> int:
+        """
+        Set fields on the log entries ``match`` picks.
+
+        Parameters
+        ----------
+        agent_uid : str
+            Agent session UID.
+        match : callable
+            Called with each entry; true for the entries to change.
+        **fields
+            Fields to set on them.
+
+        Returns
+        -------
+        int
+            How many entries changed.
+        """
+        changed = [0]
+
+        def update(record):
+            changed[0] = 0
+            if record is None:
+                return {"agent_uid": agent_uid, "status": "unknown", "log": []}
+            for entry in record.get("log") or []:
+                if match(entry):
+                    entry.update(fields)
+                    changed[0] += 1
+            return record
+
+        self._modify(agent_uid, update)
+        return changed[0]
 
     def set_status(self, agent_uid: str, status: str, **fields: Any) -> dict[str, Any]:
         """
@@ -502,7 +560,46 @@ class AgentLog:
         self._modify(agent_uid, update)
         return entry
 
-    def ensure_assistant_record(self, t: Optional[float] = None, **fields: Any) -> str:
+    def request_recheck(
+        self, agent_uid: str, about: Any, model: Optional[str] = None, text: str = "", source: str = "operator"
+    ) -> dict[str, Any]:
+        """
+        Ask the assistant for a blind second look at one of its posts.
+
+        Parameters
+        ----------
+        agent_uid : str
+            The assistant record's UID.
+        about : float or str
+            The post, as ``find_assistant_post`` takes it.
+        model : str, optional
+            Model for the re-check; the runner uses its ``alert_model`` without one.
+        text : str, optional
+            What to look at in particular.
+        source : str, optional
+            Who asked.
+
+        Returns
+        -------
+        dict
+            The appended ``operator`` entry, with ``recheck``.
+
+        Raises
+        ------
+        ValueError
+            If no single post matches ``about``.
+        """
+        post = find_assistant_post(self.get(agent_uid) or {}, about)
+        when = time.strftime("%H:%M:%S", time.localtime(post["t"]))
+        message = f"Re-check the {when} {post['kind']}"
+        if model:
+            message += f" with {model}"
+        if text.strip():
+            message += f": {text.strip()}"
+        recheck = {"t": post["t"], "model": model or None, "note": text.strip() or None}
+        return self.append(agent_uid, "operator", message, source=source, recheck=recheck)
+
+    def ensure_assistant_record(self, t: Optional[float] = None, role: Optional[str] = None, **fields: Any) -> str:
         """
         Create the assistant's record for the day containing ``t`` if missing.
 
@@ -510,6 +607,8 @@ class AgentLog:
         ----------
         t : float, optional
             Epoch seconds; now if omitted.
+        role : str, optional
+            A headless role, for its own record (``assistant_uid``).
         **fields
             Top-level fields for a new record.
 
@@ -518,13 +617,15 @@ class AgentLog:
         str
             The record's UID.
         """
-        uid = assistant_uid(t)
+        uid = assistant_uid(t, role)
         if self.get(uid) is None:
             fields.setdefault("status", "idle")
+            if role:
+                fields.setdefault("role", role)
             self.open(
                 uid,
                 ASSISTANT_NAME,
-                goal="Read-only beamline assistant",
+                goal=f"Read-only beamline assistant, {role} role" if role else "Read-only beamline assistant",
                 kind=ASSISTANT_KIND,
                 calls=0,
                 **fields,
@@ -559,6 +660,88 @@ class AgentLog:
         if unread_operator_entries(self.get(agent_uid) or {}):
             self._modify(agent_uid, update)
         return unread
+
+    def take_requests(self, agent_uid: str) -> list[dict[str, Any]]:
+        """
+        Return the ``request`` entries of a role's record the runner has not
+        taken yet, and mark them taken (``request_read``).
+
+        Parameters
+        ----------
+        agent_uid : str
+            A headless role's record.
+
+        Returns
+        -------
+        list of dict
+            New requests, oldest first.
+        """
+        taken: list[dict[str, Any]] = []
+
+        def new(record):
+            seen = record.get("request_read") or 0
+            return [e for e in record.get("log") or [] if e.get("kind") == "request" and (e.get("t") or 0) > seen]
+
+        def update(record):
+            taken.clear()
+            if record is None:
+                return {"agent_uid": agent_uid, "status": "unknown", "log": []}
+            taken.extend(new(record))
+            if taken:
+                record["request_read"] = taken[-1]["t"]
+            return record
+
+        if new(self.get(agent_uid) or {}):
+            self._modify(agent_uid, update)
+        return taken
+
+
+def find_assistant_post(record: dict[str, Any], about: Any) -> dict[str, Any]:
+    """
+    One of the assistant's posts in its record.
+
+    Parameters
+    ----------
+    record : dict
+        The assistant's record.
+    about : float or str
+        The post's time: epoch seconds (as in ``nbs-cli log``), a local
+        ``HH:MM`` or ``HH:MM:SS``, or ``"last"`` for the newest post.
+
+    Returns
+    -------
+    dict
+        The post.
+
+    Raises
+    ------
+    ValueError
+        If no post, or more than one, matches.
+    """
+    posts = [e for e in record.get("log") or [] if e.get("kind") in ASSISTANT_POST_KINDS]
+    about = str(about).strip()
+    if about == "last":
+        if not posts:
+            raise ValueError("the assistant has posted nothing today")
+        return posts[-1]
+    try:
+        t = float(about)
+    except ValueError:
+        t = None
+    if t is not None:
+        # Exact first: the web page sends the time back as it got it
+        found = [e for e in posts if e.get("t") == t] or [e for e in posts if abs((e.get("t") or 0) - t) < 1e-3]
+    elif about.count(":") in (1, 2):
+        fmt = "%H:%M:%S" if about.count(":") == 2 else "%H:%M"
+        found = [e for e in posts if time.strftime(fmt, time.localtime(e.get("t") or 0)) == about]
+    else:
+        raise ValueError(f"name the post by its time (epoch seconds, HH:MM or HH:MM:SS) or 'last', not {about!r}")
+    if not found:
+        raise ValueError(f"no assistant post at {about}")
+    if len(found) > 1:
+        times = ", ".join(time.strftime("%H:%M:%S", time.localtime(e["t"])) for e in found)
+        raise ValueError(f"{len(found)} posts at {about} ({times}); give the seconds too")
+    return found[0]
 
 
 def unread_operator_entries(record: dict[str, Any]) -> list[dict[str, Any]]:

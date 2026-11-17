@@ -211,6 +211,49 @@ the record's `awaiting_input` field is set until the next operator message,
 stop, `finalize` or `close`; meanwhile the tab shows an amber "waiting for your
 input" banner and counts waiting agents in its title.
 
+### nbs-reduce
+
+`nbs-reduce` (the `[reduce]` extra) reduces and plots runs read from Tiled. It
+never touches the QueueServer, the document stream or EPICS, and never prints a
+PV name, so it is safe for any agent and for people in a terminal. Every command
+prints JSON (`--text` for people); errors exit 1.
+
+| Command | What it does |
+|---|---|
+| `nbs-reduce keys RUN` | Each data key's role (detector or motor), `_desc`, hints and a signal check (zero, flat, no structure, clipped, non-finite), then the keys the rules settle |
+| `nbs-reduce summary RUN [--signal K] [--norm K]` | Edge jump, e0, noise, jump to noise, pre/post-edge slopes and curvature, and surprise flags |
+| `nbs-reduce norm RUN [...] [-o FILE.csv]` | Signal over normalization, and edge-step normalized |
+| `nbs-reduce compare RUN --to RUN\|ref:ID` | Energy shift, scale and residual against another run or a reference scan |
+| `nbs-reduce plot RUN [RUN...] -o FILE.png [--kind ratio\|normalized\|raw]` | Overlay with a caption naming the keys |
+
+It never guesses which keys to use. The signal and normalization are each
+settled by the first of: `--signal`/`--norm`; a `[reduce.defaults.<plan or
+scantype>]` rule whose `when` matches the run's baseline at its start; the
+detector roles the run recorded (nbs-bl's `plot_hints`: `primary`,
+`normalization`, `reference`); the `[nbs_cli]` `signal`/`norm`; the run's hints (the one hinted key with the
+`intensity_detector` role is the normalization, and the one hinted detector left
+besides it and the `reference` key is the signal). Otherwise it exits 3 with
+`"ambiguous": true` and the candidates.
+
+```toml
+[reduce]
+devices_file = "~/profile/startup/devices.toml"   # _desc and _role only
+# min_jump_to_noise = 10.0, max_pre_edge_slope = 0.3, max_post_edge_slope = 0.5,
+# max_pre_edge_curvature = 0.3, norm_drop_fraction = 0.5 (surprise flag thresholds)
+
+[[reduce.defaults.c_xas]]
+when = {beam_map_screen_status = "in"}            # baseline reading at the run's start
+signal = ["screen_diode"]
+norm = "i0"
+
+[[reduce.defaults.c_xas]]
+signal = ["sc"]
+norm = "i0"
+```
+
+nbs-cli's run summaries and the assistant use the same reducers
+(`nbs_agents.reduce.metrics`).
+
 #### A steerable Claude Code agent
 
 `src/nbs_agents/assistant/skills/beamline-steering/SKILL.md` is a Claude Code skill that teaches the

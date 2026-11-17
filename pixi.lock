@@ -10224,4 +10224,6 @@ packages:
   - uvicorn ; extra == 'assistant'
   - nbs-gui ; extra == 'gui'
   - qtpy ; extra == 'gui'
+  - matplotlib ; extra == 'reduce'
+  - pyyaml ; extra == 'reduce'
   requires_python: '>=3.9'

@@ -15,6 +15,7 @@ from nbs_agents.catalog import ZMQCatalog
 from ..cli.config import AssistantConfig, CliConfig
 from ..cli.core import Beamline
 from .launcher import CLAUDE_AGENT, ClaudeLaunchHook, ClaudeLauncher
+from .resources import SKILLS_DIR
 from nbs_agents.queue import release_queue_toward_close
 
 LOGGER = logging.getLogger(__name__)
@@ -73,6 +74,9 @@ def start_assistant(config: CliConfig, catalog: ZMQCatalog, agent_log) -> "Assis
     """
     Start the read-only beamline assistant if ``[assistant] enabled = true``.
 
+    Bad ``[assistant]`` settings, such as two roles sharing a trigger or a
+    role naming a skill that is not installed, leave it off with an error.
+
     Parameters
     ----------
     config : CliConfig
@@ -98,17 +102,24 @@ def start_assistant(config: CliConfig, catalog: ZMQCatalog, agent_log) -> "Assis
     if agent_log is None:
         LOGGER.error("Assistant disabled: it needs the agent log in Redis")
         return None
-    launcher = None
+    roles = settings.resolved_roles()
+    missing = [f"{r.name}: {r.skill}" for r in roles.values() if not (SKILLS_DIR / r.skill / "SKILL.md").is_file()]
+    if missing:
+        LOGGER.error("Assistant disabled: [assistant.roles] name skills that are not installed: %s", missing)
+        return None
+    launchers = {}
     if (settings.command or "").strip():
-        launcher = ClaudeLauncher(settings.command, settings.workdir, settings.log_dir)
+        launchers = {r.name: ClaudeLauncher(settings.command, r.workdir, settings.log_dir) for r in roles.values()}
     beamline = Beamline(dataclasses.replace(config, role="assistant"))
     assistant = AssistantAgent(
-        settings, beamline, catalog, agent_log, launcher=launcher,
+        settings, beamline, catalog, agent_log, launchers=launchers,
         signal=config.signal, norm=config.norm, reference=config.reference,
     )
     assistant.start()
-    LOGGER.info(
-        "Assistant watching every run (record %s, workdir %s, models %s/%s)",
-        assistant.agent_uid, settings.workdir, settings.model, settings.alert_model,
-    )
+    LOGGER.info("Assistant watching every run (record %s)", assistant.agent_uid)
+    for role in roles.values():
+        LOGGER.info(
+            "Assistant role %s (%s, skill %s, models %s/%s, workdir %s): triggers %s, sinks %s",
+            role.name, role.mode, role.skill, role.model, role.alert_model, role.workdir, role.triggers, role.sinks,
+        )
     return assistant

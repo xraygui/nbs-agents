@@ -23,6 +23,7 @@ from nbs_agents.assistant.agent import (
 )
 from nbs_agents.catalog import ZMQRun
 from nbs_agents.cli.config import AssistantConfig
+from nbs_agents.cli.core import writer_refs
 from nbs_agents.assistant.launcher import ClaudeLauncher
 from nbs_agents.assistant.resources import SCRIPTS_DIR
 from nbs_agents.supervisor import AgentSupervisor
@@ -267,7 +268,8 @@ class AssistantAgentTests(unittest.TestCase):
         self.assertEqual(len(self.launcher.calls), 1)
 
     def test_operator_question_calls_with_the_strong_model(self):
-        agent = self.make(model="haiku", alert_model="opus")
+        # Questions in the main record, as before threads
+        agent = self.make(model="haiku", alert_model="opus", threads=False)
         self.log.message(self.uid, "is s6 worth repeating?", source="gui")
         agent.tick()
         call = self.launcher.calls[0]
@@ -278,7 +280,7 @@ class AssistantAgentTests(unittest.TestCase):
         self.assertEqual(len(self.launcher.calls), 1)
 
     def test_question_call_that_posts_no_answer_is_flagged(self):
-        agent = self.make()
+        agent = self.make(threads=False)
         log_path = os.path.join(agent.config.workdir, "call.log")
         with open(log_path, "w") as f:
             f.write('{"type": "assistant"}\nnot json\n{"type": "result", "result": "L2 on gold is fine."}\n')
@@ -291,7 +293,7 @@ class AssistantAgentTests(unittest.TestCase):
         self.assertIn("L2 on gold is fine.", last["text"])
 
     def test_question_call_that_answers_is_not_flagged(self):
-        agent = self.make()
+        agent = self.make(threads=False)
         self.log.message(self.uid, "which stripe at 6 keV?", source="gui")
         agent.tick()
         self.log.append(self.uid, "answer", "gold", source="assistant")
@@ -353,6 +355,84 @@ class AssistantAgentTests(unittest.TestCase):
         agent.tick()
         self.assertEqual(self.record()["heartbeat"], first + 31)
         self.assertEqual(self.record()["status"], "watching")
+
+
+class ModelAndRecheckTests(unittest.TestCase):
+    make = AssistantAgentTests.make
+    record = AssistantAgentTests.record
+
+    def post(self, kind, text, call, model, **extra):
+        with patch.dict(os.environ, {"NBS_MODEL": model, "NBS_ASSISTANT_CALL": str(call)}):
+            refs = writer_refs()
+        with patch("nbs_agents.agentlog.time.time", return_value=self.clock.t):
+            return self.log.append(self.uid, kind, text, source="assistant", **refs, **extra)
+
+    def test_record_names_the_models_and_each_call_tells_nbs_cli(self):
+        agent = self.make(model="haiku", alert_model="opus")
+        self.assertEqual(self.record()["models"], {"routine": "haiku", "alert": "opus"})
+        agent.on_run_stop(xas_run("bad", 3, status="fail"))
+        env = self.launcher.calls[0]["env"]
+        self.assertEqual((env["NBS_MODEL"], env["NBS_ASSISTANT_CALL"], env["NBS_RECHECK_OF"]), ("opus", "1", ""))
+        self.assertEqual(self.record()["call_events"]["1"][0]["kind"], "alert")
+        self.assertEqual(self.record()["call_events"]["1"][0]["run_uids"], ["bad"])
+
+    def test_exit_records_the_served_model_on_the_calls_posts(self):
+        agent = self.make(model="claude-auto")
+        log_path = os.path.join(agent.config.workdir, "call.log")
+        with open(log_path, "w") as f:
+            f.write('{"type":"system","subtype":"init","model":"claude-auto"}\n'
+                    '{"type":"assistant","message":{"model":"claude-haiku-5-5","content":[]}}\n')
+        self.post("summary", "from an earlier runner", 99, "sonnet")
+        agent._add_event("checkin", "hourly", [])
+        agent._dispatch()
+        self.post("summary", "all fine", 1, "claude-auto")
+        self.launcher.on_exit(SimpleNamespace(log_path=log_path), 0)
+        posts = {e["text"]: e for e in self.record()["log"]}
+        self.assertEqual(posts["all fine"]["model"], "claude-auto")
+        self.assertEqual(posts["all fine"]["served_model"], "claude-haiku-5-5")
+        self.assertNotIn("served_model", posts["from an earlier runner"])
+        self.assertEqual(self.record()["last_call"]["served_model"], "claude-haiku-5-5")
+
+    def test_recheck_is_blind_runs_alone_on_the_chosen_model(self):
+        agent = self.make(model="haiku", alert_model="opus")
+        agent.on_run_stop(xas_run("bad", 3, status="fail"))
+        self.post("alert", "SECRET-VERDICT: detector saturated", 1, "opus", run_uids=["bad"])
+        target = self.record()["log"][-1]
+        self.clock.t += 60
+        # While call 1 runs, the re-check and another event are both waiting
+        self.log.request_recheck(self.uid, target["t"], model="claude-fable-5-1", text="look at i0 too", source="gui")
+        agent.on_run_stop(xas_run("b", 4, sample="s9", jump=0.05, noise=0.05))
+        agent.tick()
+        self.assertEqual({e["kind"] for e in agent.pending} >= {"recheck", "flag"}, True)
+        self.launcher.finish(0)
+        self.assertEqual(len(self.launcher.calls), 2)
+        call = self.launcher.calls[1]
+        self.assertEqual(call["args"][-1], "claude-fable-5-1")
+        self.assertEqual(float(call["env"]["NBS_RECHECK_OF"]), target["t"])
+        prompt = call["env"]["NBS_ASSISTANT_PROMPT"]
+        self.assertIn("blind re-check of the alert", prompt)
+        self.assertIn("[alert]", prompt)
+        self.assertIn("runs: bad", prompt)
+        self.assertIn("look at i0 too", prompt)
+        self.assertNotIn("SECRET-VERDICT", prompt)
+        self.assertNotIn("[flag]", prompt)
+        self.assertTrue(agent.pending, "the other events wait for the next call")
+        self.assertEqual(self.record()["last_call"]["recheck_of"], target["t"])
+        self.assertNotIn("2", self.record()["call_events"])
+        # The re-check's post is marked, and a re-check that posts nothing is reported
+        with patch.dict(os.environ, {"NBS_RECHECK_OF": repr(target["t"])}):
+            self.assertEqual(writer_refs()["recheck_of"], target["t"])
+        self.launcher.finish(0)
+        self.assertTrue(any("without posting its re-check" in e["text"] for e in self.record()["log"] if e["kind"] == "error"))
+
+    def test_recheck_defaults_to_the_alert_model(self):
+        agent = self.make(model="haiku", alert_model="opus")
+        self.post("summary", "fine", 7, "haiku", run_uids=["r1"])
+        self.log.request_recheck(self.uid, "last")
+        agent.tick()
+        call = self.launcher.calls[0]
+        self.assertEqual(call["args"][-1], "opus")
+        self.assertIn("It was about runs r1", call["env"]["NBS_ASSISTANT_PROMPT"])
 
 
 class SupervisorObserverTests(unittest.TestCase):

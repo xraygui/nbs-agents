@@ -2,7 +2,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from nbs_agents.assistant.timing import analyze, format_report
+from nbs_agents.assistant.timing import analyze, format_report, served_model, served_model_file
 
 
 def line(**msg):
@@ -47,3 +47,14 @@ def test_splits_startup_model_and_tools():
 def test_empty_log():
     out = analyze([])
     assert out["model_s"] == 0 and out["tools"] == [] and out["startup_s"] is None
+
+
+def test_served_model_prefers_the_answering_model():
+    init = line(type="system", subtype="init", model="claude-auto")
+    answer = line(type="assistant", message={"model": "claude-sonnet-5-5", "content": []})
+    synthetic = line(type="assistant", message={"model": "<synthetic>", "content": []})
+    assert served_model([init]) == "claude-auto"
+    assert served_model([init], answered_only=True) is None
+    assert served_model([init, answer, synthetic, "not json"]) == "claude-sonnet-5-5"
+    assert served_model([]) is None
+    assert served_model_file("/nonexistent/claude.log") is None
