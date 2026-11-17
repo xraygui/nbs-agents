@@ -34,7 +34,8 @@ from nbs_agents.constants import (
     QUEUE_STOP_INSTRUCTION,
 )
 from ..queue import close_agent_owner, describe_owner
-from ..beamline_info import DEVICES, METADATA, SAMPLES, BeamlineInfo, load_beamline_info
+from ..beamline_info import DEVICES, METADATA, SAMPLES, STAGING, BeamlineInfo, load_beamline_info
+from ..staging import StagingError, StagingStore, check_ops, check_proposal, referenced_uids
 from .config import ASSISTANT_ROLE, AssistantConfig, CliConfig, RoleConfig
 from ..tiles import TileError, TileStore, acknowledge
 from ..threads import ThreadError, ThreadStore, open_thread
@@ -304,6 +305,7 @@ class Beamline:
         self._tiled = None
         self._info = None
         self._agent_log = None
+        self._staging = None
         self._assistant = None
 
     # ------------------------------------------------------------------ clients
@@ -371,6 +373,7 @@ class Beamline:
         if self._info is not None:
             self._info.close()
             self._info = None
+        self._staging = None
 
     # ------------------------------------------------------------ beamline info
 
@@ -611,6 +614,232 @@ class Beamline:
         if estimator is None:
             estimator = self.info.estimator()
         return estimator(item) if estimator else None
+
+    def _plan_errors(self, plan: str, kwargs: dict[str, Any], allowed: dict[str, Any]) -> list[str]:
+        """
+        Why a plan cannot be queued: the nbs-cli allowlist, the user group's
+        allowed plans and unknown keyword arguments.
+
+        Parameters
+        ----------
+        plan : str
+            Plan name.
+        kwargs : dict
+            Keyword arguments.
+        allowed : dict
+            ``plans_allowed()``.
+
+        Returns
+        -------
+        list of str
+            Problems; empty when there are none.
+        """
+        if self.config.allowed_plans is not None and plan not in self.config.allowed_plans:
+            return [f"plan {plan!r} is not in the nbs-cli allowlist"]
+        if plan not in allowed:
+            return [f"plan {plan!r} is not allowed for group {self.config.qs_user_group!r}"]
+        params = allowed[plan].get("parameters", [])
+        names = {p["name"] for p in params}
+        has_var_kw = any(p.get("kind", {}).get("name") == "VAR_KEYWORD" for p in params)
+        unknown = [k for k in kwargs if k not in names]
+        if unknown and not has_var_kw:
+            return [f"unknown parameters for {plan}: {unknown}; allowed: {sorted(names)}"]
+        return []
+
+    # ------------------------------------------------------------------ staging
+
+    @property
+    def staging(self) -> StagingStore:
+        """The beamline's shared staging queue (nbs-gui's), through the beamline-info provider."""
+        if self._staging is None:
+            where = self.info.staging_redis() if STAGING in self.info.capabilities else None
+            if where is None:
+                raise CliError(
+                    f"this beamline has no shared staging queue (beamline info provider: {self.info.name})"
+                )
+            self._staging = StagingStore(*where)
+        return self._staging
+
+    def _staging_author(self) -> str:
+        """Who proposes: the assistant's chat role, or the person running nbs-cli."""
+        if self.config.is_assistant:
+            try:
+                return f"{ASSISTANT_ROLE}:{self.assistant.chat_role().name}"
+            except Exception:
+                return ASSISTANT_ROLE
+        return login_name()
+
+    def _refuse_unless_stager(self, verb: str) -> None:
+        """Staging proposals are for people and the assistant's chat role, not headless roles or drivers."""
+        if self.config.assistant_role is not None or (not self.config.is_assistant and not is_person(self.config)):
+            raise CliError(f"{verb} is for people and the assistant's chat role")
+
+    def check_plan(self, plan: str, args: list[Any], kwargs: dict[str, Any], *, allowed: Optional[dict] = None,
+                   devices: Optional[dict] = None, estimator: Any = None) -> dict[str, Any]:
+        """
+        Check a plan as the QueueServer would before queuing it, without a session.
+
+        Parameters
+        ----------
+        plan : str
+            Plan name.
+        args : list
+            Positional arguments.
+        kwargs : dict
+            Keyword arguments.
+        allowed, devices : dict, optional
+            ``plans_allowed()`` and allowed devices, fetched once for many plans.
+        estimator : callable, optional
+            The provider's estimator, fetched once for many plans.
+
+        Returns
+        -------
+        dict
+            ``item`` (compact), ``valid``, ``errors``, ``warnings`` and ``estimate_s``.
+        """
+        from bluesky_queueserver.manager.profile_ops import validate_plan
+
+        if allowed is None:
+            allowed = self.plans_allowed()
+        item = {"item_type": "plan", "name": plan, "args": list(args), "kwargs": dict(kwargs)}
+        errors = self._plan_errors(plan, kwargs, allowed)
+        warnings: list[str] = []
+        if not errors:
+            if devices is None:
+                devices = self.devices_allowed()
+            ok, msg = validate_plan(item, allowed_plans=allowed, allowed_devices=devices)
+            if not ok:
+                text = msg.split("\nPlan:")[0]
+                errors.append(" ".join(line.strip() for line in text.splitlines()
+                                       if line.strip() and not line.strip().startswith("For further information")))
+            names = {p["name"] for p in allowed[plan].get("parameters", [])}
+            warning = self.info.add_warning(plan, dict(kwargs), names, [])
+            if warning:
+                warnings.append(warning)
+        try:
+            est = self.estimate(item, estimator if estimator is not None else self.info.estimator())
+        except Exception as exc:  # an estimate is a nicety
+            est = None
+            warnings.append(f"no estimate: {exc}")
+        return {"item": compact_item(item, est), "valid": not errors, "errors": errors, "warnings": warnings,
+                "estimate_s": None if est is None else round(est, 1)}
+
+    def devices_allowed(self) -> dict[str, Any]:
+        """Devices this user group may pass to plans, as the QueueServer describes them."""
+        response = self.manager.devices_allowed(user_group=self.config.qs_user_group)
+        return _check(response, "devices_allowed")["devices_allowed"]
+
+    def staging_show(self) -> dict[str, Any]:
+        """
+        The shared staging queue with estimates, and its pending proposals.
+
+        Returns
+        -------
+        dict
+            ``version``, ``updated``, ``updated_by``, ``items``, ``total_est_s``
+            and ``proposals`` (pending, each with ``stale``/``changed``).
+        """
+        store = self.staging
+        queue = store.queue()
+        try:
+            estimator = self.info.estimator()
+        except Exception:
+            estimator = None
+        items, total = [], 0.0
+        for item in queue["items"]:
+            try:
+                est = self.estimate(item, estimator) if estimator else None
+            except Exception:
+                est = None
+            total += est or 0
+            items.append(compact_item(item, est))
+        proposals = []
+        for p in store.proposals():
+            fit = check_proposal(p, queue)
+            proposals.append({
+                "id": p["id"], "author": p.get("author"), "reason": p.get("reason"),
+                "ops": [o["op"] for o in p.get("ops", [])], "created": _iso(p.get("created")),
+                "estimate_s": (p.get("checks") or {}).get("estimate_s"), "stale": fit["stale"],
+                "changed": fit["changed"],
+            })
+        return {
+            "version": queue["version"], "updated": _iso(queue["updated"]), "updated_by": queue["updated_by"],
+            "n_items": len(items), "total_est_s": round(total, 1) if estimator else None, "items": items,
+            "proposals": proposals,
+            "note": "people move staged plans to the queue in nbs-gui; nbs-cli only proposes changes",
+        }
+
+    def staging_propose(self, ops: list[dict[str, Any]], reason: str) -> dict[str, Any]:
+        """
+        Propose changes to the shared staging queue for a person to accept in nbs-gui.
+
+        Parameters
+        ----------
+        ops : list of dict
+            ``add``, ``update``, ``remove`` and ``move`` ops (``nbs_agents.staging``).
+        reason : str
+            Why, shown to the person deciding.
+
+        Returns
+        -------
+        dict
+            The stored ``proposal`` and a ``note``.
+
+        Raises
+        ------
+        CliError
+            On malformed ops, unknown items, or plans that fail validation
+            (nothing is stored then).
+        """
+        self._refuse_unless_stager("staging propose")
+        if not reason or not reason.strip():
+            raise CliError("--reason is required")
+        try:
+            check_ops(ops)
+        except StagingError as exc:
+            raise CliError(str(exc)) from exc
+        store = self.staging
+        queue = store.queue()
+        present = {i.get("item_uid") for i in queue["items"]}
+        missing = [u for u in referenced_uids(ops) if u not in present]
+        if missing:
+            raise CliError(f"not in the staging queue (version {queue['version']}): {missing}; see nbs-cli staging show")
+        allowed = devices = None
+        estimator = self.info.estimator()
+        errors, warnings, total, checked = [], [], 0.0, False
+        for n, op in enumerate(ops, 1):
+            if op["op"] not in ("add", "update"):
+                continue
+            item = op["item"]
+            if item.get("item_type", "plan") != "plan":
+                continue
+            if allowed is None:
+                allowed = self.plans_allowed()
+            if devices is None:
+                devices = self.devices_allowed()
+            out = self.check_plan(item["name"], item.get("args", []), item.get("kwargs", {}),
+                                  allowed=allowed, devices=devices, estimator=estimator)
+            errors += [f"op {n} ({item['name']}): {e}" for e in out["errors"]]
+            warnings += [f"op {n} ({item['name']}): {w}" for w in out["warnings"]]
+            total += out["estimate_s"] or 0
+            checked = True
+        if errors:
+            raise CliError("; ".join(errors))
+        checks = {"estimate_s": round(total, 1) if checked and estimator else None, "warnings": warnings,
+                  "errors": []}
+        thread = os.environ.get("NBS_ASSISTANT_THREAD") or None
+        proposal = store.propose(ops, reason, self._staging_author(), thread=thread, checks=checks,
+                                 base_version=queue["version"])
+        return {"proposal": proposal,
+                "note": "a person accepts or rejects it in nbs-gui; it expires in 7 days if nobody decides"}
+
+    def staging_withdraw(self, proposal_id: str) -> dict[str, Any]:
+        """Withdraw one's own pending staging proposal."""
+        self._refuse_unless_stager("staging withdraw")
+        try:
+            return {"proposal": self.staging.withdraw(proposal_id, self._staging_author())}
+        except StagingError as exc:
+            raise CliError(str(exc)) from exc
 
     # ----------------------------------------------------------------- sessions
 
@@ -1690,17 +1919,11 @@ class Beamline:
                 f"operator requested stop ({stop.get('text')}); finalize with `nbs-cli finalize --summary ...`"
             )
 
-        if self.config.allowed_plans is not None and plan not in self.config.allowed_plans:
-            raise CliError(f"plan {plan!r} is not in the nbs-cli allowlist")
         allowed = self.plans_allowed()
-        if plan not in allowed:
-            raise CliError(f"plan {plan!r} is not allowed for group {self.config.qs_user_group!r}")
-        params = allowed[plan].get("parameters", [])
-        names = {p["name"] for p in params}
-        has_var_kw = any(p.get("kind", {}).get("name") == "VAR_KEYWORD" for p in params)
-        unknown = [k for k in kwargs if k not in names]
-        if unknown and not has_var_kw:
-            raise CliError(f"unknown parameters for {plan}: {unknown}; allowed: {sorted(names)}")
+        errors = self._plan_errors(plan, kwargs, allowed)
+        if errors:
+            raise CliError(errors[0])
+        names = {p["name"] for p in allowed[plan].get("parameters", [])}
 
         estimator = self.info.estimator()
         item_dict = {"item_type": "plan", "name": plan, "args": list(args), "kwargs": dict(kwargs)}

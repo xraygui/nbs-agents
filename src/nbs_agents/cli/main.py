@@ -5,8 +5,9 @@ Every command prints one JSON document on stdout. Errors print
 ``{"error": ...}`` and exit with status 1.
 
 ``--role assistant`` (or ``NBS_CLI_ROLE=assistant``) makes the client
-read-only: only the read verbs, ``post``, ``role``, ``thread`` and
-``directive propose`` work.
+read-only: only the read verbs, ``post``, ``role``, ``thread``,
+``directive propose`` and ``staging propose``/``withdraw`` (proposals a
+person accepts in nbs-gui) work.
 ``NBS_CLI_ROLE=assistant:NAME`` (set by the runner, never by ``--role``) is
 the assistant's headless role NAME: read-only too, and ``post`` writes only
 that role's record and tile.
@@ -146,6 +147,49 @@ def cwd_path(name: str, flag: str = "--save") -> Path:
 CATALOG_HELP = "Tiled catalog to read: default (this beamline's), or a name from `ref catalogs`"
 # Global only: `devices --role` filters devices
 ROLE_HELP = "driver (default) or assistant (read-only; default $NBS_CLI_ROLE)"
+
+
+def staging_position(text: str) -> str | None:
+    """A ``staging propose`` position: an item_uid, ``top``, or ``end`` (None)."""
+    return None if text == "end" else text
+
+
+def staging_ops(args: argparse.Namespace) -> list[dict[str, Any]]:
+    """
+    The ops ``staging propose`` asks for.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed ``staging propose`` arguments.
+
+    Returns
+    -------
+    list of dict
+        ``--file``'s ops, or the removes, then the moves, then the adds.
+    """
+    flags = args.add or args.remove or args.move
+    if args.file:
+        if flags:
+            raise CliError("--file holds every op; do not combine it with --add, --remove or --move")
+        path = cwd_path(args.file, "--file")
+        try:
+            ops = json.loads(path.read_text())
+        except OSError as exc:
+            raise CliError(f"cannot read --file {args.file}: {exc.strerror}") from exc
+        except ValueError as exc:
+            raise CliError(f"--file {args.file} is not JSON: {exc}") from exc
+        return ops
+    if not flags:
+        raise CliError("nothing to propose: give --add, --remove, --move or --file")
+    ops: list[dict[str, Any]] = [{"op": "remove", "item_uid": uid} for uid in args.remove]
+    ops += [{"op": "move", "item_uid": uid, "after_uid": staging_position(after)} for uid, after in args.move]
+    after = staging_position(args.after)
+    for tokens in args.add:
+        plan_args, plan_kwargs = parse_plan_params(tokens[1:])
+        ops.append({"op": "add", "item": {"item_type": "plan", "name": tokens[0], "args": plan_args,
+                                          "kwargs": plan_kwargs}, "after_uid": after})
+    return ops
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -303,6 +347,29 @@ def build_parser() -> argparse.ArgumentParser:
         q.add_argument("id")
         if action != "confirm":
             q.add_argument("--reason", default="")
+    p = sub.add_parser("staging", parents=[common],
+                       help="nbs-gui's shared staging queue: read it, check plans, propose changes a person accepts")
+    staging = p.add_subparsers(dest="staging_command", required=True)
+    staging.add_parser("show", parents=[common], help="the staged plans, with estimates, and pending proposals")
+    q = staging.add_parser("validate", parents=[common], help="check a plan as the QueueServer would, without queuing it")
+    q.add_argument("plan")
+    q.add_argument("params", nargs="*", help="positional values and key=value pairs (JSON or Python literals)")
+    q = staging.add_parser(
+        "propose", parents=[common],
+        help="propose changes for a person to accept in nbs-gui: removes, then moves, then adds (or --file)",
+    )
+    q.add_argument("--reason", required=True)
+    q.add_argument("--add", action="append", nargs="+", metavar="PLAN_OR_PARAM", default=[],
+                   help="a plan and its params, e.g. --add nbs_count num=3 (repeat for more plans, kept in order)")
+    q.add_argument("--after", default="end", help="where the added plans go: an item_uid, top, or end (default)")
+    q.add_argument("--remove", action="append", metavar="ITEM_UID", default=[], help="remove a staged item")
+    q.add_argument("--move", action="append", nargs=2, metavar=("ITEM_UID", "AFTER"), default=[],
+                   help="move a staged item after another item_uid, or to top or end")
+    q.add_argument("--file", metavar="FILE",
+                   help="a JSON list of ops (add, update, remove, move; see nbs_agents.staging), relative, in the current folder")
+    q = staging.add_parser("withdraw", parents=[common], help="withdraw your own pending proposal")
+    q.add_argument("id")
+
     p = sub.add_parser("stop", parents=[common], help="operator: ask a running agent to wrap up")
     p.add_argument("--reason", default="")
 
@@ -789,6 +856,15 @@ def run_command(bl: Beamline, args: argparse.Namespace) -> Any:
         if args.directive_command == "list":
             return bl.directive_list(role=args.directive_role, all_=args.all)
         return bl.directive_decide(args.id, args.directive_command, reason=getattr(args, "reason", ""))
+    if cmd == "staging":
+        if args.staging_command == "show":
+            return bl.staging_show()
+        if args.staging_command == "validate":
+            plan_args, plan_kwargs = parse_plan_params(args.params)
+            return bl.check_plan(args.plan, plan_args, plan_kwargs)
+        if args.staging_command == "withdraw":
+            return bl.staging_withdraw(args.id)
+        return bl.staging_propose(staging_ops(args), args.reason)
     if cmd in ("tell", "stop"):
         refuse_read_only(bl.config, cmd)
         record = bl.find_session(uid)
