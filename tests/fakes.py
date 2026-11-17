@@ -23,6 +23,9 @@ class FakePipeline:
     def multi(self):
         self._queued = []
 
+    def reset(self):
+        self._queued = []
+
     def set(self, key, value):
         self._queued.append((key, value))
 

@@ -248,6 +248,14 @@ dialog.fig-dialog { width: min(1100px, calc(100vw - 32px)); padding: 12px; }
 .card .hd { font-size: 12px; color: var(--muted); }
 .card .acts { display: flex; gap: 4px; margin-top: 5px; }
 .dirline { margin: 2px 8px; font-size: 12px; color: var(--muted); }
+/* Staging proposals and nbs-gui's staged plans, in the sidebar */
+.card .ops { margin: 4px 0 0; padding: 0; list-style: none; font-family: ui-monospace, monospace; font-size: 12px; }
+.card .ops li { padding: 1px 0; }
+.card .ops .add { color: var(--ok); } .card .ops .remove { color: var(--bad); }
+.card .note { font-size: 12px; margin-top: 3px; } .card .note.bad { color: var(--bad); } .card .note.warn { color: var(--warn); }
+.staged { margin: 8px; font-size: 12px; }
+.staged .muted, .card .muted { color: var(--muted); }
+.staged ol { margin: 4px 0; padding-left: 22px; font-family: ui-monospace, monospace; }
 nav #roles-toggle { margin-left: auto; }
 /* Manager threads in the assistant feed */
 .thread { margin: 2px 0 10px 12%; border-left: 3px solid var(--accent); padding: 2px 0 2px 10px; }
@@ -356,7 +364,7 @@ nav #roles-toggle { margin-left: auto; }
       <div id="ref-detail" class="scroll" style="flex:1"></div>
     </div>
   </section>
-  <!-- The assistant roles' tiles and the directives waiting for a person, beside every view -->
+  <!-- The assistant roles' tiles, and the directives and staging proposals waiting for a person, beside every view -->
   <aside id="roles-side" hidden>
     <div class="col-head"><h2>Assistant roles</h2></div>
     <div id="roles"></div>
@@ -1083,6 +1091,54 @@ function roleDetails(name, role, dirs) {
   for (const e of entries) html += `<div class="entry"><b>${esc(e.kind)}</b> ${fmtTime(e.t)} ${esc(plainText(e.text).slice(0, 300))}</div>`;
   return html + `</details>`;
 }
+// One staged item as a short line: plan name and its parameters
+function planText(item) {
+  if (!item) return "?";
+  const args = (item.args || []).map((a) => JSON.stringify(a));
+  const kwargs = Object.entries(item.kwargs || {}).map(([k, v]) => `${k}=${JSON.stringify(v)}`);
+  return `${item.name || item.item_type || "?"}(${[...args, ...kwargs].join(", ")})`;
+}
+function stagedText(uid, items) {
+  if (uid === "top") return "the top";
+  if (uid === null || uid === undefined) return "the end";
+  const n = items.findIndex((i) => i.item_uid === uid);
+  return n < 0 ? `missing item ${uid.slice(0, 8)}` : `#${n + 1} ${items[n].name || ""}`;
+}
+function stagedFull(uid, items) {
+  const n = items.findIndex((i) => i.item_uid === uid);
+  return n < 0 ? `missing item ${String(uid).slice(0, 8)}` : `#${n + 1} ${planText(items[n])}`;
+}
+// A run of adds after the same item lands in order, so only the first says where
+function opLine(op, items, prev) {
+  const sameRun = prev && prev.op === "add" && op.op === "add" && prev.after_uid === op.after_uid;
+  if (op.op === "add") return `<li class="add">+ ${esc(planText(op.item))}${sameRun ? "" : ` <span class="muted">after ${esc(stagedText(op.after_uid, items))}</span>`}</li>`;
+  if (op.op === "remove") return `<li class="remove">− ${esc(stagedFull(op.item_uid, items))}</li>`;
+  if (op.op === "update") return `<li>~ ${esc(stagedFull(op.item_uid, items))} → ${esc(planText(op.item))}</li>`;
+  return `<li>↕ ${esc(stagedText(op.item_uid, items))} <span class="muted">after ${esc(stagedText(op.after_uid, items))}</span></li>`;
+}
+function stagingCard(p, staging) {
+  const items = staging.items || [];
+  const checks = p.checks || {};
+  const est = checks.estimate_s ? ` · ~${Math.round(checks.estimate_s / 60)} min` : "";
+  let notes = "";
+  if (p.stale) notes += `<div class="note bad">Items it refers to are no longer staged; it cannot apply.</div>`;
+  else if (p.changed) notes += `<div class="note warn">The staged list changed since this was proposed; it applies to the list as it is now.</div>`;
+  for (const w of checks.warnings || []) notes += `<div class="note warn">${esc(w)}</div>`;
+  for (const e of checks.errors || []) notes += `<div class="note bad">${esc(e)}</div>`;
+  return `<div class="card"><div class="hd"><b>Staging proposal</b> from ${esc(p.author || "?")} · ${fmtTime(p.created)}${est}` +
+    `${p.thread ? ` · thread ${esc(p.thread)}` : ""}</div><div>${rich(p.reason || "")}</div>` +
+    `<ul class="ops">${(p.ops || []).map((o, n, ops) => opLine(o, items, ops[n - 1])).join("")}</ul>${notes}` +
+    `<div class="acts"><button class="primary" data-staging="${esc(p.id)}" data-accept="1" ${p.stale ? "disabled" : ""}` +
+    ` title="Apply it to nbs-gui's staging queue; nothing is queued to run">Accept</button>` +
+    `<button data-staging="${esc(p.id)}" data-accept="0">Reject</button></div></div>`;
+}
+function stagedList(staging) {
+  const items = staging.items || [];
+  const by = staging.updated_by ? ` · last change by ${esc(staging.updated_by)}` : "";
+  return `<details class="staged"><summary>${items.length} plan${items.length === 1 ? "" : "s"} staged in nbs-gui${by}</summary>` +
+    (items.length ? `<ol>${items.map((i) => `<li>${esc(planText(i))}</li>`).join("")}</ol>` : `<div class="muted">The staging queue is empty.</div>`) +
+    `<div class="muted">People move staged plans to the queue in nbs-gui.</div></details>`;
+}
 const roleOpen = new Map();
 function directiveCard(d) {
   const until = d.expires && d.expires.until ? `until ${fmtTime(d.expires.until, true)}` : "";
@@ -1095,17 +1151,21 @@ function directiveCard(d) {
 function renderRoles() {
   const tiles = snap.tiles || {}, roles = snap.roles || {};
   const proposed = (snap.directives || []).filter((d) => d.status === "proposed");
+  const staging = snap.staging;
+  const stagingProps = staging ? staging.proposals || [] : [];
   const names = [...new Set([...Object.keys(roles), ...Object.keys(tiles)])];
-  const any = names.length > 0 || proposed.length > 0;
+  const any = names.length > 0 || proposed.length > 0 || stagingProps.length > 0;
   const nHeld = Object.values(tiles).filter(heldAlert).length;
+  const nWaiting = nHeld + proposed.length + stagingProps.length;
   $("roles-toggle").hidden = !any;
-  $("roles-toggle").classList.toggle("waiting", nHeld + proposed.length > 0);
-  $("roles-toggle").textContent = `Roles${nHeld + proposed.length ? ` (${nHeld + proposed.length})` : ""}`;
+  $("roles-toggle").classList.toggle("waiting", nWaiting > 0);
+  $("roles-toggle").textContent = `Roles${nWaiting ? ` (${nWaiting})` : ""}`;
   $("roles-side").hidden = !any || rolesHidden;
   if (!any) return;
   names.sort((a, b) => (heldAlert(tiles[b]) - heldAlert(tiles[a])) ||
     ((SEVERITY_ORDER[(tiles[a] || {}).severity] ?? 4) - (SEVERITY_ORDER[(tiles[b] || {}).severity] ?? 4)) || a.localeCompare(b));
-  setHtml("roles", proposed.map(directiveCard).join("") + names.map((n) => roleTile(n, tiles[n], roles[n])).join(""));
+  setHtml("roles", proposed.map(directiveCard).join("") + stagingProps.map((p) => stagingCard(p, staging)).join("") +
+    (stagingProps.length ? stagedList(staging) : "") + names.map((n) => roleTile(n, tiles[n], roles[n])).join(""));
 }
 $("roles-toggle").addEventListener("click", () => {
   rolesHidden = !rolesHidden;
@@ -1121,6 +1181,7 @@ $("roles").addEventListener("click", async (ev) => {
   const about = ev.target.closest("button[data-about-tile]");
   const decide = ev.target.closest("button[data-decide]");
   const revoke = ev.target.closest("button[data-revoke]");
+  const stage = ev.target.closest("button[data-staging]");
   const flip = ev.target.closest("button[data-flip]");
   const zoom = ev.target.closest("a[data-zoom]");
   if (zoom && !(ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.button)) {
@@ -1155,6 +1216,11 @@ $("roles").addEventListener("click", async (ev) => {
       decide.disabled = true;
       await post(`/api/directives/${encodeURIComponent(decide.dataset.decide)}/decide`, {confirm: confirmIt, by: who(), reason});
       toast(confirmIt ? "Directive confirmed" : "Directive rejected");
+    } else if (stage) {
+      const acceptIt = stage.dataset.accept === "1";
+      stage.disabled = true;
+      await post(`/api/staging/${encodeURIComponent(stage.dataset.staging)}/decide`, {accept: acceptIt, by: who()});
+      toast(acceptIt ? "Proposal applied to the staging queue" : "Proposal rejected");
     } else if (revoke) {
       const reason = prompt("Revoke this directive now? Why (optional):");
       if (reason === null) return;
@@ -1164,7 +1230,7 @@ $("roles").addEventListener("click", async (ev) => {
     }
   } catch (e) {
     toast(e.message);
-    for (const b of [ack, decide, revoke]) if (b) b.disabled = false;
+    for (const b of [ack, decide, revoke, stage]) if (b) b.disabled = false;
   }
 });
 function renderAssistant() {

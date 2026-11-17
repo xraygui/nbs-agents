@@ -110,6 +110,37 @@ class StoreTests(unittest.TestCase):
             store.withdraw(p["id"], "assistant:manager")
         self.assertNotIn("bl-staging:queue", [k for k in redis.ttl])
 
+    def test_accept_applies_to_the_current_list_and_bumps_the_version(self):
+        redis = FakeRedis()
+        write_queue(redis, staged("a", "b"), version=5)
+        store = StagingStore(redis, "bl-")
+        p = store.propose([{"op": "add", "item": {"name": "nbs_count", "kwargs": {"num": 9}}, "after_uid": "a"},
+                           {"op": "remove", "item_uid": "b"}], "swap b for a 9-count", "assistant:manager")
+        write_queue(redis, staged("a", "b", "c"), version=6)  # someone staged c meanwhile
+        out = store.accept(p["id"], "web:jamie", t=2000.0)
+        queue = store.queue()
+        self.assertEqual(queue["version"], 7)
+        self.assertEqual(queue["updated_by"], "web:jamie")
+        self.assertEqual([i["kwargs"]["num"] for i in queue["items"]], [1, 9, 3])
+        self.assertEqual(out["queue"]["items"], queue["items"])
+        self.assertEqual((out["proposal"]["status"], out["proposal"]["decided_by"]), ("accepted", "web:jamie"))
+        with self.assertRaises(StagingError):
+            store.accept(p["id"], "web:jamie")
+
+    def test_accept_marks_stale_and_reject_leaves_the_queue(self):
+        redis = FakeRedis()
+        write_queue(redis, staged("a", "b"), version=5)
+        store = StagingStore(redis, "bl-")
+        p = store.propose([{"op": "remove", "item_uid": "b"}], "duplicate", "assistant:manager")
+        write_queue(redis, staged("a"), version=6)
+        with self.assertRaises(StaleProposal):
+            store.accept(p["id"], "web:jamie")
+        self.assertEqual(store.get(p["id"])["status"], "stale")
+        self.assertEqual(store.queue()["version"], 6)
+        q = store.propose([{"op": "remove", "item_uid": "a"}], "drop a", "assistant:manager")
+        self.assertEqual(store.reject(q["id"], "web:jamie")["status"], "rejected")
+        self.assertEqual(uids(store.queue()["items"]), ["a"])
+
 
 class VerbTests(unittest.TestCase):
     def make(self, items=(), role=None, estimate=lambda item: 60.0, warning=None):

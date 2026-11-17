@@ -209,6 +209,11 @@ command -v nbs-cli >/dev/null 2>&1 || { echo "nbs-cli not found in $NBS_ENV_DIR/
 "$python" -m nbs_agents.assistant.resources skill beamline-knowledge
 # Both may reduce and plot runs from Tiled (nbs-reduce)
 "$python" -m nbs_agents.assistant.resources skill beamline-reduce
+# The assistant helps people build plan lists in nbs-gui's staging queue
+# (nbs-cli lets only its chat role propose)
+if [[ "$role" == assistant ]]; then
+    "$python" -m nbs_agents.assistant.resources skill beamline-staging
+fi
 
 system=()
 case "$role" in

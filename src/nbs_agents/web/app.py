@@ -50,6 +50,8 @@ from nbs_agents.constants import AGENT_UID_KEY
 from ..assistant.launcher import claude_launch_parameters
 from nbs_agents.queue import submit_agent_block
 from ..directives import DirectiveError, DirectiveStore, decide_directive, revoke_directive
+from ..beamline_info import STAGING
+from ..staging import StagingError, StaleProposal, check_proposal
 from ..threads import ThreadError, ThreadStore, open_thread
 from ..tiles import TileError, TileStore, acknowledge
 
@@ -100,6 +102,10 @@ class ByBody(BaseModel):
 
 class DecideBody(ByBody):
     confirm: bool
+
+
+class StagingDecideBody(ByBody):
+    accept: bool
 
 
 class RecheckBody(BaseModel):
@@ -241,8 +247,9 @@ class WebState:
             headless role's record for today: status, heartbeat, calls, its
             newest entries and ``figures``, its tile posts with a figure), ``threads`` (the manager's open threads and
             those closed in the last day, with their messages, newest first),
-            ``directives`` (proposed and active), ``threads_on`` and
-            ``errors``.
+            ``directives`` (proposed and active), ``threads_on``,
+            ``staging`` (nbs-gui's shared staging queue and its pending
+            proposals, None when the beamline has none) and ``errors``.
         """
         errors: dict[str, str] = {}
         out: dict[str, Any] = {
@@ -265,6 +272,7 @@ class WebState:
             "threads": [],
             "directives": [],
             "threads_on": self.threads_on(),
+            "staging": None,
         }
         try:
             out["kb_pending"] = self.kb.review_queue()["count"]
@@ -298,6 +306,10 @@ class WebState:
             else:
                 out["sessions"][uid] = record
         self._assistant_parts(out, errors)
+        try:
+            out["staging"] = self.staging()
+        except Exception as exc:
+            errors["staging"] = str(exc)
         try:
             out["runner_alive"] = self.log.runner_alive()
             out["tiled_login"] = self.log.tiled_login() if out["runner_alive"] else None
@@ -484,6 +496,58 @@ class WebState:
             return revoke_directive(self.log, directive_id, by.strip() or login_name(), source=SOURCE,
                                     reason=reason.strip(), chat_role=self._chat_role())
         except DirectiveError as exc:
+            raise HTTPException(409, str(exc))
+
+    # ------------------------------------------------------------------ staging
+
+    def _staging_store(self) -> Any:
+        """The shared staging queue, or None when this beamline has none."""
+        if not hasattr(type(self.beamline), "staging"):
+            return None
+        info = self.beamline.info
+        if STAGING not in info.capabilities or info.staging_redis() is None:
+            return None
+        return self.beamline.staging
+
+    def staging(self) -> Optional[dict[str, Any]]:
+        """
+        nbs-gui's staging queue and the proposals waiting for a person.
+
+        Returns
+        -------
+        dict or None
+            ``version``, ``updated``, ``updated_by``, ``items`` (compact) and
+            ``proposals`` (pending, whole, each with ``stale``, ``changed``
+            and ``missing``); None when the beamline has no staging queue.
+        """
+        store = self._staging_store()
+        if store is None:
+            return None
+        queue = store.queue()
+        proposals = []
+        for proposal in store.proposals():
+            proposals.append({**proposal, **check_proposal(proposal, queue)})
+        return {
+            "version": queue["version"],
+            "updated": queue["updated"],
+            "updated_by": queue["updated_by"],
+            "items": [compact_item(i) for i in queue["items"]],
+            "proposals": proposals,
+        }
+
+    def decide_staging(self, proposal_id: str, accept: bool, by: str = "") -> dict[str, Any]:
+        """A person accepts (applies to the staging queue) or rejects a staging proposal."""
+        store = self._staging_store()
+        if store is None:
+            raise HTTPException(404, "this beamline has no shared staging queue")
+        who = f"{SOURCE}:{by.strip() or login_name()}"
+        try:
+            if accept:
+                return store.accept(proposal_id, who)
+            return {"proposal": store.reject(proposal_id, who)}
+        except StaleProposal as exc:
+            raise HTTPException(409, f"{exc}; it is marked stale")
+        except StagingError as exc:
             raise HTTPException(409, str(exc))
 
     def recheck(self, t: float, model: str = "", text: str = "") -> dict[str, Any]:
@@ -765,6 +829,10 @@ def create_app(
     @app.post("/api/directives/{directive_id}/revoke")
     async def revoke(directive_id: str, body: ByBody):
         return await write(state.revoke_directive, directive_id, body.by, body.reason)
+
+    @app.post("/api/staging/{proposal_id}/decide")
+    async def decide_staging(proposal_id: str, body: StagingDecideBody):
+        return await write(state.decide_staging, proposal_id, body.accept, body.by)
 
     @app.post("/api/assistant/recheck")
     async def recheck(body: RecheckBody):

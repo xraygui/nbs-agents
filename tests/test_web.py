@@ -485,3 +485,55 @@ def test_snapshot_keeps_each_roles_figures_for_flipping_back():
     bl.agent_log.append(uid, "tile", "scan 2", source="assistant:plotter", figure="att:00000000000000a2")
     figs = client_for(bl).get("/api/snapshot").json()["roles"]["plotter"]["figures"]
     assert [(f["figure"], f["text"]) for f in figs] == [("att:00000000000000a1", "scan 1"), ("att:00000000000000a2", "scan 2")]
+
+
+class StagingBeamline(FakeBeamline):
+    """A beamline whose provider offers nbs-gui's staging queue."""
+
+    def __init__(self):
+        super().__init__()
+        from fakes import StaticInfo
+        from nbs_agents.staging import StagingStore
+
+        self.redis = FakeRedis()
+        self.info = StaticInfo(staging=(self.redis, "bl-"))
+        self._store = StagingStore(self.redis, "bl-")
+
+    @property
+    def staging(self):
+        return self._store
+
+
+def test_staging_proposals_show_and_are_accepted_or_rejected_by_a_person():
+    import json
+
+    bl = StagingBeamline()
+    bl.redis.set("bl-staging:queue", json.dumps({"version": 2, "updated": 1.0, "updated_by": "nbs-gui:ws1:jamie", "items": [
+        {"item_uid": "a", "item_type": "plan", "name": "nbs_count", "args": [], "kwargs": {"num": 1}}]}))
+    store = bl.staging
+    add = store.propose([{"op": "add", "item": {"name": "nbs_count", "kwargs": {"num": 3}}, "after_uid": None}],
+                        "three more counts", "assistant:manager")
+    drop = store.propose([{"op": "remove", "item_uid": "a"}], "drop a", "assistant:manager")
+    client = client_for(bl)
+    snap = client.get("/api/snapshot").json()
+    assert snap["staging"]["version"] == 2
+    assert [i["item_uid"] for i in snap["staging"]["items"]] == ["a"]
+    assert {p["id"] for p in snap["staging"]["proposals"]} == {add["id"], drop["id"]}
+    assert all(p["stale"] is False for p in snap["staging"]["proposals"])
+    r = client.post(f"/api/staging/{add['id']}/decide", json={"accept": True, "by": "jamie"}, headers=ORIGIN)
+    assert r.status_code == 200
+    queue = store.queue()
+    assert queue["version"] == 3 and queue["updated_by"] == "web:jamie"
+    assert [i["kwargs"]["num"] for i in queue["items"]] == [1, 3]
+    r = client.post(f"/api/staging/{drop['id']}/decide", json={"accept": False, "by": "jamie"}, headers=ORIGIN)
+    assert r.status_code == 200 and store.get(drop["id"])["status"] == "rejected"
+    assert store.queue()["version"] == 3
+    assert client.post(f"/api/staging/{drop['id']}/decide", json={"accept": True}, headers=ORIGIN).status_code == 409
+    assert client.get("/api/snapshot").json()["staging"]["proposals"] == []
+
+
+def test_no_staging_without_a_provider():
+    client = client_for(FakeBeamline())
+    snap = client.get("/api/snapshot").json()
+    assert snap["staging"] is None and "staging" not in snap["errors"]
+    assert client.post("/api/staging/x/decide", json={"accept": True}, headers=ORIGIN).status_code == 404

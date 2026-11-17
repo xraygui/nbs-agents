@@ -20,7 +20,8 @@ Two kinds of JSON value, under the beamline Redis prefix::
          "checks": {"estimate_s": float or None, "warnings": [str], "errors": [str]},
          "decided_by": str or None, "decided_at": float or None}
 
-Only people write the queue (nbs-gui, or a person accepting a proposal);
+Only people write the queue (nbs-gui, or a person accepting a proposal with
+``StagingStore.accept``, as the web UI does);
 nbs-cli only reads it and writes proposals, which expire after
 ``PROPOSAL_TTL_S``. ``after_uid`` None means the end of the list, ``"top"``
 the start; consecutive ``add`` ops with the same ``after_uid`` land in
@@ -355,6 +356,79 @@ class StagingStore:
         proposal.update(status=status, decided_by=by, decided_at=now)
         self._write(proposal, now)
         return proposal
+
+    def accept(self, proposal_id: str, by: str, t: Optional[float] = None, tries: int = 3) -> dict[str, Any]:
+        """
+        A person accepts a pending proposal: apply its ops to the staging queue.
+
+        The ops apply to the queue as it is now, even if it changed since the
+        proposal was made, as long as every item they refer to is still there.
+        The queue write is checked against its version, as nbs-gui's are.
+
+        Parameters
+        ----------
+        proposal_id : str
+            The proposal.
+        by : str
+            Who accepts; recorded as the queue's ``updated_by`` and the
+            proposal's ``decided_by``.
+        t : float, optional
+            Time, for tests.
+        tries : int, optional
+            Attempts when another writer changes the queue meanwhile.
+
+        Returns
+        -------
+        dict
+            ``proposal`` (accepted) and ``queue`` (the new staging queue).
+
+        Raises
+        ------
+        StaleProposal
+            If an item it refers to is gone; the proposal is marked ``stale``.
+        StagingError
+            If it does not exist, is not pending, or the queue kept changing.
+        """
+        from redis.exceptions import WatchError
+
+        proposal = self.get(proposal_id)
+        if proposal is None:
+            raise StagingError(f"no staging proposal {proposal_id}")
+        if proposal.get("status") != "pending":
+            raise StagingError(f"proposal {proposal_id} is already {proposal.get('status')}")
+        for _ in range(tries):
+            now = time.time() if t is None else t
+            with self.redis.pipeline() as pipe:
+                try:
+                    pipe.watch(self.queue_key)
+                    raw = pipe.get(self.queue_key)
+                    queue = empty_queue()
+                    if raw:
+                        queue.update({k: v for k, v in json.loads(raw).items() if k in queue})
+                    fit = check_proposal(proposal, queue)
+                    if fit["stale"]:
+                        pipe.reset()
+                        self.set_status(proposal_id, "stale", by, t=now)
+                        raise StaleProposal(
+                            f"proposal {proposal_id} refers to items no longer staged: {fit['missing']}"
+                        )
+                    new = {
+                        "version": int(queue["version"] or 0) + 1,
+                        "items": apply_ops(list(queue["items"] or []), proposal["ops"]),
+                        "updated": now,
+                        "updated_by": by,
+                    }
+                    pipe.multi()
+                    pipe.set(self.queue_key, json.dumps(new, default=str))
+                    pipe.execute()
+                except WatchError:
+                    continue
+            return {"proposal": self.set_status(proposal_id, "accepted", by, t=now), "queue": new}
+        raise StagingError("the staging queue kept changing; try again")
+
+    def reject(self, proposal_id: str, by: str, t: Optional[float] = None) -> dict[str, Any]:
+        """A person rejects a pending proposal; the staging queue is not touched."""
+        return self.set_status(proposal_id, "rejected", by, t=t)
 
     def withdraw(self, proposal_id: str, by: str, t: Optional[float] = None) -> dict[str, Any]:
         """Withdraw one's own pending proposal."""
